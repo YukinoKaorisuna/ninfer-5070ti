@@ -611,6 +611,20 @@ cmake --build build --parallel --target ninfer_linear_pair_bench
 ./build/bench/ninfer_linear_pair_bench --sweep 1:128:1 --warmup 5 --repeat 30
 ```
 
+## Five-layer context K/V materialization benchmark
+
+`ninfer_context_kv_materialize_bench` measures the complete capacity-2048 DFlash2 context-cache
+state transition at the decode shapes `W=8,B=1..8`. It reports the public two-kernel direct route
+against the equivalent five-layer composition of `linear_pair`, `rmsnorm_rope`, and cyclic
+`kv_cache_append_prefix`; both routes consume the existing K/V row views of five independent
+`[6144,5120]` QKV parents. Every timed sample uses a cold cache.
+
+```bash
+cmake --build build -j --target ninfer_context_kv_materialize_bench
+./build/bench/ninfer_context_kv_materialize_bench \
+  --batches 1,2,3,4,5,6,7,8 --execution graph --warmup 10 --repeat 50
+```
+
 ## MTP exact-transform benchmark
 
 `ninfer_mtp_pack_bench` calls the public bit-exact pack or attention-split Op once per point:

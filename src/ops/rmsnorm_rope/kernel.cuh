@@ -1,7 +1,7 @@
 #pragma once
 
 #include "ops/common/dflash_rope.cuh"
-#include "ops/common/warp.cuh"
+#include "ops/rmsnorm_rope/d128.cuh"
 
 #include <cuda_bf16.h>
 
@@ -22,7 +22,6 @@ __launch_bounds__(256) __global__
     constexpr int kKeyHeads      = 8;
     constexpr int kCombinedHeads = kQueryHeads + kKeyHeads;
     constexpr int kWarps         = 8;
-    constexpr float kEpsilon     = 1.0e-6F;
 
     const int token = static_cast<int>(blockIdx.x);
 
@@ -68,34 +67,16 @@ __launch_bounds__(256) __global__
         const std::int64_t base = static_cast<std::int64_t>(token) * token_stride_pairs +
                                   static_cast<std::int64_t>(head) * kWeightPairs;
 
-        const int pair0             = lane;
-        const int pair1             = lane + 32;
-        const __nv_bfloat162 input0 = data[base + pair0];
-        const __nv_bfloat162 input1 = data[base + pair1];
-        const float2 input0_f32     = __bfloat1622float2(input0);
-        const float2 input1_f32     = __bfloat1622float2(input1);
-        float sum                   = input0_f32.x * input0_f32.x + input0_f32.y * input0_f32.y +
-                    input1_f32.x * input1_f32.x + input1_f32.y * input1_f32.y;
-        sum                          = warp_reduce_sum(sum);
-        float inverse                = lane == 0 ? rsqrtf(sum * (1.0F / 128.0F) + kEpsilon) : 0.0F;
-        inverse                      = __shfl_sync(kFullWarpMask, inverse, 0);
-        const __nv_bfloat162 weight0 = weight_cache[pair0];
-        const __nv_bfloat162 weight1 = weight_cache[pair1];
-        const float2 weight0_f32     = __bfloat1622float2(weight0);
-        const float2 weight1_f32     = __bfloat1622float2(weight1);
-        const float normalized0_x    = input0_f32.x * inverse * weight0_f32.x;
-        const float normalized0_y    = input0_f32.y * inverse * weight0_f32.y;
-        const float normalized1_x    = input1_f32.x * inverse * weight1_f32.x;
-        const float normalized1_y    = input1_f32.y * inverse * weight1_f32.y;
-        const int rotary_pair        = lane * 2;
-        const float cosine0          = cos_cache[rotary_pair];
-        const float cosine1          = cos_cache[rotary_pair + 1];
-        const float sine0            = sin_cache[rotary_pair];
-        const float sine1            = sin_cache[rotary_pair + 1];
-        data[base + pair0] = __floats2bfloat162_rn(normalized0_x * cosine0 - normalized1_x * sine0,
-                                                   normalized0_y * cosine1 - normalized1_y * sine1);
-        data[base + pair1] = __floats2bfloat162_rn(normalized1_x * cosine0 + normalized0_x * sine0,
-                                                   normalized1_y * cosine1 + normalized0_y * sine1);
+        const int pair0                          = lane;
+        const int pair1                          = lane + 32;
+        const __nv_bfloat162 input0              = data[base + pair0];
+        const __nv_bfloat162 input1              = data[base + pair1];
+        const __nv_bfloat162 weight0             = weight_cache[pair0];
+        const __nv_bfloat162 weight1             = weight_cache[pair1];
+        const detail::RmsnormRopeD128Pair output = detail::rmsnorm_rope_d128_head(
+            input0, input1, weight0, weight1, cos_cache, sin_cache, lane);
+        data[base + pair0] = output.first;
+        data[base + pair1] = output.second;
     }
 }
 

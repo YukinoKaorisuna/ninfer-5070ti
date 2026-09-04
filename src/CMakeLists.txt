@@ -97,6 +97,8 @@ add_library(ninfer_ops STATIC
   ops/launcher/vision_pos_embed.cu
   ops/rmsnorm_rope/rmsnorm_rope.cpp
   ops/rmsnorm_rope/launch.cu
+  ops/context_kv_materialize/context_kv_materialize.cpp
+  ops/context_kv_materialize/decode.cu
   # Gated DeltaNet Linear Attention core.
   ops/linear_attention/gated_delta_net/gated_delta_net.cpp
   ops/linear_attention/gated_delta_net/replay.cpp
