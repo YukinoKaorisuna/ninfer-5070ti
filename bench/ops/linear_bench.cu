@@ -41,13 +41,14 @@ namespace {
 
 constexpr double kRtx5090DramGBs          = 1792.0;
 constexpr double kRtx5090SustainedReadGBs = 1674.5;
-// NVIDIA's GB202 table reports dense/sparse pairs at boost clock. Keep accumulator precision
-// explicit: this benchmark's FP8 MMA route uses e4m3 inputs with FP32 accumulation.
-constexpr double kRtx5090Fp8Fp16AccumulateTFLOPs = 838.0;
-constexpr double kRtx5090Fp8Fp32AccumulateTFLOPs = 419.0;
-constexpr std::uint64_t kDefaultFlushBytes       = 256ULL << 20;
-constexpr int kDefaultWarmup                     = 3;
-constexpr int kDefaultRepeat                     = 20;
+// NVIDIA's GB202 table reports dense/sparse pairs at boost clock. Keep input and accumulator
+// precision explicit for the qualified Tensor Core routes below.
+constexpr double kRtx5090Fp8Fp16AccumulateTFLOPs  = 838.0;
+constexpr double kRtx5090Fp8Fp32AccumulateTFLOPs  = 419.0;
+constexpr double kRtx5090Bf16Fp32AccumulateTFLOPs = 209.5;
+constexpr std::uint64_t kDefaultFlushBytes        = 256ULL << 20;
+constexpr int kDefaultWarmup                      = 3;
+constexpr int kDefaultRepeat                      = 20;
 
 enum class TClass : std::uint8_t {
     Continuous,
@@ -539,9 +540,8 @@ std::string join_labels(const std::vector<std::string>& labels) {
 }
 
 double registered_tensor_peak_tflops(const BenchPoint& point, const char*& profile) {
-    // This mirrors the production FP8 selector. A permissive policy alone does not prove that an
-    // A8 route ran, so only the registered problem and extents currently dispatched to
-    // FP8/FP32-accumulate MMA get a Tensor Core utilization result.
+    // Report Tensor Core utilization only when the exact registered problem and extent determine
+    // that the public route executes the named MMA profile.
     const bool fp8_problem =
         (point.n == 14336 && point.k == 5120) || (point.n == 16384 && point.k == 5120) ||
         (point.n == 34816 && point.k == 5120) || (point.n == 5120 && point.k == 6144) ||
@@ -555,6 +555,11 @@ double registered_tensor_peak_tflops(const BenchPoint& point, const char*& profi
         fp8_problem && fp8_tensor_route) {
         profile = "FP8_F32ACC";
         return kRtx5090Fp8Fp32AccumulateTFLOPs;
+    }
+    if (point.qtype == QType::BF16_CTRL && point.policy == LinearPolicy::A16Only &&
+        point.n == 256 && point.k == 5120) {
+        profile = "BF16_F32ACC";
+        return kRtx5090Bf16Fp32AccumulateTFLOPs;
     }
     profile = "";
     return std::numeric_limits<double>::quiet_NaN();
@@ -718,6 +723,7 @@ void print_header() {
                 kRtx5090SustainedReadGBs);
     std::printf("# dense_fp8_tensor_tflops fp16_acc=%.1f fp32_acc=%.1f\n",
                 kRtx5090Fp8Fp16AccumulateTFLOPs, kRtx5090Fp8Fp32AccumulateTFLOPs);
+    std::printf("# dense_bf16_tensor_tflops fp32_acc=%.1f\n", kRtx5090Bf16Fp32AccumulateTFLOPs);
 }
 
 void print_results(const std::vector<Result>& results) {

@@ -163,6 +163,10 @@ int run_bf16_linear() {
     for (const std::int32_t tokens : {1, 2, 4, 8, 16, 27, 28, 32, 33, 127, 128, 129, 1024, 1536}) {
         failures += run_bf16_linear_case(output_weight, tokens);
     }
+    DeviceWeight selector_weight(make_patterned(256, 5120, 419U));
+    for (const std::int32_t tokens : {1, 7, 14, 21, 28, 35, 42, 49, 56, 64, 65, 129}) {
+        failures += run_bf16_linear_case(selector_weight, tokens);
+    }
     return failures;
 }
 

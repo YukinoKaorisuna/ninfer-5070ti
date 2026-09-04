@@ -151,6 +151,7 @@ add_library(ninfer_ops STATIC
   ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.cpp
   ops/linear/bf16/bf16_gemv.cu
   ops/linear/bf16/bf16_gemm_mma.cu
+  ops/linear/bf16/bf16_n256_k5120.cu
   ops/linear/bf16/bf16_small_t.cu
   ops/linear/bf16/bf16_dispatch.cpp
   ops/linear/fp8/fp8_format.cpp
