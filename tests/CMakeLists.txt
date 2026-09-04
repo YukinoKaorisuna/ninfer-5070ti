@@ -180,6 +180,7 @@ set(ninfer_op_tests
   residual_add
   sigmoid_mul
   rmsnorm
+  rmsnorm_pack_tail
   gated_rmsnorm
   l2norm
   gated_delta_net
