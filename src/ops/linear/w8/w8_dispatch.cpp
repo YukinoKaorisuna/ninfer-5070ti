@@ -52,6 +52,14 @@ W8Launch select_w8_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
             return launch_w8_mma_r64_c128;
         }
         break;
+    case 25600:
+        if (n == 5120) {
+            // The exact-small family is qualified continuously through T=64. Larger extents use
+            // the single R64/C128 route selected at the primary T=1024 prefill point.
+            if (t <= 64) { return launch_w8_small_t; }
+            return launch_w8_mma_r64_c128;
+        }
+        break;
     case 4096:
         switch (n) {
         case 2048:

@@ -35,7 +35,7 @@ template <int KWarps, int TileTokens, int MinBlocksPerSm, W8SmallTMmaScaleAccess
 struct W8SmallTMmaSchedule {
     static_assert(KWarps == 4 || KWarps == 8 || KWarps == 16);
     static_assert(TileTokens == 8 || TileTokens == 16 || TileTokens == 24 || TileTokens == 32 ||
-                  TileTokens == 40 || TileTokens == 48);
+                  TileTokens == 40 || TileTokens == 48 || TileTokens == 56 || TileTokens == 64);
     static_assert(MinBlocksPerSm > 0);
 
     static constexpr int kKWarps            = KWarps;
@@ -65,6 +65,7 @@ using W8MtpAttentionOutputGeometry     = W8LinearGeometry<5120, 6144>;
 using W8MtpGateUpProjectionGeometry    = W8LinearGeometry<34816, 5120>;
 using W8MtpDownProjectionGeometry      = W8LinearGeometry<5120, 17408>;
 using W835bMtpProjectionGeometry       = W8LinearGeometry<2048, 4096>;
+using W8N5120K25600Geometry            = W8LinearGeometry<5120, 25600>;
 
 inline constexpr std::int32_t kW8VocabularyFirstSmallT         = 1;
 inline constexpr std::int32_t kW8VocabularyLastSmallT          = 33;
@@ -80,6 +81,8 @@ inline constexpr std::int32_t kW8MtpDownFirstSmallT            = 1;
 inline constexpr std::int32_t kW8MtpDownLastSmallT             = 48;
 inline constexpr std::int32_t kW835bMtpProjectionFirstSmallT   = 1;
 inline constexpr std::int32_t kW835bMtpProjectionLastSmallT    = 48;
+inline constexpr std::int32_t kW8N5120K25600FirstSmallT        = 1;
+inline constexpr std::int32_t kW8N5120K25600LastSmallT         = 64;
 
 template <class Geometry, int ActiveTokens>
 struct W8LinearSmallTProductionSchedule;
@@ -211,6 +214,29 @@ struct W8LinearSmallTProductionSchedule<W835bMtpProjectionGeometry, ActiveTokens
         ActiveTokens == 4 || (ActiveTokens >= 27 && ActiveTokens <= 40) ? Cache::cg : Cache::ca;
     using Type =
         W8SmallTMmaSchedule<kKWarps, kTileTokens, kMinBlocks, kScaleAccess, kActivationCache>;
+};
+
+template <int ActiveTokens>
+struct W8LinearSmallTProductionSchedule<W8N5120K25600Geometry, ActiveTokens> {
+    static_assert(ActiveTokens >= kW8N5120K25600FirstSmallT);
+    static_assert(ActiveTokens <= kW8N5120K25600LastSmallT);
+
+    static constexpr int kTileTokens = ActiveTokens <= 8    ? 8
+                                       : ActiveTokens <= 16 ? 16
+                                       : ActiveTokens <= 24 ? 24
+                                       : ActiveTokens <= 32 ? 32
+                                       : ActiveTokens <= 40 ? 40
+                                       : ActiveTokens <= 48 ? 48
+                                       : ActiveTokens <= 56 ? 56
+                                                            : 64;
+    // RTX 5090 cold-cache winner over the complete T=1..64 interval: eight K-split warps through
+    // T=32, then four. Both regions retain two-block launch bounds; shared scale staging wins from
+    // T=5 onward while direct loads avoid its fixed cost at T=1..4.
+    static constexpr int kKWarps    = ActiveTokens <= 32 ? 8 : 4;
+    static constexpr int kMinBlocks = 2;
+    static constexpr auto kScaleAccess =
+        ActiveTokens > 4 ? W8SmallTMmaScaleAccess::Shared : W8SmallTMmaScaleAccess::Direct;
+    using Type = W8SmallTMmaSchedule<kKWarps, kTileTokens, kMinBlocks, kScaleAccess>;
 };
 
 } // namespace ninfer::ops::detail
