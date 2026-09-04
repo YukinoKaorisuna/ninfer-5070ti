@@ -537,10 +537,10 @@ cmake --build build --parallel --target ninfer_fp8_linear_add_bench
 
 `ninfer_attn_input_proj_bench` measures every registered public `attn_input_proj()` weight/shape
 contract: the 27B two-parent Q4/Q5 projection; the 35B W8 Q/K/gate/V and companion Q/K/V
-projections; and the 27B BF16, NVFP4, and T=1 FP8 single-parent Q/K/gate/V projections. Fixture
-packing and public workspace capacity queries happen before timing. Every sample and profiler
-range contains exactly one public Op call, so production owns format-specific dispatch and launch
-decomposition.
+projections; the DFlash2 W8 `[6144,5120]` Q/K/V projection; and the 27B BF16, NVFP4, and T=1 FP8
+single-parent Q/K/gate/V projections. Fixture packing and public workspace capacity queries happen
+before timing. Every sample and profiler range contains exactly one public Op call, so production
+owns format-specific dispatch and launch decomposition.
 
 ```bash
 cmake --build build --parallel --target ninfer_attn_input_proj_bench
@@ -553,6 +553,9 @@ cmake --build build --parallel --target ninfer_attn_input_proj_bench
   --cache cold --warmup 10 --profile
 ./build/bench/ninfer_attn_input_proj_bench \
   --format fp8 --fp8-policy a8 --tokens 1 \
+  --cache cold --warmup 10 --repeat 50
+./build/bench/ninfer_attn_input_proj_bench \
+  --format w8-dflash2-qkv --tokens 8,16,24,32,40,48,56,64,1024 \
   --cache cold --warmup 10 --repeat 50
 ```
 

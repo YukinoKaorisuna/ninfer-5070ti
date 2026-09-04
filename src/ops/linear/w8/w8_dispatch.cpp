@@ -21,8 +21,10 @@ W8Launch select_w8_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
             if (t <= 16) { return launch_w8_simt_r8_c8; }
             return launch_w8_mma_r32_c128;
         case 6144:
-            if (t <= 4) { return launch_w8_simt_r8_c4; }
-            if (t <= 16) { return launch_w8_simt_r8_c8; }
+            // Exact-T schedules own the DFlash2 decode interval. R32/C64 is the single bridge;
+            // R64/C128 is the measured T=1024 prefill winner.
+            if (t <= 53) { return launch_w8_small_t; }
+            if (t <= 192) { return launch_w8_mma_r32_c64; }
             return launch_w8_mma_r64_c128;
         case 14336:
             if (t <= 48) { return launch_w8_small_t; }

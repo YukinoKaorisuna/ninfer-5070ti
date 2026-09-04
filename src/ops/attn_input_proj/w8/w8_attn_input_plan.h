@@ -20,6 +20,9 @@ enum class W8AttnInputScheduleId {
     MmaR64C128,
     MmaR128C64,
     MmaR128C80,
+    DFlash2SmallT,
+    DFlash2MmaR32C64,
+    DFlash2MmaR64C128,
 };
 
 struct W8AttnInputProblem {

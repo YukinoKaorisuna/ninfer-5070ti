@@ -32,7 +32,7 @@ namespace {
 constexpr std::size_t kFlushBytes = std::size_t{256} << 20;
 constexpr double kRtx5090DramGBs  = 1792.0;
 
-enum class Format : std::uint8_t { Q4Q5, W8Qgkv, W8Qkv, Bf16, Nvfp4, Fp8, All };
+enum class Format : std::uint8_t { Q4Q5, W8Qgkv, W8Qkv, W8DFlash2Qkv, Bf16, Nvfp4, Fp8, All };
 enum class CacheMode : std::uint8_t { Cold, Warm, Both };
 enum class CacheState : std::uint8_t { Cold, Warm };
 
@@ -63,7 +63,7 @@ struct Result {
     std::fprintf(stderr,
                  "error: %s\n"
                  "usage: ninfer_attn_input_proj_bench "
-                 "[--format q4q5|w8-qgkv|w8-qkv|bf16|nvfp4|fp8|all] "
+                 "[--format q4q5|w8-qgkv|w8-qkv|w8-dflash2-qkv|bf16|nvfp4|fp8|all] "
                  "[--nvfp4-policy a16|a4] [--fp8-policy a16|a8] "
                  "[--tokens T,...] [--cache cold|warm|both] "
                  "[--warmup N] [--repeat N] [--profile] [--csv-out PATH]\n",
@@ -115,6 +115,8 @@ Options parse_options(int argc, char** argv) {
                 options.format = Format::W8Qgkv;
             else if (value == "w8-qkv")
                 options.format = Format::W8Qkv;
+            else if (value == "w8-dflash2-qkv")
+                options.format = Format::W8DFlash2Qkv;
             else if (value == "bf16")
                 options.format = Format::Bf16;
             else if (value == "nvfp4")
@@ -124,7 +126,8 @@ Options parse_options(int argc, char** argv) {
             else if (value == "all")
                 options.format = Format::All;
             else
-                usage("--format expects q4q5, w8-qgkv, w8-qkv, bf16, nvfp4, fp8, or all");
+                usage("--format expects q4q5, w8-qgkv, w8-qkv, w8-dflash2-qkv, bf16, nvfp4, "
+                      "fp8, or all");
         } else if (argument == "--nvfp4-policy") {
             const std::string_view value(next("--nvfp4-policy requires a value"));
             if (value == "a16")
@@ -339,9 +342,8 @@ void run_four_output(const Options& options, const char* format, QType qtype,
     }
 }
 
-void run_w8_qkv(const Options& options, DeviceBuffer& flush, cudaStream_t stream,
-                std::vector<Result>& results) {
-    constexpr std::int32_t hidden      = 2048;
+void run_w8_qkv(const Options& options, const char* label, std::int32_t hidden, DeviceBuffer& flush,
+                cudaStream_t stream, std::vector<Result>& results) {
     constexpr std::int32_t q_rows      = 4096;
     constexpr std::int32_t kv_rows     = 1024;
     constexpr std::int32_t parent_rows = 6144;
@@ -363,7 +365,7 @@ void run_w8_qkv(const Options& options, DeviceBuffer& flush, cudaStream_t stream
         const CacheState profile_cache =
             options.cache == CacheMode::Cold ? CacheState::Cold : CacheState::Warm;
         if (options.profile) {
-            profile_public(launch, "w8-qkv", "a16", profile_cache, flush, stream, options.warmup);
+            profile_public(launch, label, "a16", profile_cache, flush, stream, options.warmup);
             continue;
         }
         const std::uint64_t logical = weight.model_weight_bytes() + tensor_bytes(hidden, tokens) +
@@ -374,7 +376,7 @@ void run_w8_qkv(const Options& options, DeviceBuffer& flush, cudaStream_t stream
                 (options.cache == CacheMode::Warm && cache != CacheState::Warm))
                 continue;
             append_result(
-                results, "w8-qkv", "a16", tokens, cache, 0, logical, flops,
+                results, label, "a16", tokens, cache, 0, logical, flops,
                 measure_public(launch, cache, flush, stream, options.warmup, options.repeat));
         }
     }
@@ -431,7 +433,10 @@ int main(int argc, char** argv) {
                             2048, 4096, 512, 9216, weight, flush, stream, results);
         }
         if (selected(options.format, Format::W8Qkv)) {
-            run_w8_qkv(options, flush, stream, results);
+            run_w8_qkv(options, "w8-qkv", 2048, flush, stream, results);
+        }
+        if (selected(options.format, Format::W8DFlash2Qkv)) {
+            run_w8_qkv(options, "w8-dflash2-qkv", 5120, flush, stream, results);
         }
         if (selected(options.format, Format::Bf16)) {
             auto weight = bench::make_direct_bf16_weight(14336, 5120);
