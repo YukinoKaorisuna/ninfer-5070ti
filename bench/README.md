@@ -680,14 +680,20 @@ cmake --build build --parallel --target ninfer_argmax_bench ninfer_sampling_sele
 ./build/bench/ninfer_argmax_bench --shape shortlist --cols 120
 ```
 
-The G2/G3 benchmark uses physical rows 248320, valid token domain 248077, optional occurrence
-counts, batched sampling at `B=1,2,4,8`, and every MTP window `K=1..5`. With no arguments it runs
-the full greedy/stochastic matrix; individual routes are suitable for Nsight Compute capture:
+The G2/G3/G4 benchmark uses physical rows 248320 and valid token domain 248077. G2 covers optional
+occurrence counts and batched sampling at `B=1,2,4,8`; G3 covers every one-hot MTP window
+`K=1..5`. With no arguments it runs the existing G2/G3 greedy/stochastic matrix. G4 is the exact
+DFlash2 sparse-q profile with seven drafts, 16 candidates per position, `P=0..7`, and `B=1..8`.
+It reports the raw-greedy/general route, CUDA Graph node count, workspace, and cold-cache latency:
 
 ```bash
 ./build/bench/ninfer_sampling_select_bench --matrix
 ./build/bench/ninfer_sampling_select_bench --sample --batch 8 --mode stochastic --top-k 20
 ./build/bench/ninfer_sampling_select_bench --mtp --mode stochastic --mtp-k 5 --top-k 20
+./build/bench/ninfer_sampling_select_bench \
+  --dflash2 --batch 8 --extent 7 --mode greedy
+./build/bench/ninfer_sampling_select_bench \
+  --dflash2 --batch 8 --extent 7 --mode stochastic --top-k 20
 ```
 
 ## 35B dFlash causal Attention qualification

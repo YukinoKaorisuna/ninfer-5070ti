@@ -1,7 +1,8 @@
-// Qualification benchmark for Qwen3.6-35B G2 sampling and G3 MTP accept.
+// Qualification benchmark for G2 sampling, G3 one-hot accept, and G4 DFlash2 sparse-q accept.
 //
 //   ./ninfer_sampling_select_bench --sample --batch 8 --mode stochastic
 //   ./ninfer_sampling_select_bench --mtp --mode stochastic --mtp-k 5
+//   ./ninfer_sampling_select_bench --dflash2 --batch 8 --mode stochastic --extent 7
 //   ./ninfer_sampling_select_bench --matrix
 #include "core/device.h"
 #include "core/tensor.h"
@@ -25,8 +26,12 @@ using namespace ninfer::bench;
 
 namespace {
 
-constexpr std::int32_t kPhysicalRows = 248320;
-constexpr std::int32_t kTokenDomain  = 248077;
+constexpr std::int32_t kPhysicalRows      = 248320;
+constexpr std::int32_t kTokenDomain       = 248077;
+constexpr std::int32_t kDFlash2Drafts     = 7;
+constexpr std::int32_t kDFlash2Columns    = 8;
+constexpr std::int32_t kDFlash2Candidates = 16;
+constexpr std::size_t kFlushBytes         = std::size_t{256} << 20;
 
 enum class Mode {
     Greedy,
@@ -36,17 +41,20 @@ enum class Mode {
 struct Options {
     bool sample        = false;
     bool mtp           = false;
+    bool dflash2       = false;
     bool matrix        = false;
     bool counts_active = true;
     Mode mode          = Mode::Stochastic;
     int batch          = 1;
     int mtp_k          = 3;
+    int extent         = kDFlash2Drafts;
     int top_k          = 20;
 };
 
 void usage(const char* argv0) {
-    std::printf("usage: %s [--sample|--mtp|--matrix] [--mode greedy|stochastic] "
-                "[--batch 1..8] [--mtp-k 1..5] [--top-k 1..20] [--no-counts]\n",
+    std::printf("usage: %s [--sample|--mtp|--dflash2|--matrix] [--mode greedy|stochastic] "
+                "[--batch 1..8] [--mtp-k 1..5] [--extent 0..7] [--top-k 1..20] "
+                "[--no-counts]\n",
                 argv0);
 }
 
@@ -75,6 +83,8 @@ Options parse_args(int argc, char** argv) {
             options.sample = true;
         } else if (arg == "--mtp") {
             options.mtp = true;
+        } else if (arg == "--dflash2") {
+            options.dflash2 = true;
         } else if (arg == "--matrix") {
             options.matrix = true;
         } else if (arg == "--mode") {
@@ -90,6 +100,8 @@ Options parse_args(int argc, char** argv) {
             options.batch = parse_int(need_value("--batch"), "--batch");
         } else if (arg == "--mtp-k") {
             options.mtp_k = parse_int(need_value("--mtp-k"), "--mtp-k");
+        } else if (arg == "--extent") {
+            options.extent = parse_int(need_value("--extent"), "--extent");
         } else if (arg == "--top-k") {
             options.top_k = parse_int(need_value("--top-k"), "--top-k");
         } else if (arg == "--no-counts") {
@@ -101,15 +113,24 @@ Options parse_args(int argc, char** argv) {
             throw std::invalid_argument("unknown argument: " + std::string(arg));
         }
     }
-    if (!options.sample && !options.mtp && !options.matrix) { options.matrix = true; }
-    if (options.matrix && (options.sample || options.mtp)) {
-        throw std::invalid_argument("--matrix cannot be combined with --sample or --mtp");
+    if (!options.sample && !options.mtp && !options.dflash2 && !options.matrix) {
+        options.matrix = true;
+    }
+    if (options.matrix && (options.sample || options.mtp || options.dflash2)) {
+        throw std::invalid_argument(
+            "--matrix cannot be combined with --sample, --mtp, or --dflash2");
+    }
+    if (options.dflash2 && (options.sample || options.mtp)) {
+        throw std::invalid_argument("--dflash2 cannot be combined with --sample or --mtp");
     }
     if (options.mtp_k < 1 || options.mtp_k > 5) {
         throw std::invalid_argument("--mtp-k must be in [1,5]");
     }
     if (options.batch < 1 || options.batch > 8) {
         throw std::invalid_argument("--batch must be in [1,8]");
+    }
+    if (options.extent < 0 || options.extent > kDFlash2Drafts) {
+        throw std::invalid_argument("--extent must be in [0,7]");
     }
     if (options.top_k < 1 || options.top_k > 20) {
         throw std::invalid_argument("--top-k must be in [1,20]");
@@ -259,6 +280,97 @@ void run_mtp(DeviceBuffer& logits, DeviceBuffer& counts, int k, Mode mode, bool 
     print_result(label.c_str(), result);
 }
 
+void run_dflash2(DeviceBuffer& logits, DeviceBuffer& counts, int batch, int extent, Mode mode,
+                 bool counts_active, int top_k) {
+    CUDA_CHECK(cudaMemset(counts.p, 0, counts.bytes));
+    DeviceBuffer configs = make_batch_configs(counts, batch, mode, counts_active, top_k);
+
+    std::vector<std::int32_t> target_host(static_cast<std::size_t>(kDFlash2Columns) * batch);
+    std::vector<std::int32_t> draft_host(static_cast<std::size_t>(kDFlash2Drafts) * batch);
+    std::vector<std::int32_t> candidate_host(static_cast<std::size_t>(kDFlash2Candidates) *
+                                             kDFlash2Drafts * batch);
+    std::vector<float> q_host(candidate_host.size(), 0.0f);
+    for (int row = 0; row < batch; ++row) {
+        for (int column = 0; column < kDFlash2Columns; ++column) {
+            const int flat                              = row * kDFlash2Columns + column;
+            target_host[static_cast<std::size_t>(flat)] = (17 + flat * 7919) % kTokenDomain;
+        }
+        for (int draft = 0; draft < kDFlash2Drafts; ++draft) {
+            const int selected = target_host[static_cast<std::size_t>(row) * kDFlash2Columns +
+                                             static_cast<std::size_t>(draft)];
+            draft_host[static_cast<std::size_t>(row) * kDFlash2Drafts + draft] = selected;
+            const std::size_t base =
+                (static_cast<std::size_t>(row) * kDFlash2Drafts + draft) * kDFlash2Candidates;
+            for (int candidate = 0; candidate < kDFlash2Candidates; ++candidate) {
+                candidate_host[base + candidate] = (selected + candidate) % kTokenDomain;
+            }
+            q_host[base] = mode == Mode::Greedy ? 1.0f : 0.5f;
+            if (mode == Mode::Stochastic) q_host[base + 1] = 0.5f;
+        }
+    }
+
+    DeviceBuffer targets    = make_i32(target_host);
+    DeviceBuffer drafts     = make_i32(draft_host);
+    DeviceBuffer candidates = make_i32(candidate_host);
+    DeviceBuffer proposal_q(q_host.size() * sizeof(float));
+    CUDA_CHECK(cudaMemcpy(proposal_q.p, q_host.data(), proposal_q.bytes, cudaMemcpyHostToDevice));
+    DeviceBuffer extents =
+        make_i32(std::vector<std::int32_t>(static_cast<std::size_t>(batch), extent));
+    DeviceBuffer lengths =
+        make_i32(std::vector<std::int32_t>(static_cast<std::size_t>(batch), 4096));
+    DeviceBuffer anchors = make_i32(std::vector<std::int32_t>(static_cast<std::size_t>(batch), -1));
+    DeviceBuffer licensed(static_cast<std::size_t>(kDFlash2Columns) * batch * sizeof(std::int32_t));
+    DeviceBuffer licensed_counts(static_cast<std::size_t>(batch) * sizeof(std::int32_t));
+    DeviceBuffer accepted(static_cast<std::size_t>(batch) * sizeof(std::int32_t));
+
+    Tensor ttargets(targets.p, DType::I32, {kDFlash2Columns, batch});
+    Tensor tlogits(logits.p, DType::BF16, {kPhysicalRows, kDFlash2Columns, batch});
+    Tensor tdrafts(drafts.p, DType::I32, {kDFlash2Drafts, batch});
+    Tensor tcandidates(candidates.p, DType::I32, {kDFlash2Candidates, kDFlash2Drafts, batch});
+    Tensor tq(proposal_q.p, DType::FP32, {kDFlash2Candidates, kDFlash2Drafts, batch});
+    Tensor textents(extents.p, DType::I32, {batch});
+    Tensor tlengths(lengths.p, DType::I32, {batch});
+    Tensor tanchors(anchors.p, DType::I32, {batch});
+    Tensor tlicensed(licensed.p, DType::I32, {kDFlash2Columns, batch});
+    Tensor tlicensed_counts(licensed_counts.p, DType::I32, {batch});
+    Tensor taccepted(accepted.p, DType::I32, {batch});
+    const ops::SpeculativeAcceptExecutionEnvelope envelope{
+        .all_rows_greedy_without_penalties = mode == Mode::Greedy,
+    };
+    const std::size_t workspace_bytes =
+        ops::speculative_accept_sparse_drafts_workspace_capacity_bytes(kTokenDomain, envelope,
+                                                                       batch, batch);
+    WorkspaceArena workspace(std::max<std::size_t>(workspace_bytes, 256));
+    const auto* config_ptr = static_cast<const ops::SamplingConfig*>(configs.p);
+    const auto launch      = [&](cudaStream_t stream) {
+        ops::speculative_accept_sparse_drafts(
+            ttargets, tlogits, tdrafts, tcandidates, tq, textents, tlengths, tanchors, tlicensed,
+            tlicensed_counts, taccepted, kTokenDomain, config_ptr, envelope, workspace, stream);
+    };
+
+    cudaStream_t stream = nullptr;
+    CUDA_CHECK(cudaStreamCreate(&stream));
+    launch(stream);
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    TimedGraph graph;
+    graph.capture(stream, launch);
+    DeviceBuffer flush(kFlushBytes);
+    const ColdTiming timing = measure_cold_graph(graph, flush, stream, 10, 61);
+    CUDA_CHECK(cudaStreamDestroy(stream));
+
+    const bool general = !envelope.all_rows_greedy_without_penalties;
+    const double bytes =
+        general ? static_cast<double>(extent + 1) * batch * kTokenDomain *
+                      (2.0 + (counts_active ? 4.0 : 0.0))
+                : static_cast<double>(batch) * (kDFlash2Columns + kDFlash2Drafts) * 4.0;
+    const double gbps = bytes / (timing.median_us * 1.0e-6) / 1.0e9;
+    std::printf("G4 sparse B=%d P=%d %-10s route=%-10s nodes=%zu workspace=%zu "
+                "median=%8.3f us min=%8.3f us p95=%8.3f us useful=%7.1f GB/s\n",
+                batch, extent, mode == Mode::Greedy ? "greedy" : "stochastic",
+                general ? "general" : "raw_greedy", graph.nodes(), workspace_bytes,
+                timing.median_us, timing.min_us, timing.p95_us, gbps);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -270,11 +382,14 @@ int main(int argc, char** argv) {
 
     try {
         const Options options = parse_args(argc, argv);
-        const int max_cols    = options.matrix ? 8
-                                               : std::max(options.sample ? options.batch : 1,
-                                                       options.mtp ? options.mtp_k + 1 : 1);
-        DeviceBuffer logits   = make_logits(max_cols);
-        const int count_rows  = options.matrix ? 8 : (options.sample ? options.batch : 1);
+        const int max_cols =
+            options.matrix
+                ? 8
+                : std::max({options.sample ? options.batch : 1, options.mtp ? options.mtp_k + 1 : 1,
+                            options.dflash2 ? options.batch * kDFlash2Columns : 1});
+        DeviceBuffer logits = make_logits(max_cols);
+        const int count_rows =
+            options.matrix ? 8 : (options.dflash2 || options.sample ? options.batch : 1);
         DeviceBuffer counts(static_cast<std::size_t>(kTokenDomain) * count_rows *
                             sizeof(std::int32_t));
         CUDA_CHECK(cudaMemset(counts.p, 0, counts.bytes));
@@ -307,6 +422,10 @@ int main(int argc, char** argv) {
             if (options.mtp) {
                 run_mtp(logits, counts, options.mtp_k, options.mode, options.counts_active,
                         options.top_k);
+            }
+            if (options.dflash2) {
+                run_dflash2(logits, counts, options.batch, options.extent, options.mode,
+                            options.counts_active, options.top_k);
             }
         }
     } catch (const std::exception& e) {

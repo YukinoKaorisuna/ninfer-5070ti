@@ -9,6 +9,12 @@
 
 namespace ninfer::ops {
 
+struct SpeculativeAcceptExecutionEnvelope {
+    // Execution promise: every row has temperature<=0 and both penalties disabled. When false,
+    // the general route remains valid for any supported mixture of greedy and stochastic rows.
+    bool all_rows_greedy_without_penalties = false;
+};
+
 // Caller-owned transient capacity for every draft-count and batch-size pair in the inclusive
 // domains. token_domain is the fixed sampling profile; invalid domains throw.
 [[nodiscard]] std::size_t speculative_accept_greedy_drafts_workspace_capacity_bytes(
@@ -92,6 +98,63 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
                                       Tensor& licensed_counts, Tensor& accepted,
                                       std::int32_t token_domain, const SamplingConfig* configs,
                                       WorkspaceArena& workspace, cudaStream_t stream);
+
+// Caller-owned transient capacity for the exact sparse-proposal profile over every batch size in
+// the inclusive interval. The raw-greedy execution envelope requires no workspace.
+[[nodiscard]] std::size_t speculative_accept_sparse_drafts_workspace_capacity_bytes(
+    std::int32_t token_domain, SpeculativeAcceptExecutionEnvelope envelope, std::int32_t min_batch,
+    std::int32_t max_batch);
+
+/**
+ * Op: speculative_accept_sparse_drafts
+ *
+ * Algorithm:
+ *   This is the seven-draft, 16-candidate sparse-proposal form of speculative rejection sampling.
+ *   For row b, only target columns 0..P are live, where P=current_extents[b]. Greedy rows accept
+ *   the longest draft prefix matching the penalty-adjusted target argmax and then emit that argmax
+ *   as correction/bonus. Positive-temperature rows build the target distribution p with the
+ *   sampling.h penalty/filter semantics, accept draft d at each live draft column with probability
+ *   min(1,p(d)/q(d)), and on first rejection sample from normalized max(p-q,0). If all P drafts are
+ *   accepted, the final token is sampled from target column P.
+ *
+ * Logical shapes and registered profile:
+ *   All Tensor storage is contiguous. target_tokens/licensed_tokens are I32 [8,B], logits is BF16
+ *   [248320,8,B], drafts is I32 [7,B], candidate_ids is I32 [16,7,B], proposal_q is FP32
+ *   [16,7,B], and current_extents/round_lengths/round_anchors/licensed_counts/accepted_drafts are
+ *   I32 [B]. The registered domain is token_domain=248077 and B=1..8. For each live draft row,
+ *   candidate ids are distinct global ids in [0,token_domain), proposal_q is the normalized FP32
+ *   distribution used to draw that draft, and the draft occurs in that row with positive q.
+ *
+ * Numeric:
+ *   proposal_q is consumed directly; it is not reconstructed from selector scores or expanded to
+ *   a dense vocabulary distribution. Target logits are interpreted through sampling.h. Column i's
+ *   penalty overlay is drafts[0..i-1], because the column is consumed only after that prefix was
+ *   accepted. RNG purposes are the existing speculative accept/correction/bonus domains and use
+ *   logical positions derived from the old round length.
+ *
+ * Effects:
+ *   Let A be the accepted draft count and L=A+1. licensed_tokens[0:A,b] receives accepted drafts,
+ *   licensed_tokens[A,b] receives the correction/bonus token, and the physical tail is zero.
+ *   licensed_counts[b]=L, accepted_drafts[b]=A, round_anchors[b] becomes the correction/bonus
+ *   token, and round_lengths[b]+=L. These length/anchor values are provisional round buffers.
+ *   configs and configs[b].token_counts are read-only; persistent token counts and model state are
+ *   committed only after the caller chooses a final prefix of the licensed output. All other
+ *   inputs remain unchanged.
+ *
+ * Execution:
+ *   all_rows_greedy_without_penalties=true promises the matching device configs and enables the
+ *   raw target_tokens route. A false promise selects the general route and supports mixed rows.
+ *
+ * Workspace:
+ *   Caller-owned transient storage reported by
+ *   speculative_accept_sparse_drafts_workspace_capacity_bytes().
+ */
+void speculative_accept_sparse_drafts(
+    const Tensor& target_tokens, const Tensor& logits, const Tensor& drafts,
+    const Tensor& candidate_ids, const Tensor& proposal_q, const Tensor& current_extents,
+    Tensor& round_lengths, Tensor& round_anchors, Tensor& licensed_tokens, Tensor& licensed_counts,
+    Tensor& accepted_drafts, std::int32_t token_domain, const SamplingConfig* configs,
+    SpeculativeAcceptExecutionEnvelope envelope, WorkspaceArena& workspace, cudaStream_t stream);
 
 /**
  * Op: speculative_select_accepted_hidden
