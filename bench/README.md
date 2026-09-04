@@ -194,6 +194,19 @@ cmake --build build --parallel --target ninfer_gdn_gating_proj_bench
   -p 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16 --warmup 10 --repeat 200
 ```
 
+## Dynamic grouped-convolution prepare Op benchmark
+
+`ninfer_dynamic_grouped_conv_prepare_bench` measures the complete BF16
+`rmsnorm_dynamic_grouped_conv_prepare` contract at every registered `B=1..8`. Each timed call
+includes RMSNorm, the `[1280,5120]` coefficient projection, the input-side two-tap grouped
+convolution, and both public output writes. Every sample follows a 256 MiB L2 eviction; the report
+contains complete-Op latency, useful coefficient-projection TFLOP/s, and exact workspace capacity.
+
+```bash
+cmake --build build -j --target ninfer_dynamic_grouped_conv_prepare_bench
+./build/bench/ninfer_dynamic_grouped_conv_prepare_bench --warmup 10 --repeat 80
+```
+
 ## Gated DeltaNet Op benchmark
 
 `ninfer_gated_delta_net_bench` measures the BF16 Gated DeltaNet contract with state/head dimension

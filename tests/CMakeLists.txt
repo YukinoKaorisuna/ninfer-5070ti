@@ -256,6 +256,9 @@ ninfer_add_op_test(ninfer_attn_input_proj_test
 ninfer_add_op_test(ninfer_gdn_input_proj_test
   SOURCES ops/test_gdn_input_proj.cpp
   LIBRARIES ninfer_ops)
+ninfer_add_op_test(ninfer_dynamic_grouped_conv_prepare_test
+  SOURCES ops/test_dynamic_grouped_conv_prepare.cpp
+  LIBRARIES ninfer_ops)
 ninfer_add_op_test(ninfer_gdn_input_proj_conv_snapshot_test
   SOURCES ops/test_gdn_input_proj_conv_snapshot.cpp
   LIBRARIES ninfer_ops)
