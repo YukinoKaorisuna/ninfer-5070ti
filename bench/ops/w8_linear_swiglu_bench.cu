@@ -1,4 +1,4 @@
-// Cold-cache benchmark and candidate tuner for the Qwen3.6-35B-A3B W8 LinearSwiGLU Op.
+// Cold-cache benchmark for registered W8 LinearSwiGLU profiles and the companion candidate set.
 
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/linear_swiglu.h"
@@ -28,18 +28,24 @@ using namespace ninfer;
 
 namespace {
 
-constexpr std::int32_t kGateUpRows = 12288;
-constexpr std::int32_t kOutputRows = 6144;
-constexpr std::int32_t kHidden     = 2048;
-constexpr std::size_t kFlushBytes  = 256ULL << 20;
+constexpr std::size_t kFlushBytes = 256ULL << 20;
+
+struct Problem {
+    const char* name;
+    std::int32_t gate_up_rows;
+    std::int32_t output_rows;
+    std::int32_t hidden;
+};
+
+constexpr Problem kCompanion{"companion", 12288, 6144, 2048};
+constexpr Problem kDFlash2{"dflash2", 34816, 17408, 5120};
 
 struct Options {
-    std::vector<std::int32_t> t_sweep{
-        1,  2,  3,  4,  5,  6,  7,  8,  9,  10,  11,  12,  13,  14,  15,  16,  17,  24,  31,  32,
-        33, 48, 63, 64, 65, 80, 95, 96, 97, 127, 128, 129, 192, 256, 384, 512, 768, 896, 1024};
+    std::vector<std::int32_t> t_sweep;
     int warmup = 5;
     int repeat = 30;
     std::string csv_out;
+    std::string problem  = kCompanion.name;
     bool profile         = false;
     bool production_only = false;
 };
@@ -79,6 +85,8 @@ Options parse_options(int argc, char** argv) {
         };
         if (arg == "--t-sweep") {
             options.t_sweep = parse_t_sweep(next("--t-sweep value"));
+        } else if (arg == "--problem") {
+            options.problem = next("--problem value");
         } else if (arg == "--warmup") {
             options.warmup = std::stoi(std::string(next("--warmup value")));
         } else if (arg == "--repeat") {
@@ -90,8 +98,9 @@ Options parse_options(int argc, char** argv) {
         } else if (arg == "--production-only") {
             options.production_only = true;
         } else if (arg == "--help" || arg == "-h") {
-            std::printf("Usage: %s [--t-sweep 1,2,...] [--warmup N] [--repeat N] "
-                        "[--csv-out PATH] [--profile] [--production-only]\n",
+            std::printf("Usage: %s [--problem companion|dflash2] [--t-sweep 1,2,...] "
+                        "[--warmup N] [--repeat N] [--csv-out PATH] [--profile] "
+                        "[--production-only]\n",
                         argv[0]);
             std::exit(0);
         } else {
@@ -101,17 +110,33 @@ Options parse_options(int argc, char** argv) {
     if (options.warmup < 0 || options.repeat <= 0) {
         throw std::invalid_argument("--warmup must be nonnegative and --repeat positive");
     }
+    if (options.problem != kCompanion.name && options.problem != kDFlash2.name) {
+        throw std::invalid_argument("--problem must be companion or dflash2");
+    }
+    if (options.t_sweep.empty()) {
+        if (options.problem == kDFlash2.name) {
+            options.t_sweep = {8, 16, 24, 32, 40, 48, 56, 64, 65, 96, 97, 1024};
+        } else {
+            options.t_sweep = {
+                1,  2,  3,  4,   5,   6,   7,   8,   9,   10,  11,  12,  13,
+                14, 15, 16, 17,  24,  31,  32,  33,  48,  63,  64,  65,  80,
+                95, 96, 97, 127, 128, 129, 192, 256, 384, 512, 768, 896, 1024,
+            };
+        }
+    }
     if (options.profile && options.t_sweep.size() != 1) {
         throw std::invalid_argument("--profile requires exactly one T");
     }
     return options;
 }
 
-void append(std::vector<Result>& results, const char* path, std::int32_t t,
+void append(std::vector<Result>& results, const Problem& problem, const char* path, std::int32_t t,
             bench::ColdTiming timing, std::size_t weight_bytes) {
-    const double useful_flops = 2.0 * kGateUpRows * kHidden * static_cast<double>(t);
+    const double useful_flops =
+        2.0 * problem.gate_up_rows * problem.hidden * static_cast<double>(t);
     const double useful_bytes =
-        static_cast<double>(weight_bytes) + 2.0 * static_cast<double>((kHidden + kOutputRows) * t);
+        static_cast<double>(weight_bytes) +
+        2.0 * static_cast<double>((problem.hidden + problem.output_rows) * t);
     const double tflops = useful_flops / timing.median_us / 1.0e6;
     const double gbs    = useful_bytes / timing.median_us / 1.0e3;
     std::printf("T=%-4d %-24s median=%8.3f us  useful=%7.2f TFLOP/s %7.1f GB/s\n", t, path,
@@ -124,11 +149,11 @@ void write_csv(const Options& options, const std::vector<Result>& results) {
     const std::filesystem::path path(options.csv_out);
     if (!path.parent_path().empty()) { std::filesystem::create_directories(path.parent_path()); }
     std::ofstream out(path);
-    out << "path,T,median_us,min_us,p95_us,warmup,repeat\n";
+    out << "problem,path,T,median_us,min_us,p95_us,warmup,repeat\n";
     for (const Result& result : results) {
-        out << result.path << ',' << result.t << ',' << result.timing.median_us << ','
-            << result.timing.min_us << ',' << result.timing.p95_us << ',' << options.warmup << ','
-            << options.repeat << '\n';
+        out << options.problem << ',' << result.path << ',' << result.t << ','
+            << result.timing.median_us << ',' << result.timing.min_us << ',' << result.timing.p95_us
+            << ',' << options.warmup << ',' << options.repeat << '\n';
     }
 }
 
@@ -136,27 +161,30 @@ void write_csv(const Options& options, const std::vector<Result>& results) {
 
 int main(int argc, char** argv) {
     try {
-        const Options options = parse_options(argc, argv);
+        const Options options  = parse_options(argc, argv);
+        const Problem& problem = options.problem == kDFlash2.name ? kDFlash2 : kCompanion;
         const std::int32_t max_t =
             *std::max_element(options.t_sweep.begin(), options.t_sweep.end());
 
         cudaStream_t stream = nullptr;
         CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
         ninfer::DeviceBuffer flush(kFlushBytes);
-        ninfer::DeviceBuffer input = bench::make_bf16(static_cast<std::size_t>(kHidden) * max_t);
-        ninfer::DeviceBuffer output(static_cast<std::size_t>(kOutputRows) * max_t * 2);
-        ninfer::DeviceBuffer gate_up(static_cast<std::size_t>(kGateUpRows) * max_t * 2);
-        bench::PackedQuantizedWeight packed = bench::make_row_split_weight(
-            QType::W8G32_F16S, kGateUpRows, kHidden, kHidden, {0x31, 0x00, 0x3c00});
+        ninfer::DeviceBuffer input =
+            bench::make_bf16(static_cast<std::size_t>(problem.hidden) * max_t);
+        ninfer::DeviceBuffer output(static_cast<std::size_t>(problem.output_rows) * max_t * 2);
+        ninfer::DeviceBuffer gate_up(static_cast<std::size_t>(problem.gate_up_rows) * max_t * 2);
+        bench::PackedQuantizedWeight packed =
+            bench::make_row_split_weight(QType::W8G32_F16S, problem.gate_up_rows, problem.hidden,
+                                         problem.hidden, {0x31, 0x00, 0x3c00});
         WorkspaceArena workspace(1);
         std::vector<Result> results;
 
         for (const std::int32_t t : options.t_sweep) {
-            Tensor x(input.p, DType::BF16, {kHidden, t});
-            Tensor out(output.p, DType::BF16, {kOutputRows, t});
-            Tensor parent(gate_up.p, DType::BF16, {kGateUpRows, t});
+            Tensor x(input.p, DType::BF16, {problem.hidden, t});
+            Tensor out(output.p, DType::BF16, {problem.output_rows, t});
+            Tensor parent(gate_up.p, DType::BF16, {problem.gate_up_rows, t});
             const auto plan = ops::detail::w8_linear_swiglu_resolve_plan(
-                {kGateUpRows, kOutputRows, kHidden, kHidden, t});
+                {problem.gate_up_rows, problem.output_rows, problem.hidden, problem.hidden, t});
 
             if (options.profile) {
                 ops::linear_swiglu(x, packed.weight, out, workspace, stream);
@@ -167,7 +195,7 @@ int main(int argc, char** argv) {
             }
 
             const auto run = [&](const char* path, auto&& launch) {
-                append(results, path, t,
+                append(results, problem, path, t,
                        bench::measure_cold_launch(launch, flush, stream, options.warmup,
                                                   options.repeat),
                        packed.storage.bytes);
@@ -176,14 +204,15 @@ int main(int argc, char** argv) {
                 [&](cudaStream_t candidate_stream) {
                     ops::linear_swiglu(x, packed.weight, out, workspace, candidate_stream);
                 });
-            if (options.production_only) { continue; }
+            if (options.production_only || options.problem == kDFlash2.name) { continue; }
 
             run("composed.linear+silu", [&](cudaStream_t candidate_stream) {
                 ops::linear(x, packed.weight, parent, candidate_stream);
-                ops::silu_mul(parent.slice(0, 0, kOutputRows),
-                              parent.slice(0, kOutputRows, kOutputRows), out, candidate_stream);
+                ops::silu_mul(parent.slice(0, 0, problem.output_rows),
+                              parent.slice(0, problem.output_rows, problem.output_rows), out,
+                              candidate_stream);
             });
-            if (t == 1) {
+            if (options.problem == kCompanion.name && t == 1) {
                 run("decode_pair_r4", [&](cudaStream_t candidate_stream) {
                     ops::detail::w8_linear_swiglu_decode_pair_r4_launch(x, packed.weight, out,
                                                                         candidate_stream);
@@ -197,7 +226,7 @@ int main(int argc, char** argv) {
                                                                          candidate_stream);
                 });
             }
-            if (t >= 2 && t <= 48) {
+            if (options.problem == kCompanion.name && t >= 2 && t <= 48) {
                 run("splitk_mma_exact_t", [&](cudaStream_t candidate_stream) {
                     ops::detail::w8_linear_swiglu_splitk_exact_t_launch(x, packed.weight, out,
                                                                         candidate_stream);

@@ -51,8 +51,9 @@ int w8_a16_conformance() {
                           {14336, 5120, 229U, Comparison::Sampled, false, kN14336K5120});
 
     constexpr std::array kN34816K5120{
-        a16(1),  a16(4),  a16(5),  a16(8),  a16(9),  a16(15), a16(16), a16(17), a16(21),  a16(22),
-        a16(24), a16(25), a16(32), a16(33), a16(40), a16(41), a16(48), a16(49), a16(128),
+        a16(1),  a16(4),  a16(5),  a16(8),  a16(9),  a16(15), a16(16),  a16(17),
+        a16(21), a16(22), a16(24), a16(25), a16(32), a16(33), a16(40),  a16(41),
+        a16(48), a16(49), a16(52), a16(53), a16(64), a16(65), a16(128),
     };
     failures += run_shape("W8_A16", ActivationCompute::A16, make_w8g32_f16s_weight,
                           {34816, 5120, 233U, Comparison::Sampled, false, kN34816K5120});

@@ -17,7 +17,7 @@ struct RouteSpec {
     W8LinearSwiGluScheduleId schedule;
 };
 
-constexpr std::array<RouteSpec, 18> kRoutes{{
+constexpr std::array<RouteSpec, 18> kCompanionRoutes{{
     {1, 1, W8LinearSwiGluScheduleId::DecodePairR16},
     {2, 48, W8LinearSwiGluScheduleId::SplitKMmaExactT},
     {49, 64, W8LinearSwiGluScheduleId::MmaR32C64},
@@ -38,20 +38,44 @@ constexpr std::array<RouteSpec, 18> kRoutes{{
     {561, kAnyCols, W8LinearSwiGluScheduleId::MmaR64C128},
 }};
 
-constexpr bool catalog_is_closed() {
+// RTX 5090 cold-cache routes: exact small-T owns the product points through T=48, R32/C64 owns
+// T=56, and a full R128/C64 tile owns T=64. R64/C96 is the single bridge into the
+// T=1024-centered R64/C128 prefill route.
+constexpr std::array<RouteSpec, 5> kDFlash2Routes{{
+    {1, 51, W8LinearSwiGluScheduleId::DFlash2SmallT},
+    {52, 63, W8LinearSwiGluScheduleId::DFlash2MmaR32C64},
+    {64, 64, W8LinearSwiGluScheduleId::DFlash2MmaR128C64},
+    {65, 96, W8LinearSwiGluScheduleId::DFlash2MmaR64C96},
+    {97, kAnyCols, W8LinearSwiGluScheduleId::DFlash2MmaR64C128},
+}};
+
+template <std::size_t N>
+constexpr bool catalog_is_closed(const std::array<RouteSpec, N>& routes) {
     std::int64_t expected = 1;
-    for (const RouteSpec& route : kRoutes) {
+    for (const RouteSpec& route : routes) {
         if (route.first != expected || route.first > route.last) { return false; }
         expected = static_cast<std::int64_t>(route.last) + 1;
     }
     return expected == static_cast<std::int64_t>(kAnyCols) + 1;
 }
 
-static_assert(catalog_is_closed(), "W8 LinearSwiGLU routes must be exact and closed");
+static_assert(catalog_is_closed(kCompanionRoutes),
+              "W8 companion LinearSwiGLU routes must be exact and closed");
+static_assert(catalog_is_closed(kDFlash2Routes),
+              "W8 DFlash2 LinearSwiGLU routes must be exact and closed");
 
-bool supported_shape(const W8LinearSwiGluProblem& problem) noexcept {
+bool is_companion_shape(const W8LinearSwiGluProblem& problem) noexcept {
     return problem.gate_up_rows == 12288 && problem.output_rows == 6144 && problem.k == 2048 &&
            problem.padded_k == 2048;
+}
+
+bool is_dflash2_shape(const W8LinearSwiGluProblem& problem) noexcept {
+    return problem.gate_up_rows == 34816 && problem.output_rows == 17408 && problem.k == 5120 &&
+           problem.padded_k == 5120;
+}
+
+bool supported_shape(const W8LinearSwiGluProblem& problem) noexcept {
+    return is_companion_shape(problem) || is_dflash2_shape(problem);
 }
 
 } // namespace
@@ -80,6 +104,16 @@ const char* w8_linear_swiglu_schedule_name(W8LinearSwiGluScheduleId schedule) no
         return "linear_swiglu.w8.mma.pair.r64.c64";
     case W8LinearSwiGluScheduleId::MmaR128C80:
         return "linear_swiglu.w8.mma.pair.r64.c80";
+    case W8LinearSwiGluScheduleId::DFlash2SmallT:
+        return "linear_swiglu.w8.dflash2.small_t";
+    case W8LinearSwiGluScheduleId::DFlash2MmaR32C64:
+        return "linear_swiglu.w8.dflash2.mma.pair.r16.c64";
+    case W8LinearSwiGluScheduleId::DFlash2MmaR128C64:
+        return "linear_swiglu.w8.dflash2.mma.pair.r64.c64";
+    case W8LinearSwiGluScheduleId::DFlash2MmaR64C96:
+        return "linear_swiglu.w8.dflash2.mma.pair.r32.c96";
+    case W8LinearSwiGluScheduleId::DFlash2MmaR64C128:
+        return "linear_swiglu.w8.dflash2.mma.pair.r32.c128";
     }
     return "linear_swiglu.w8.unknown";
 }
@@ -97,10 +131,16 @@ W8LinearSwiGluPlan w8_linear_swiglu_resolve_plan(const W8LinearSwiGluProblem& pr
         throw std::invalid_argument(
             "W8 LinearSwiGLU: exact problem or column count is not admitted");
     }
-    for (const RouteSpec& route : kRoutes) {
-        if (problem.cols >= route.first && problem.cols <= route.last) { return {route.schedule}; }
-    }
-    throw std::logic_error("W8 LinearSwiGLU: admitted problem has no route");
+    const auto resolve_from = [&](const auto& routes) -> W8LinearSwiGluPlan {
+        for (const RouteSpec& route : routes) {
+            if (problem.cols >= route.first && problem.cols <= route.last) {
+                return {route.schedule};
+            }
+        }
+        throw std::logic_error("W8 LinearSwiGLU: admitted problem has no route");
+    };
+    if (is_dflash2_shape(problem)) { return resolve_from(kDFlash2Routes); }
+    return resolve_from(kCompanionRoutes);
 }
 
 void w8_linear_swiglu_execute_plan(const W8LinearSwiGluPlan& plan, const Tensor& x, const Weight& w,
@@ -143,6 +183,21 @@ void w8_linear_swiglu_execute_plan(const W8LinearSwiGluPlan& plan, const Tensor&
         return;
     case W8LinearSwiGluScheduleId::MmaR128C80:
         w8_linear_swiglu_mma_r128_c80_launch(x, w, out, stream);
+        return;
+    case W8LinearSwiGluScheduleId::DFlash2SmallT:
+        w8_dflash2_linear_swiglu_small_t_launch(x, w, out, stream);
+        return;
+    case W8LinearSwiGluScheduleId::DFlash2MmaR32C64:
+        w8_linear_swiglu_mma_r32_c64_launch(x, w, out, stream);
+        return;
+    case W8LinearSwiGluScheduleId::DFlash2MmaR128C64:
+        w8_linear_swiglu_mma_r128_c64_launch(x, w, out, stream);
+        return;
+    case W8LinearSwiGluScheduleId::DFlash2MmaR64C96:
+        w8_linear_swiglu_mma_r64_c96_launch(x, w, out, stream);
+        return;
+    case W8LinearSwiGluScheduleId::DFlash2MmaR64C128:
+        w8_linear_swiglu_mma_r64_c128_launch(x, w, out, stream);
         return;
     }
     throw std::logic_error("W8 LinearSwiGLU: unknown schedule");

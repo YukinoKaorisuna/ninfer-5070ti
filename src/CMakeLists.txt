@@ -209,6 +209,7 @@ add_library(ninfer_ops STATIC
   ops/linear_swiglu/fp8/fp8_linear_swiglu_a8.cu
   ops/linear_swiglu/fp8/fp8_linear_swiglu_plan.cpp
   ops/linear_swiglu/w8/w8_linear_swiglu_decode.cu
+  ops/linear_swiglu/w8/w8_dflash2_linear_swiglu.cu
   ops/linear_swiglu/w8/w8_linear_swiglu_gemm_mma.cu
   ops/linear_swiglu/w8/w8_linear_swiglu_gemm_splitk.cu
   ops/linear_swiglu/w8/w8_linear_swiglu_plan.cpp

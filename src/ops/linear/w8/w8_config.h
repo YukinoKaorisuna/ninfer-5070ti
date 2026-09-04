@@ -77,7 +77,7 @@ inline constexpr std::int32_t kW8MtpAttentionLastSmallT        = 48;
 inline constexpr std::int32_t kW8MtpAttentionOutputFirstSmallT = 1;
 inline constexpr std::int32_t kW8MtpAttentionOutputLastSmallT  = 48;
 inline constexpr std::int32_t kW8MtpGateUpFirstSmallT          = 1;
-inline constexpr std::int32_t kW8MtpGateUpLastSmallT           = 40;
+inline constexpr std::int32_t kW8MtpGateUpLastSmallT           = 52;
 inline constexpr std::int32_t kW8MtpDownFirstSmallT            = 1;
 inline constexpr std::int32_t kW8MtpDownLastSmallT             = 48;
 inline constexpr std::int32_t kW835bMtpProjectionFirstSmallT   = 1;
@@ -168,7 +168,9 @@ struct W8LinearSmallTProductionSchedule<W8MtpGateUpProjectionGeometry, ActiveTok
                                        : ActiveTokens <= 16 ? 16
                                        : ActiveTokens <= 24 ? 24
                                        : ActiveTokens <= 32 ? 32
-                                                            : 40;
+                                       : ActiveTokens <= 40 ? 40
+                                       : ActiveTokens <= 48 ? 48
+                                                            : 56;
     static constexpr int kKWarps     = ActiveTokens >= 22 && ActiveTokens <= 24 ? 8 : 4;
     static constexpr auto kScaleAccess =
         ActiveTokens > 4 ? W8SmallTMmaScaleAccess::Shared : W8SmallTMmaScaleAccess::Direct;

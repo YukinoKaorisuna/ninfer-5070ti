@@ -215,19 +215,19 @@ int verify_unchanged(std::string_view label, const test::GuardedDeviceBuffer& de
 }
 
 void validate_profile(const Profile& profile) {
-    const bool q3 = profile.qtype == QType::Q3G64_F16S && profile.gate_up_rows == 34816 &&
-                     profile.input_rows == 5120 && profile.output_rows == 17408;
-
     const bool q4 = profile.qtype == QType::Q4G64_F16S && profile.gate_up_rows == 34816 &&
                     profile.input_rows == 5120 && profile.output_rows == 17408;
-    const bool w8 = profile.qtype == QType::W8G32_F16S && profile.gate_up_rows == 12288 &&
-                    profile.input_rows == 2048 && profile.output_rows == 6144;
+    const bool w8_companion = profile.qtype == QType::W8G32_F16S && profile.gate_up_rows == 12288 &&
+                              profile.input_rows == 2048 && profile.output_rows == 6144;
+    const bool w8_dflash2 = profile.qtype == QType::W8G32_F16S && profile.gate_up_rows == 34816 &&
+                            profile.input_rows == 5120 && profile.output_rows == 17408;
     const bool nvfp4 = profile.qtype == QType::NVFP4 && profile.gate_up_rows == 34816 &&
                        profile.input_rows == 5120 && profile.output_rows == 17408;
     const bool fp8 = profile.qtype == QType::FP8_E4M3FN_ROW_BF16S &&
                      profile.gate_up_rows == 34816 && profile.input_rows == 5120 &&
                      profile.output_rows == 17408;
-    if ((!q3 && !q4 && !w8 && !nvfp4 && !fp8) || profile.gate_up_rows != 2 * profile.output_rows) {
+    if ((!q4 && !w8_companion && !w8_dflash2 && !nvfp4 && !fp8) ||
+        profile.gate_up_rows != 2 * profile.output_rows) {
         throw std::invalid_argument("linear_swiglu test: profile is not registered");
     }
     if ((nvfp4 && profile.activation_compute != ActivationCompute::A16 &&
