@@ -157,6 +157,23 @@ bytes with the measured `1674.5 GB/s` pure-read ceiling from `tools/hbm_bandwidt
 the practical utilization measure for read-dominated points. Physical traffic and instruction
 utilization still require NCU.
 
+## LinearTopK Op benchmark
+
+`ninfer_linear_topk_bench` measures the complete public projection-plus-stable-top-16 Op for the
+W8 and row-FP8 full heads and the mapped Q4 optimized head. The supported batch values are
+`B=1..8`, corresponding exactly to `T=7B`; the timed interval includes projection, partial-key
+reduction, and final ids/scores publication. Every sample uses a 256 MiB L2 eviction write before
+timing. The reported bandwidth counts the encoded head once, while useful FLOPs use the rows that
+participate in candidate selection.
+
+```bash
+cmake --build build -j --target ninfer_linear_topk_bench
+./build/bench/ninfer_linear_topk_bench
+./build/bench/ninfer_linear_topk_bench w8-full 1
+./build/bench/ninfer_linear_topk_bench fp8-full 8
+./build/bench/ninfer_linear_topk_bench q4-optimized 4
+```
+
 ## Embedding Op benchmark
 
 `ninfer_embedding_bench` measures the public quantized embedding profiles: Q6 `[248320,5120]`,

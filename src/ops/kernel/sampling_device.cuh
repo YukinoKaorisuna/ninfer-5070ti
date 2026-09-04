@@ -7,6 +7,7 @@
 
 #include "ops/common/math.h"
 #include "ops/common/sampling_workspace.h"
+#include "ops/common/score_id_order.cuh"
 #include "ninfer/ops/sampling.h"
 
 #include <cub/block/block_merge_sort.cuh>
@@ -111,18 +112,8 @@ __device__ __forceinline__ bool sampling_worse_than(float v, int i, float pv, in
     return pv > v || (pv == v && pi < i);
 }
 
-__device__ __forceinline__ unsigned int sampling_ordered_float(float v) {
-    // Numeric equality, including +0 == -0, must reach the token-id tie break.
-    // Canonicalizing zero prevents the IEEE sign bit from ranking +0 above -0.
-    if (v == 0.0f) { v = 0.0f; }
-    const unsigned int bits = __float_as_uint(v);
-    return (bits & 0x80000000u) ? ~bits : (bits ^ 0x80000000u);
-}
-
 __device__ __forceinline__ unsigned long long sampling_sort_key(float v, int idx) {
-    if (idx == INT_MAX) { return 0ull; }
-    return (static_cast<unsigned long long>(sampling_ordered_float(v)) << 32) |
-           static_cast<unsigned int>(0xffffffffu - static_cast<unsigned int>(idx));
+    return score_id_order_key(v, idx);
 }
 
 __device__ __forceinline__ unsigned int sampling_bf16_tile_sort_key(__nv_bfloat16 v,
@@ -145,14 +136,11 @@ __device__ __forceinline__ unsigned long long sampling_expand_bf16_tile_sort_key
 }
 
 __device__ __forceinline__ float sampling_key_float(unsigned long long key) {
-    const unsigned int ordered = static_cast<unsigned int>(key >> 32);
-    const unsigned int bits    = (ordered & 0x80000000u) ? (ordered ^ 0x80000000u) : ~ordered;
-    return __uint_as_float(bits);
+    return score_from_order_key(key);
 }
 
 __device__ __forceinline__ int sampling_key_index(unsigned long long key) {
-    if (key == 0ull) { return INT_MAX; }
-    return static_cast<int>(0xffffffffu - static_cast<unsigned int>(key));
+    return id_from_order_key(key);
 }
 
 __device__ __forceinline__ int sampling_candidate_cap(const SamplingConfig& cfg,

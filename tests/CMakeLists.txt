@@ -204,6 +204,10 @@ foreach(op IN LISTS ninfer_op_tests)
     LIBRARIES ninfer_ops)
 endforeach()
 
+ninfer_add_op_test(ninfer_linear_topk_test
+  SOURCES ops/test_linear_topk.cu
+  LIBRARIES ninfer_ops)
+
 # Stateful, fused, and exact-shape Ops remain central even when the current implementation domain
 # is one checkpoint/device.
 ninfer_add_op_test(ninfer_gqa_attention_test

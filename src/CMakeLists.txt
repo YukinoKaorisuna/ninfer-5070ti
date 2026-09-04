@@ -240,6 +240,16 @@ add_library(ninfer_ops STATIC
   ops/linear_pair/w8/w8_pair_gemm_mma.cu
   ops/linear_pair/w8/w8_pair_gemm_splitk.cu
   ops/linear_pair/w8/w8_pair_plan.cpp
+  ops/linear_topk/linear_topk.cpp
+  ops/linear_topk/w8.cu
+  ops/linear_topk/w8_grouped_ksplit.cu
+  ops/linear_topk/w8_m64.cu
+  ops/linear_topk/fp8.cu
+  ops/linear_topk/fp8_grouped_ksplit.cu
+  ops/linear_topk/fp8_m64.cu
+  ops/linear_topk/q4.cu
+  ops/linear_topk/q4_m64.cu
+  ops/linear_topk/merge.cu
   ops/sparse_moe/decode/sparse_moe_decode_kernels.cu
   ops/sparse_moe/decode/sparse_moe_decode_plan.cpp
   ops/sparse_moe/prefill/sparse_moe_prefill_kernels.cu
