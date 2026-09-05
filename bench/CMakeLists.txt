@@ -20,6 +20,8 @@ ninfer_add_op_bench(ninfer_gdn_gating_bench SOURCES ops/gdn_gating_bench.cu)
 ninfer_add_op_bench(ninfer_gdn_gating_proj_bench SOURCES ops/gdn_gating_proj_bench.cu)
 ninfer_add_op_bench(ninfer_dynamic_grouped_conv_prepare_bench
   SOURCES ops/dynamic_grouped_conv_prepare_bench.cu)
+ninfer_add_op_bench(ninfer_linear_dynamic_grouped_conv_add_bench
+  SOURCES ops/linear_dynamic_grouped_conv_add_bench.cu)
 ninfer_add_op_bench(ninfer_gated_delta_net_bench SOURCES ops/gated_delta_net_bench.cu)
 ninfer_add_op_bench(ninfer_gdn_replay_bench SOURCES ops/gdn_replay_bench.cu)
 ninfer_add_op_bench(ninfer_gdn_layer_bench SOURCES ops/gdn_layer_bench.cu)

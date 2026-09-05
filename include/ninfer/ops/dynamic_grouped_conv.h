@@ -64,4 +64,51 @@ void rmsnorm_dynamic_grouped_conv_prepare(const Tensor& residual, const Tensor& 
                                           Tensor& finish_delta, WorkspaceArena& workspace,
                                           cudaStream_t stream);
 
+/**
+ * Returns the transient capacity required by linear_dynamic_grouped_conv_add for every batch size
+ * in the inclusive interval. input_rows must be 4096 or 17408 and both batch endpoints must lie in
+ * [1,8].
+ */
+[[nodiscard]] std::size_t linear_dynamic_grouped_conv_add_workspace_capacity_bytes(
+    std::int32_t input_rows, std::int32_t min_batch_size, std::int32_t max_batch_size);
+
+/**
+ * Op: linear_dynamic_grouped_conv_add
+ *
+ * Math / indexing:
+ *   H=5120, W=8, group width 16, G=320. Let C be 4096 or 17408 and h=16*g+j:
+ *
+ *     z[h,i,b] = sum_c projection_weight[h,c] * x[c,i,b]
+ *
+ *     residual[h,i,b] +=
+ *         (base_kernel[h,0,1] + finish_delta[g,0,i,b]) * z[h,i,b]
+ *       + I(i>0) * (base_kernel[h,1,1] + finish_delta[g,1,i,b]) * z[h,i-1,b].
+ *
+ * Logical shapes / supported domain:
+ *   x is contiguous BF16 [C,8,B]; projection_weight is W8G32_F16S RowSplit [5120,C] with
+ *   unpadded C; base_kernel is contiguous BF16 [5120,2,2] with axes [channel,tap,side];
+ *   finish_delta is contiguous BF16 [320,2,8,B]; and residual is contiguous BF16 [5120,8,B].
+ *   B is in [1,8]. Position zero has no previous-tap contribution: the Op never reads another
+ *   request or an earlier round.
+ *
+ * Numeric:
+ *   The oracle decodes each signed W8 value with its stored FP16 group scale and evaluates the
+ *   complete formula in FP64 from represented inputs. The projection is a private intermediate;
+ *   the contract does not prescribe its storage or arithmetic precision. The implementation
+ *   writes the final residual in BF16.
+ *
+ * Effects:
+ *   Updates every element of residual in place and preserves x, projection_weight, base_kernel,
+ *   and finish_delta. All operand storage, both weight planes, and live workspace must be pairwise
+ *   non-overlapping. The Op has no persistent state side effect.
+ *
+ * Workspace:
+ *   Caller-owned call-scoped storage sized by the capacity query above. The implementation does
+ *   not allocate or retain device memory.
+ */
+void linear_dynamic_grouped_conv_add(const Tensor& x, const Weight& projection_weight,
+                                     const Tensor& base_kernel, const Tensor& finish_delta,
+                                     Tensor& residual, WorkspaceArena& workspace,
+                                     cudaStream_t stream);
+
 } // namespace ninfer::ops
