@@ -3,6 +3,7 @@
 #include <array>
 #include <exception>
 #include <iostream>
+#include <vector>
 
 namespace {
 
@@ -11,6 +12,19 @@ using namespace ninfer::test::linear;
 constexpr Invocation a16(std::int32_t t) { return {t}; }
 
 constexpr Invocation convenience(std::int32_t t) { return {t, CallForm::A16Convenience}; }
+
+int feature_conformance() {
+    std::vector<Invocation> calls;
+    for (int t = 1; t <= 128; ++t) calls.push_back(a16(t));
+    for (int t : {129, 256, 257, 1000, 1024, 2048, 2049}) calls.push_back(a16(t));
+    for (int t : {1, 56, 57, 64, 65, 128, 129}) calls.push_back(convenience(t));
+    for (int t : {64, 65, 128})
+        calls.push_back({t, CallForm::Policy, ninfer::ops::LinearPolicy::AllowA8});
+    for (int t : {2, 8, 16, 32, 56, 57, 64, 65, 96, 97, 127, 128, 129, 2048})
+        calls.push_back({t, CallForm::Policy, ninfer::ops::LinearPolicy::A16Only, true});
+    return run_shape("W8_A16_feature", ActivationCompute::A16, make_w8g32_f16s_weight,
+                     {5120, 25600, 293U, Comparison::Sampled, true, calls});
+}
 
 int w8_a16_conformance() {
     int failures = 0;
@@ -139,13 +153,7 @@ int w8_a16_conformance() {
     failures += run_shape("W8_A16", ActivationCompute::A16, make_w8g32_f16s_weight,
                           {2048, 16384, 283U, Comparison::Sampled, false, kN2048K16384});
 
-    constexpr std::array kN5120K25600{
-        convenience(1), a16(4),  a16(5),  a16(8),  a16(9),  a16(16),   a16(17),
-        a16(24),        a16(25), a16(32), a16(33), a16(40), a16(41),   a16(48),
-        a16(49),        a16(56), a16(57), a16(64), a16(65), a16(1000), a16(1024),
-    };
-    failures += run_shape("W8_A16", ActivationCompute::A16, make_w8g32_f16s_weight,
-                          {5120, 25600, 293U, Comparison::Sampled, false, kN5120K25600});
+    failures += feature_conformance();
 
     return failures;
 }

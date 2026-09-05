@@ -84,7 +84,7 @@ inline constexpr std::int32_t kW8MtpDownLastSmallT             = 48;
 inline constexpr std::int32_t kW835bMtpProjectionFirstSmallT   = 1;
 inline constexpr std::int32_t kW835bMtpProjectionLastSmallT    = 48;
 inline constexpr std::int32_t kW8N5120K25600FirstSmallT        = 1;
-inline constexpr std::int32_t kW8N5120K25600LastSmallT         = 64;
+inline constexpr std::int32_t kW8N5120K25600LastSmallT         = 56;
 inline constexpr std::int32_t kW8DFlash2AttentionFirstSmallT   = 1;
 inline constexpr std::int32_t kW8DFlash2AttentionLastSmallT    = 53;
 

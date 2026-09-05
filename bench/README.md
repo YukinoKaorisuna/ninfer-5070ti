@@ -138,6 +138,11 @@ ncu --profile-from-start off --set full \
   --qtype q4 --policy a16 --n 4096 --k 5120 --t 8 --profile
 ```
 
+`--execution eager` (default) times the complete public call with CUDA events;
+`--execution graph` captures that same call and times one replay. Both include every kernel the
+Op emits. CSV records `execution` and, for Graph measurements, `graph_nodes`; the terminal header
+also records execution mode and CUDA runtime. `--profile` follows the selected execution mode.
+
 Every ordinary sample is cold-cache: a 256 MiB L2 eviction write completes before the timed
 interval. Reported effective bandwidth uses the encoded weight planes once, one BF16 activation
 read, and one BF16 output write. Reported FLOPs are the mathematical `2*N*K*T`; neither metric
