@@ -72,7 +72,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--media-preprocess-threads N] "
            "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
-           "[--kv-dtype bf16|int8|q4] [--spec mtp|dflash --draft-tokens N] "
+           "[--kv-dtype bf16|int8|q4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] "
            "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] [--cors] "

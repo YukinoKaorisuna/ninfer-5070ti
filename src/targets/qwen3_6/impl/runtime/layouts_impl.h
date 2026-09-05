@@ -743,6 +743,11 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
             throw std::invalid_argument("DFlash and Vision cannot be enabled together");
         }
         break;
+    case SpeculativeBackend::DFlash2:
+        if (options.speculative.draft_tokens != 7) {
+            throw std::invalid_argument("DFlash2 requires draft_tokens=7");
+        }
+        throw std::invalid_argument("DFlash2 execution is not implemented");
     }
     if (device.sm() != 120) {
         throw std::invalid_argument("Qwen3.6 family runtime requires compute capability 12.0");
