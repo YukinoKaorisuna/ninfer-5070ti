@@ -156,26 +156,31 @@ utilization still require NCU.
 
 ## Embedding Op benchmark
 
-`ninfer_embedding_bench` measures the four registered quantized public `embedding()` profiles:
-Q6 `[248320,5120]`, W8 `[248320,5120]`, W8 `[248320,2048]`, and row-scaled FP8
-`[248320,5120]`. With no token override, each profile enumerates its exact aggregate Decode domain
-for `B=1..8`: the three D=5120 profiles cover ordinary Decode and MTP through `T=48`, while
-W8/D=2048 additionally covers DFlash through `T=128`.
+`ninfer_embedding_bench` measures the public quantized embedding profiles: Q6 `[248320,5120]`,
+W8 `[248320,5120]`, W8 `[248320,2048]`, and row-scaled FP8 `[248320,5120]`. The default sweep is
+T=1..128; `--tokens` selects other matrix extents. This is an Op column domain, independent of a
+particular speculative algorithm's draft count.
 
-Each interval contains one public Op call and receives one 256 MiB L2 eviction before timing; the
-eviction itself is excluded. Effective bandwidth counts the selected encoded rows, their scales,
-the I32 ids, and BF16 output once, and `READ_%` uses the measured RTX 5090 sustained-read reference.
-There are no repeated-T=1 comparisons, private launchers, forced routes, candidate kernels, or
-copied controls in this benchmark.
+The fixture initializes nonuniform valid code planes and positive stored scales at the complete
+registered table shape. `--id-pattern normal` uses tokenizer-addressable IDs. `masked` generates
+an anchor followed by masks at the explicit `--block-width` period: 248070 for D=5120 and 248077
+for existing W8/D=2048. Use T=B*W to measure complete proposal blocks. CSV reports unique IDs,
+logical per-token bytes, execution/cache mode, Graph nodes/calls, scratch, and median/min/p95.
+
+Each default interval contains one public Op. Cold mode evicts 256 MiB of L2 before timing;
+`--graph-calls 32 --execution graph --cache warm` measures repeated public calls in one Graph and
+normalizes per call. A cold bundle flushes only before its first call. `--profile` uses one public
+call of one format and one extent for kernel profiling.
 
 ```bash
-cmake --build build --parallel --target ninfer_embedding_bench
-./build/bench/ninfer_embedding_bench --profile q6-d5120 --warmup 10 --repeat 61
-./build/bench/ninfer_embedding_bench --profile w8-d5120 --warmup 10 --repeat 61
-./build/bench/ninfer_embedding_bench --profile w8-d2048 --warmup 10 --repeat 61
-./build/bench/ninfer_embedding_bench --profile fp8-d5120 --warmup 10 --repeat 61
-./build/bench/ninfer_embedding_bench \
-  --profile w8-d2048 --tokens 1,6,7,16,128 --warmup 10 --repeat 61 --csv
+cmake --build build -j --target ninfer_embedding_bench
+./build/bench/ninfer_embedding_bench --format w8-d5120 --execution graph --cache cold
+./build/bench/ninfer_embedding_bench --format fp8-d5120 \
+  --tokens 8,16,24,32,40,48,56,64 --id-pattern masked --block-width 8
+./build/bench/ninfer_embedding_bench --format fp8-d5120 \
+  --tokens 16,32,48,64,80,96,112,128 --id-pattern masked --block-width 16 \
+  --cache warm --graph-calls 32 --csv-out /tmp/embedding.csv
+./build/bench/ninfer_embedding_bench --format fp8-d5120 --tokens 128 --profile
 ```
 
 ## GDN control-projection Op benchmark
