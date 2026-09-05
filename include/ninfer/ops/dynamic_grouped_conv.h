@@ -12,17 +12,18 @@ namespace ninfer::ops {
 
 /**
  * Returns the transient capacity required by rmsnorm_dynamic_grouped_conv_prepare for every
- * batch size in the inclusive interval. Both endpoints must lie in [1,8].
+ * width/batch pair in the inclusive intervals. Width endpoints lie in [2,16], batch endpoints
+ * in [1,8]. Capacity covers every shape-selected route in the requested domain.
  */
-[[nodiscard]] std::size_t
-rmsnorm_dynamic_grouped_conv_prepare_workspace_capacity_bytes(std::int32_t min_batch_size,
-                                                              std::int32_t max_batch_size);
+[[nodiscard]] std::size_t rmsnorm_dynamic_grouped_conv_prepare_workspace_capacity_bytes(
+    std::int32_t min_width, std::int32_t max_width, std::int32_t min_batch_size,
+    std::int32_t max_batch_size);
 
 /**
  * Op: rmsnorm_dynamic_grouped_conv_prepare
  *
  * Math / indexing:
- *   H=5120, W=8, group width 16, G=320, sides=2, taps=2. For h=16*g+j:
+ *   H=5120, W=2..16, group width 16, G=320, sides=2, taps=2. For h=16*g+j:
  *
  *     inv[i,b] = rsqrt(sum_h residual[h,i,b]^2 / H + eps)
  *     n[h,i,b] = residual[h,i,b] * inv[i,b] * norm_weight[h]
@@ -36,10 +37,10 @@ rmsnorm_dynamic_grouped_conv_prepare_workspace_capacity_bytes(std::int32_t min_b
  *     finish_delta[g,t,i,b] = d[1,t,g,i,b].
  *
  * Logical shapes / supported domain:
- *   residual/prepared are contiguous BF16 [5120,8,B], B is in [1,8]; norm_weight is contiguous
- *   BF16 [5120]; base_kernel is the runtime view BF16 [5120,2,2] with axes
- *   [channel,tap,side]; kernel_projection_weight is contiguous BF16_CTRL [1280,5120]; and
- *   finish_delta is contiguous BF16 [320,2,8,B]. eps is positive and finite. Position zero has
+ *   residual/prepared are contiguous BF16 [5120,W,B], W is in [2,16] and B in [1,8];
+ *   norm_weight is contiguous BF16 [5120]. base_kernel is the runtime view BF16 [5120,2,2] with
+ * axes [channel,tap,side]; kernel_projection_weight is contiguous BF16_CTRL [1280,5120]; and
+ *   finish_delta is contiguous BF16 [320,2,W,B]. eps is positive and finite. Position zero has
  *   no previous-tap contribution: the Op never reads another request or an earlier round.
  *
  * Numeric:

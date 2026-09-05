@@ -1,202 +1,138 @@
 #include "ops/dynamic_grouped_conv/bf16/bf16_dynamic_grouped_conv_prepare_kernels.h"
-
 #include "core/device.h"
 #include "ops/common/memory.cuh"
 #include "ops/common/mma.cuh"
 #include "ops/common/rowsplit_mma.cuh"
-
 #include <cuda_bf16.h>
-
-#include <cstdint>
 #include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
-
-constexpr int kHidden          = 5120;
-constexpr int kWidth           = 8;
-constexpr int kCoefficientRows = 1280;
-constexpr int kBlockRows       = 16;
-constexpr int kBlockK          = 64;
-constexpr int kStages          = 2;
-constexpr int kRowTiles        = kCoefficientRows / kBlockRows;
-static_assert(kCoefficientRows % kBlockRows == 0);
-static_assert(kHidden % kBlockK == 0);
+constexpr int kHidden = 5120, kCoefficientRows = 1280, kBlockK = 64, kStages = 2;
 
 __device__ __forceinline__ int shared_col(int row, int col) { return gemm_swz64(row, col); }
 
-template <int BatchSize, int SplitK>
-__global__ __launch_bounds__(BatchSize * 32, 1) void dynamic_grouped_conv_prepare_partial_kernel(
-    const __nv_bfloat16* __restrict__ normalized,
-    const __nv_bfloat16* __restrict__ kernel_projection, float* __restrict__ projection_partial) {
-    static_assert(BatchSize >= 1 && BatchSize <= 8);
-    static_assert(SplitK == 4 || SplitK == 8);
-    constexpr int kTokens         = BatchSize * kWidth;
-    constexpr int kThreads        = BatchSize * 32;
-    constexpr int kKTiles         = kHidden / kBlockK;
-    constexpr int kTilesPerSplit  = kKTiles / SplitK;
-    constexpr int kMmaKFragments  = kBlockK / 16;
-    constexpr int kWeightVecs     = kBlockRows * (kBlockK / 8);
-    constexpr int kActivationVecs = kTokens * (kBlockK / 8);
-    static_assert(kKTiles % SplitK == 0);
+template <int Rows, int Columns>
+struct Tile {
+    static constexpr int column_warps = Rows == 16 ? Columns / 8 : 4;
+    static constexpr int threads      = Rows / 16 * column_warps * 32;
+    static constexpr int mmas         = Columns / column_warps / 8;
+};
 
-    __shared__ __align__(16) __nv_bfloat16 weight_shared[kStages][kBlockRows * kBlockK];
-    __shared__ __align__(16) __nv_bfloat16 activation_shared[kStages][kTokens * kBlockK];
-
-    const int tid       = static_cast<int>(threadIdx.x);
-    const int warp      = tid >> 5;
-    const int lane      = tid & 31;
-    const int gid       = lane >> 2;
-    const int lid       = lane & 3;
-    const int row_tile  = static_cast<int>(blockIdx.x);
-    const int split     = static_cast<int>(blockIdx.z);
-    const int row_begin = row_tile * kBlockRows;
-    const int kt_begin  = split * kTilesPerSplit;
-
-    float accumulator[4] = {};
-
-    auto stage_inputs = [&](int stage, int kt) {
-        const int k_begin = kt * kBlockK;
-        for (int item = tid; item < kWeightVecs; item += kThreads) {
-            const int row   = item / (kBlockK / 8);
-            const int k_vec = item - row * (kBlockK / 8);
-            const int kk    = k_vec * 8;
-            cp_async<16, Cache::cg>(
-                &weight_shared[stage][row * kBlockK + shared_col(row, kk)],
-                &kernel_projection[static_cast<std::int64_t>(row_begin + row) * kHidden + k_begin +
-                                   kk]);
+template <int Rows, int Columns, int SplitK>
+__global__
+__launch_bounds__(Tile<Rows, Columns>::threads, 1) void dynamic_grouped_conv_prepare_partial_kernel(
+    const __nv_bfloat16* __restrict__ input, const __nv_bfloat16* __restrict__ weight,
+    float* __restrict__ partial, int tokens) {
+    constexpr int threads         = Tile<Rows, Columns>::threads;
+    constexpr int mmas            = Tile<Rows, Columns>::mmas;
+    constexpr int tiles_per_split = kHidden / kBlockK / SplitK;
+    __shared__ __align__(16) __nv_bfloat16 ws[kStages][Rows * kBlockK];
+    __shared__ __align__(16) __nv_bfloat16 xs[kStages][Columns * kBlockK];
+    const int tid = threadIdx.x, warp = tid / 32, lane = tid % 32, gid = lane / 4, lid = lane % 4;
+    const int row0 = blockIdx.x * Rows, col0 = blockIdx.y * Columns, split = blockIdx.z;
+    const int warp_row = warp / Tile<Rows, Columns>::column_warps;
+    const int warp_col = warp % Tile<Rows, Columns>::column_warps;
+    const int kt_begin = split * tiles_per_split;
+    float acc[mmas][4] = {};
+    auto stage_inputs  = [&](int stage, int kt) {
+        for (int item = tid; item < Rows * (kBlockK / 8); item += threads) {
+            int row = item / (kBlockK / 8), kk = item % (kBlockK / 8) * 8;
+            cp_async<16, Cache::cg>(&ws[stage][row * kBlockK + shared_col(row, kk)],
+                                     weight + static_cast<std::int64_t>(row0 + row) * kHidden +
+                                         kt * kBlockK + kk);
         }
-
-        for (int item = tid; item < kActivationVecs; item += kThreads) {
-            const int token = item / (kBlockK / 8);
-            const int k_vec = item - token * (kBlockK / 8);
-            const int kk    = k_vec * 8;
-            cp_async<16, Cache::cg>(
-                &activation_shared[stage][token * kBlockK + shared_col(token, kk)],
-                &normalized[static_cast<std::int64_t>(token) * kHidden + k_begin + kk]);
+        for (int item = tid; item < Columns * (kBlockK / 8); item += threads) {
+            int col = item / (kBlockK / 8), kk = item % (kBlockK / 8) * 8;
+            const int safe_col = col0 + col < tokens ? col0 + col : 0;
+            cp_async_zfill<16, Cache::cg>(&xs[stage][col * kBlockK + shared_col(col, kk)],
+                                           input + static_cast<std::int64_t>(safe_col) * kHidden +
+                                               kt * kBlockK + kk,
+                                          col0 + col < tokens ? 16 : 0);
         }
     };
-
-#pragma unroll
     for (int stage = 0; stage < kStages; ++stage) {
         stage_inputs(stage, kt_begin + stage);
         cp_commit();
     }
-
-    const int a_matrix     = lane >> 3;
-    const int a_inner_row  = lane & 7;
-    const int a_row_offset = a_inner_row + ((a_matrix & 1) << 3);
-    const int a_col_offset = (a_matrix >> 1) << 3;
-    const int b_inner_row  = lane & 7;
-    const int b_k_offset   = ((lane >> 3) & 1) << 3;
-
 #pragma unroll 1
-    for (int tile = 0; tile < kTilesPerSplit; ++tile) {
-        const int stage = tile & (kStages - 1);
-        if (tile + kStages <= kTilesPerSplit) {
+    for (int tile = 0; tile < tiles_per_split; ++tile) {
+        const int stage = tile % kStages;
+        if (tile + kStages <= tiles_per_split) {
             cp_wait<kStages - 1>();
         } else {
             cp_wait<0>();
         }
         __syncthreads();
-
 #pragma unroll
-        for (int ki = 0; ki < kMmaKFragments; ++ki) {
-            unsigned a_frag[4];
-            unsigned b_frag[2];
-            const int a_row = a_row_offset;
-            const int a_col = ki * 16 + a_col_offset;
-            const int b_row = warp * kWidth + b_inner_row;
-            const int b_col = ki * 16 + b_k_offset;
-            ldmatrix_x4(
-                a_frag[0], a_frag[1], a_frag[2], a_frag[3],
-                smem_addr(&weight_shared[stage][a_row * kBlockK + shared_col(a_row, a_col)]));
-            ldmatrix_x2(
-                b_frag[0], b_frag[1],
-                smem_addr(&activation_shared[stage][b_row * kBlockK + shared_col(b_row, b_col)]));
-            mma_bf16(accumulator[0], accumulator[1], accumulator[2], accumulator[3], a_frag[0],
-                     a_frag[1], a_frag[2], a_frag[3], b_frag[0], b_frag[1]);
+        for (int ki = 0; ki < kBlockK / 16; ++ki) {
+            unsigned a[4];
+            const int ar = warp_row * 16 + (lane & 7) + (((lane >> 3) & 1) * 8);
+            const int ak = ki * 16 + (lane >> 4) * 8;
+            ldmatrix_x4(a[0], a[1], a[2], a[3],
+                        smem_addr(&ws[stage][ar * kBlockK + shared_col(ar, ak)]));
+#pragma unroll
+            for (int m = 0; m < mmas; ++m) {
+                unsigned b[2];
+                const int br = (warp_col * mmas + m) * 8 + (lane & 7);
+                const int bk = ki * 16 + ((lane >> 3) & 1) * 8;
+                ldmatrix_x2(b[0], b[1], smem_addr(&xs[stage][br * kBlockK + shared_col(br, bk)]));
+                mma_bf16(acc[m][0], acc[m][1], acc[m][2], acc[m][3], a[0], a[1], a[2], a[3], b[0],
+                         b[1]);
+            }
         }
-
         __syncthreads();
-        const int next = tile + kStages;
-        if (next < kTilesPerSplit) { stage_inputs(stage, kt_begin + next); }
+        if (tile + kStages < tiles_per_split) stage_inputs(stage, kt_begin + tile + kStages);
         cp_commit();
     }
-
-    const int row0           = row_begin + gid;
-    const int row1           = row0 + 8;
-    const int token0         = warp * kWidth + 2 * lid;
-    const int token1         = token0 + 1;
-    const auto store_partial = [&](int row, int token, float value) {
-        const std::int64_t offset =
-            (static_cast<std::int64_t>(split) * kTokens + token) * kCoefficientRows + row;
-        projection_partial[offset] = value;
-    };
-    store_partial(row0, token0, accumulator[0]);
-    store_partial(row0, token1, accumulator[1]);
-    store_partial(row1, token0, accumulator[2]);
-    store_partial(row1, token1, accumulator[3]);
+#pragma unroll
+    for (int m = 0; m < mmas; ++m) {
+        const int row = row0 + warp_row * 16 + gid,
+                  col = col0 + (warp_col * mmas + m) * 8 + 2 * lid;
+        auto put      = [&](int r, int c, float value) {
+            if (c < tokens)
+                partial[(static_cast<std::int64_t>(split) * tokens + c) * kCoefficientRows + r] =
+                    value;
+        };
+        put(row, col, acc[m][0]);
+        put(row, col + 1, acc[m][1]);
+        put(row + 8, col, acc[m][2]);
+        put(row + 8, col + 1, acc[m][3]);
+    }
 }
 
-template <int BatchSize, int SplitK>
-void launch(const Tensor& normalized, const Weight& kernel_projection_weight,
-            float* projection_partial, cudaStream_t stream) {
-    static_assert(BatchSize >= 1 && BatchSize <= 8);
-    const dim3 grid(kRowTiles, 1u, SplitK);
-    dynamic_grouped_conv_prepare_partial_kernel<BatchSize, SplitK>
-        <<<grid, BatchSize * 32, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(normalized.data),
-            static_cast<const __nv_bfloat16*>(kernel_projection_weight.qdata), projection_partial);
+template <int R, int C, int S>
+void launch(const Tensor& input, const Weight& weight, float* partial, cudaStream_t stream) {
+    const int tokens = input.ne[1] * input.ne[2];
+    const dim3 grid(kCoefficientRows / R, (tokens + C - 1) / C, S);
+    dynamic_grouped_conv_prepare_partial_kernel<R, C, S><<<grid, Tile<R, C>::threads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(input.data),
+        static_cast<const __nv_bfloat16*>(weight.qdata), partial, tokens);
     CUDA_CHECK(cudaGetLastError());
 }
-
 } // namespace
 
-void bf16_dynamic_grouped_conv_prepare_partial_launch(std::int32_t split_k,
-                                                      const Tensor& normalized,
-                                                      const Weight& kernel_projection_weight,
-                                                      float* projection_partial,
-                                                      cudaStream_t stream) {
-    switch (split_k) {
-    case 4:
-        if (normalized.ne[2] == 7) {
-            launch<7, 4>(normalized, kernel_projection_weight, projection_partial, stream);
-            return;
+void bf16_dynamic_grouped_conv_prepare_partial_launch(DynamicConvPrepareRoute route,
+                                                      const Tensor& input, const Weight& weight,
+                                                      float* partial, cudaStream_t stream) {
+    if (route.rows == 16 && route.split_k == 8) {
+        switch (route.columns) {
+#define COL(C)                                                                                     \
+    case C:                                                                                        \
+        return launch<16, C, 8>(input, weight, partial, stream)
+            COL(8);
+            COL(16);
+            COL(24);
+            COL(32);
+            COL(40);
+            COL(48);
+#undef COL
         }
-        if (normalized.ne[2] == 8) {
-            launch<8, 4>(normalized, kernel_projection_weight, projection_partial, stream);
-            return;
-        }
-        break;
-    case 8:
-        switch (normalized.ne[2]) {
-        case 1:
-            launch<1, 8>(normalized, kernel_projection_weight, projection_partial, stream);
-            return;
-        case 2:
-            launch<2, 8>(normalized, kernel_projection_weight, projection_partial, stream);
-            return;
-        case 3:
-            launch<3, 8>(normalized, kernel_projection_weight, projection_partial, stream);
-            return;
-        case 4:
-            launch<4, 8>(normalized, kernel_projection_weight, projection_partial, stream);
-            return;
-        case 5:
-            launch<5, 8>(normalized, kernel_projection_weight, projection_partial, stream);
-            return;
-        case 6:
-            launch<6, 8>(normalized, kernel_projection_weight, projection_partial, stream);
-            return;
-        default:
-            break;
-        }
-        break;
-    default:
-        break;
     }
-    throw std::invalid_argument("dynamic grouped conv prepare: unsupported production route");
+    if (route.rows == 32 && route.split_k == 4) {
+        if (route.columns == 32) return launch<32, 32, 4>(input, weight, partial, stream);
+        if (route.columns == 64) return launch<32, 64, 4>(input, weight, partial, stream);
+    }
+    throw std::logic_error("dynamic grouped conv prepare: invalid production tile");
 }
-
 } // namespace ninfer::ops::detail

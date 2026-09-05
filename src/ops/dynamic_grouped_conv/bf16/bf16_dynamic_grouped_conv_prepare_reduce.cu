@@ -1,111 +1,85 @@
 #include "ops/dynamic_grouped_conv/bf16/bf16_dynamic_grouped_conv_prepare_kernels.h"
-
 #include "core/device.h"
-
 #include <cuda_bf16.h>
-
-#include <cstdint>
 #include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
-
-constexpr int kHidden          = 5120;
-constexpr int kWidth           = 8;
-constexpr int kGroups          = 320;
-constexpr int kTaps            = 2;
-constexpr int kCoefficientRows = 1280;
-constexpr int kThreads         = 128;
-
-template <int SplitK>
-__global__ __launch_bounds__(kThreads, 4) void dynamic_grouped_conv_prepare_reduce_kernel(
-    const __nv_bfloat16* __restrict__ base_kernel, const float* __restrict__ projection_partial,
-    __nv_bfloat16* __restrict__ prepared, __nv_bfloat16* __restrict__ finish_delta,
-    int batch_size) {
-    static_assert(SplitK == 4 || SplitK == 8);
-    __shared__ float projected[4][kWidth];
-    __shared__ __nv_bfloat16 normalized[kWidth][16];
-
-    const int tid   = static_cast<int>(threadIdx.x);
-    const int group = static_cast<int>(blockIdx.x);
-    const int batch = static_cast<int>(blockIdx.y);
-
-    if (tid < 4 * kWidth) {
-        const int coefficient = tid / kWidth;
-        const int position    = tid - coefficient * kWidth;
-        const int parent_row  = coefficient * kGroups + group;
-        float value           = 0.0F;
-#pragma unroll
-        for (int split = 0; split < SplitK; ++split) {
-            const std::int64_t offset =
-                ((static_cast<std::int64_t>(split) * batch_size + batch) * kWidth + position) *
-                    kCoefficientRows +
-                parent_row;
-            value += projection_partial[offset];
-        }
-        projected[coefficient][position] = value;
+template <int Width>
+__global__
+__launch_bounds__(Width <= 8 ? 128 : 256, 4) void dynamic_grouped_conv_prepare_reduce_kernel(
+    const __nv_bfloat16* base, const float* partial, __nv_bfloat16* prepared, __nv_bfloat16* finish,
+    int batch_size, int splits) {
+    __shared__ float projected[4][Width];
+    __shared__ float normalized[Width][16];
+    const int tid = threadIdx.x, group = blockIdx.x, batch = blockIdx.y;
+    const int tokens = Width * batch_size;
+    if (tid < 4 * Width) {
+        const int coefficient = tid / Width, position = tid % Width,
+                  row = coefficient * 320 + group;
+        float sum     = 0;
+        for (int split = 0; split < splits; ++split)
+            sum += partial[(static_cast<std::int64_t>(split) * tokens + batch * Width + position) *
+                               1280 +
+                           row];
+        projected[coefficient][position] = sum;
     }
-
-    const int position = tid / 16;
-    const int channel  = tid - position * 16;
-    const int hidden   = group * 16 + channel;
-    const std::int64_t current_offset =
-        static_cast<std::int64_t>(batch * kWidth + position) * kHidden + hidden;
-    normalized[position][channel] = prepared[current_offset];
+    const int position = tid / 16, channel = tid % 16, hidden = group * 16 + channel;
+    const std::int64_t offset = static_cast<std::int64_t>(batch * Width + position) * 5120 + hidden;
+    if (position < Width) { normalized[position][channel] = __bfloat162float(prepared[offset]); }
     __syncthreads();
-
-    if (tid < 2 * kWidth) {
-        const int tap      = tid / kWidth;
-        const int position = tid - tap * kWidth;
-        const float delta  = projected[2 + tap][position];
-        const std::int64_t offset =
-            ((static_cast<std::int64_t>(batch) * kWidth + position) * kTaps + tap) * kGroups +
-            group;
-        finish_delta[offset] = __float2bfloat16_rn(delta);
+    if (tid < 2 * Width) {
+        const int tap = tid / Width, pos = tid % Width;
+        finish[((batch * Width + pos) * 2 + tap) * 320 + group] =
+            __float2bfloat16_rn(projected[2 + tap][pos]);
     }
-
-    const float current = __bfloat162float(normalized[position][channel]);
-    const float delta0  = projected[0][position];
-    const float delta1  = projected[1][position];
-    const float base0   = __bfloat162float(base_kernel[hidden]);
-    const float base1   = __bfloat162float(base_kernel[kHidden + hidden]);
-    float output        = (base0 + delta0) * current;
-    if (position > 0) {
-        const float previous = __bfloat162float(normalized[position - 1][channel]);
-        output               = fmaf(base1 + delta1, previous, output);
+    if (position < Width) {
+        float value = (__bfloat162float(base[hidden]) + projected[0][position]) *
+                      normalized[position][channel];
+        if (position > 0)
+            value = fmaf(__bfloat162float(base[5120 + hidden]) + projected[1][position],
+                         normalized[position - 1][channel], value);
+        prepared[offset] = __float2bfloat16_rn(value);
     }
-    prepared[current_offset] = __float2bfloat16_rn(output);
 }
 
-template <int SplitK>
-void launch(const Tensor& base_kernel, const float* projection_partial, Tensor& prepared,
-            Tensor& finish_delta, cudaStream_t stream) {
-    const int batch_size = prepared.ne[2];
-    const dim3 grid(kGroups, static_cast<unsigned>(batch_size), 1u);
-    dynamic_grouped_conv_prepare_reduce_kernel<SplitK><<<grid, kThreads, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(base_kernel.data), projection_partial,
-        static_cast<__nv_bfloat16*>(prepared.data), static_cast<__nv_bfloat16*>(finish_delta.data),
-        batch_size);
+template <int W>
+void launch(DynamicConvPrepareRoute route, const Tensor& base, const float* partial,
+            Tensor& prepared, Tensor& finish, cudaStream_t stream) {
+    const dim3 grid(320, prepared.ne[2]);
+    dynamic_grouped_conv_prepare_reduce_kernel<W><<<grid, W <= 8 ? 128 : 256, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(base.data), partial,
+        static_cast<__nv_bfloat16*>(prepared.data), static_cast<__nv_bfloat16*>(finish.data),
+        prepared.ne[2], route.split_k);
     CUDA_CHECK(cudaGetLastError());
 }
-
 } // namespace
 
-void bf16_dynamic_grouped_conv_prepare_reduce_launch(std::int32_t split_k,
-                                                     const Tensor& base_kernel,
-                                                     const float* projection_partial,
-                                                     Tensor& prepared, Tensor& finish_delta,
+void bf16_dynamic_grouped_conv_prepare_reduce_launch(DynamicConvPrepareRoute route,
+                                                     const Tensor& base, const float* partial,
+                                                     Tensor& prepared, Tensor& finish,
                                                      cudaStream_t stream) {
-    switch (split_k) {
-    case 4:
-        launch<4>(base_kernel, projection_partial, prepared, finish_delta, stream);
-        return;
-    case 8:
-        launch<8>(base_kernel, projection_partial, prepared, finish_delta, stream);
-        return;
-    default:
-        throw std::invalid_argument("dynamic grouped conv prepare: unsupported split-K");
+#define WIDTH(W)                                                                                   \
+    case W:                                                                                        \
+        return launch<W>(route, base, partial, prepared, finish, stream)
+    switch (prepared.ne[1]) {
+        WIDTH(2);
+        WIDTH(3);
+        WIDTH(4);
+        WIDTH(5);
+        WIDTH(6);
+        WIDTH(7);
+        WIDTH(8);
+        WIDTH(9);
+        WIDTH(10);
+        WIDTH(11);
+        WIDTH(12);
+        WIDTH(13);
+        WIDTH(14);
+        WIDTH(15);
+        WIDTH(16);
     }
+#undef WIDTH
+    throw std::logic_error("dynamic grouped conv prepare: invalid production width");
 }
-
 } // namespace ninfer::ops::detail

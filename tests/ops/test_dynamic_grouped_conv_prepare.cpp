@@ -1,4 +1,5 @@
 #include "ninfer/ops/dynamic_grouped_conv.h"
+#include "core/decode_graph.h"
 
 #include "ops/direct_bf16_weight.h"
 #include "ops/op_tester.h"
@@ -20,13 +21,13 @@ using namespace ninfer::test;
 namespace {
 
 constexpr std::int32_t kHidden          = 5120;
-constexpr std::int32_t kWidth           = 8;
+constexpr std::int32_t kMaximumWidth    = 16;
 constexpr std::int32_t kGroups          = 320;
 constexpr std::int32_t kTaps            = 2;
 constexpr std::int32_t kSides           = 2;
 constexpr std::int32_t kCoefficientRows = 1280;
 constexpr std::int32_t kMaximumBatch    = 8;
-constexpr std::int32_t kMaximumTokens   = kWidth * kMaximumBatch;
+constexpr std::int32_t kMaximumTokens   = kMaximumWidth * kMaximumBatch;
 constexpr float kEps                    = 1.0e-6F;
 
 constexpr ReductionCriterion kFinishDeltaCriterion{/*relative_l2=*/3.2e-3,
@@ -54,8 +55,8 @@ float signed_pattern(std::uint32_t index, std::uint32_t seed, float scale) {
 std::vector<std::uint16_t> make_residual() {
     std::vector<std::uint16_t> result(static_cast<std::size_t>(kHidden) * kMaximumTokens);
     for (std::int32_t token = 0; token < kMaximumTokens; ++token) {
-        const std::int32_t batch    = token / kWidth;
-        const std::int32_t position = token % kWidth;
+        const std::int32_t batch    = token / kMaximumWidth;
+        const std::int32_t position = token % kMaximumWidth;
         for (std::int32_t hidden = 0; hidden < kHidden; ++hidden) {
             float value = signed_pattern(static_cast<std::uint32_t>(token * kHidden + hidden), 101U,
                                          1.0F / 192.0F);
@@ -111,6 +112,8 @@ direct_bf16_weight::HostWeight make_projection_weight() {
 }
 
 struct Reference {
+    std::vector<double> normalized;
+    std::vector<double> coefficients;
     std::vector<double> prepared;
     std::vector<double> finish_delta;
 };
@@ -170,7 +173,7 @@ Reference compute_reference(const std::vector<std::uint16_t>& residual,
     result.prepared.resize(static_cast<std::size_t>(kHidden) * kMaximumTokens);
     result.finish_delta.resize(static_cast<std::size_t>(kGroups) * kTaps * kMaximumTokens);
     for (std::int32_t token = 0; token < kMaximumTokens; ++token) {
-        const std::int32_t position       = token % kWidth;
+        const std::int32_t position       = token % kMaximumWidth;
         const std::size_t normalized_base = static_cast<std::size_t>(token) * kHidden;
         for (std::int32_t group = 0; group < kGroups; ++group) {
             const double input_delta0 =
@@ -196,6 +199,8 @@ Reference compute_reference(const std::vector<std::uint16_t>& residual,
             }
         }
     }
+    result.normalized   = std::move(normalized);
+    result.coefficients = std::move(coefficients);
     return result;
 }
 
@@ -206,74 +211,99 @@ int verify_preserved(std::string_view label, const DeviceBuffer& device,
                         expected);
 }
 
+void set_reference_width(Reference& reference, const std::vector<std::uint16_t>& base, int width) {
+    for (int token = 0; token < kMaximumTokens; ++token) {
+        for (int h = 0; h < kHidden; ++h) {
+            const int group = h / 16;
+            const double d0 = reference.coefficients[token * kCoefficientRows + group];
+            const double d1 = reference.coefficients[token * kCoefficientRows + kGroups + group];
+            const std::size_t offset = static_cast<std::size_t>(token) * kHidden + h;
+            double value             = (bf16_to_f32(base[h]) + d0) * reference.normalized[offset];
+            if (token % width > 0)
+                value +=
+                    (bf16_to_f32(base[kHidden + h]) + d1) * reference.normalized[offset - kHidden];
+            reference.prepared[offset] = value;
+        }
+    }
+}
+
 int run() {
-    const std::vector<std::uint16_t> residual_host = make_residual();
-    const std::vector<std::uint16_t> norm_host     = make_norm_weight();
-    const std::vector<std::uint16_t> base_host     = make_base_kernel();
+    const auto residual_host = make_residual(), norm_host = make_norm_weight(),
+               base_host = make_base_kernel();
     direct_bf16_weight::DeviceWeight projection_weight(make_projection_weight());
-    const Reference reference =
+    Reference reference =
         compute_reference(residual_host, norm_host, base_host, projection_weight.host);
-
-    DeviceBuffer residual_device = to_device(residual_host);
-    DeviceBuffer norm_device     = to_device(norm_host);
-    DeviceBuffer base_device     = to_device(base_host);
-    GuardedDeviceBuffer prepared_device(reference.prepared.size() * sizeof(std::uint16_t));
-    GuardedDeviceBuffer finish_device(reference.finish_delta.size() * sizeof(std::uint16_t));
-    const std::size_t capacity =
-        ops::rmsnorm_dynamic_grouped_conv_prepare_workspace_capacity_bytes(1, kMaximumBatch);
+    DeviceBuffer residual_device = to_device(residual_host), norm_device = to_device(norm_host),
+                 base_device = to_device(base_host);
+    const auto capacity =
+        ops::rmsnorm_dynamic_grouped_conv_prepare_workspace_capacity_bytes(2, 16, 1, 8);
     WorkspaceArena workspace(capacity);
-
+    cudaStream_t stream = nullptr;
+    cuda_check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "create stream");
     Tensor norm(norm_device.p, DType::BF16, {kHidden});
     Tensor base(base_device.p, DType::BF16, {kHidden, kTaps, kSides});
     const Weight weight = projection_weight.view();
-    constexpr std::array<std::int32_t, 5> kBatchCases{1, 2, 3, 5, 8};
-
-    int failures = 0;
-    for (const std::int32_t batch_size : kBatchCases) {
-        prepared_device.fill(0xff);
-        finish_device.fill(0xff);
-        workspace.reset();
-        workspace.reset_peak();
-
-        Tensor residual(residual_device.p, DType::BF16, {kHidden, kWidth, batch_size});
-        Tensor prepared(prepared_device.data(), DType::BF16, {kHidden, kWidth, batch_size});
-        Tensor finish(finish_device.data(), DType::BF16, {kGroups, kTaps, kWidth, batch_size});
-        ops::rmsnorm_dynamic_grouped_conv_prepare(residual, norm, kEps, base, weight, prepared,
-                                                  finish, workspace, nullptr);
-        cuda_synchronize();
-
-        const std::size_t prepared_elements =
-            static_cast<std::size_t>(kHidden) * kWidth * batch_size;
-        const std::size_t finish_elements =
-            static_cast<std::size_t>(kGroups) * kTaps * kWidth * batch_size;
-        const std::string label =
-            "rmsnorm_dynamic_grouped_conv_prepare B=" + std::to_string(batch_size);
-        failures += verify_reduction(
-            label + " prepared", from_device_bf16(prepared_device.data(), prepared_elements),
-            std::span<const double>(reference.prepared.data(), prepared_elements),
-            kPreparedCriterion);
-        failures += verify_reduction(
-            label + " finish_delta", from_device_bf16(finish_device.data(), finish_elements),
-            std::span<const double>(reference.finish_delta.data(), finish_elements),
-            kFinishDeltaCriterion);
-        failures += prepared_device.verify_guards(label + " prepared");
-        failures += finish_device.verify_guards(label + " finish_delta");
-
-        const std::size_t exact =
-            ops::rmsnorm_dynamic_grouped_conv_prepare_workspace_capacity_bytes(batch_size,
-                                                                               batch_size);
-        if (workspace.used() != 0 || workspace.peak_used() != exact) {
-            std::cerr << label << ": workspace query/execution high-water mismatch got="
-                      << workspace.peak_used() << " expected=" << exact << '\n';
-            ++failures;
+    int failures        = 0;
+    for (int width = 2; width <= 16; ++width) {
+        set_reference_width(reference, base_host, width);
+        for (int batch = 1; batch <= 8; ++batch) {
+            const std::size_t pe = static_cast<std::size_t>(kHidden) * width * batch;
+            const std::size_t fe = static_cast<std::size_t>(kGroups) * 2 * width * batch;
+            GuardedDeviceBuffer pd(pe * sizeof(std::uint16_t)), fd(fe * sizeof(std::uint16_t));
+            Tensor residual(residual_device.p, DType::BF16, {kHidden, width, batch});
+            Tensor prepared(pd.data(), DType::BF16, {kHidden, width, batch});
+            Tensor finish(fd.data(), DType::BF16, {kGroups, kTaps, width, batch});
+            const bool graph_case = (width == 3 && batch == 3) || (width == 7 && batch == 7) ||
+                                    (width == 14 && batch == 7) || (width == 16 && batch == 8);
+            for (int replay = 0; replay < (graph_case ? 2 : 1); ++replay) {
+                pd.fill(0xff);
+                fd.fill(0xff);
+                // Fixture fills use the default stream; execution intentionally uses a nonblocking
+                // stream.
+                cuda_check(cudaStreamSynchronize(nullptr), "fixture fill synchronize");
+                workspace.reset_peak();
+                const auto launch = [&] {
+                    ops::rmsnorm_dynamic_grouped_conv_prepare(residual, norm, kEps, base, weight,
+                                                              prepared, finish, workspace, stream);
+                };
+                if (replay) {
+                    DecodeGraphDefinition definition;
+                    DecodeGraphExecutable executable;
+                    definition.capture(stream, launch);
+                    executable.instantiate(definition);
+                    executable.launch(stream);
+                    executable.launch(stream);
+                    cuda_check(cudaStreamSynchronize(stream), "graph synchronize");
+                } else
+                    launch();
+                cuda_synchronize();
+                const std::string label = "dynamic conv prepare W=" + std::to_string(width) +
+                                          " B=" + std::to_string(batch) +
+                                          " graph=" + std::to_string(replay);
+                failures += verify_reduction(label + " prepared", from_device_bf16(pd.data(), pe),
+                                             std::span<const double>(reference.prepared.data(), pe),
+                                             kPreparedCriterion);
+                failures +=
+                    verify_reduction(label + " finish", from_device_bf16(fd.data(), fe),
+                                     std::span<const double>(reference.finish_delta.data(), fe),
+                                     kFinishDeltaCriterion);
+                failures += pd.verify_guards(label);
+                failures += fd.verify_guards(label);
+                const auto exact =
+                    ops::rmsnorm_dynamic_grouped_conv_prepare_workspace_capacity_bytes(
+                        width, width, batch, batch);
+                if (workspace.used() != 0 || workspace.peak_used() != exact) {
+                    std::cerr << label << ": workspace mismatch\n";
+                    ++failures;
+                }
+            }
         }
     }
-
-    failures +=
-        verify_preserved("dynamic grouped conv residual immutable", residual_device, residual_host);
-    failures += verify_preserved("dynamic grouped conv norm immutable", norm_device, norm_host);
-    failures += verify_preserved("dynamic grouped conv base immutable", base_device, base_host);
-    failures += projection_weight.verify_preserved("dynamic grouped conv projection weight");
+    cuda_check(cudaStreamDestroy(stream), "destroy stream");
+    failures += verify_preserved("residual", residual_device, residual_host);
+    failures += verify_preserved("norm", norm_device, norm_host);
+    failures += verify_preserved("base", base_device, base_host);
+    failures += projection_weight.verify_preserved("projection");
     return failures;
 }
 

@@ -146,11 +146,11 @@ void require_nonoverlap(const Tensor& residual, const Tensor& norm_weight,
 
 } // namespace
 
-std::size_t
-rmsnorm_dynamic_grouped_conv_prepare_workspace_capacity_bytes(std::int32_t min_batch_size,
-                                                              std::int32_t max_batch_size) {
-    return detail::bf16_dynamic_grouped_conv_prepare_workspace_capacity_bytes(min_batch_size,
-                                                                              max_batch_size);
+std::size_t rmsnorm_dynamic_grouped_conv_prepare_workspace_capacity_bytes(
+    std::int32_t min_width, std::int32_t max_width, std::int32_t min_batch_size,
+    std::int32_t max_batch_size) {
+    return detail::bf16_dynamic_grouped_conv_prepare_workspace_capacity_bytes(
+        min_width, max_width, min_batch_size, max_batch_size);
 }
 
 void rmsnorm_dynamic_grouped_conv_prepare(const Tensor& residual, const Tensor& norm_weight,
@@ -159,6 +159,10 @@ void rmsnorm_dynamic_grouped_conv_prepare(const Tensor& residual, const Tensor& 
                                           Tensor& finish_delta, WorkspaceArena& workspace,
                                           cudaStream_t stream) {
     const std::int32_t batch_size = residual.ne[2];
+    const std::int32_t width      = residual.ne[1];
+    if (width < 2 || width > 16) {
+        throw std::invalid_argument("dynamic grouped conv prepare: W must be in [2,16]");
+    }
     if (!(eps > 0.0F) || !std::isfinite(eps)) {
         throw std::invalid_argument(
             "dynamic grouped conv prepare: eps must be positive and finite");
@@ -166,11 +170,11 @@ void rmsnorm_dynamic_grouped_conv_prepare(const Tensor& residual, const Tensor& 
     if (batch_size < 1 || batch_size > 8) {
         throw std::invalid_argument("dynamic grouped conv prepare: B must be in [1,8]");
     }
-    require_tensor(residual, DType::BF16, kHidden, kWidth, batch_size, 1, kPrepareOp, "residual");
+    require_tensor(residual, DType::BF16, kHidden, width, batch_size, 1, kPrepareOp, "residual");
     require_tensor(norm_weight, DType::BF16, kHidden, 1, 1, 1, kPrepareOp, "norm_weight");
     require_tensor(base_kernel, DType::BF16, kHidden, kTaps, kSides, 1, kPrepareOp, "base_kernel");
-    require_tensor(prepared, DType::BF16, kHidden, kWidth, batch_size, 1, kPrepareOp, "prepared");
-    require_tensor(finish_delta, DType::BF16, kGroups, kTaps, kWidth, batch_size, kPrepareOp,
+    require_tensor(prepared, DType::BF16, kHidden, width, batch_size, 1, kPrepareOp, "prepared");
+    require_tensor(finish_delta, DType::BF16, kGroups, kTaps, width, batch_size, kPrepareOp,
                    "finish_delta");
     require_kernel_projection_weight(kernel_projection_weight);
     require_nonoverlap(residual, norm_weight, base_kernel, kernel_projection_weight, prepared,
