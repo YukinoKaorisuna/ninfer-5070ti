@@ -52,14 +52,34 @@ __device__ __forceinline__ unsigned w8_small_t_bf16_pair_from_s8(unsigned values
     return result.bits;
 }
 
+// The contraction owns the shared layout; tiled launchers use the same type for opt-in capacity.
+template <class Schedule>
+union alignas(16) W8SmallTMmaSharedStorage {
+    struct {
+        std::uint8_t codes[Schedule::kRowsPerCta][Schedule::kGroupK];
+        __nv_bfloat16 activations[Schedule::kKWarps]
+                                 [Schedule::kTileTokens * Schedule::kTileKPerWarp];
+        std::uint8_t scales[Schedule::kRowsPerCta]
+                           [Schedule::kScaleAccess == W8SmallTMmaScaleAccess::Shared
+                                ? Schedule::kScaleBytesPerRow
+                                : 1];
+    } staging;
+
+    float partial[Schedule::kKWarps * (Schedule::kTileTokens / 8) * 32 * 4];
+};
+
 template <class Geometry, int ActiveCols, class Schedule, class Output,
           class Epilogue = W8SmallTMmaStoreEpilogue, class RowPolicy = W8SmallTMmaIdentityRows,
-          bool DirectPairEpilogue = false>
+          bool DirectPairEpilogue = false, bool TiledColumns = false>
 __global__
 __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void w8_small_t_mma_kernel(
     const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
     const std::uint8_t* __restrict__ scales, Output output, Epilogue epilogue = {},
-    RowPolicy row_policy = {}) {
+    RowPolicy row_policy = {}, std::int32_t columns = ActiveCols) {
+    static_assert(!TiledColumns || std::is_same_v<Epilogue, W8SmallTMmaStoreEpilogue>);
+    const int column_offset = TiledColumns ? static_cast<int>(blockIdx.y) * ActiveCols : 0;
+    const int live_columns  = TiledColumns ? min(ActiveCols, columns - column_offset) : ActiveCols;
+    x += static_cast<std::int64_t>(column_offset) * Geometry::kInputRows;
     constexpr int kHidden     = Geometry::kInputRows;
     constexpr int kTileK      = Schedule::kTileKPerWarp;
     constexpr int kWarps      = Schedule::kKWarps;
@@ -74,19 +94,14 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void w8_small_t
     constexpr int kNt        = kTileCols / 8;
     constexpr unsigned kMask = 0xffffffffu;
 
-    union SharedStorage {
-        struct {
-            std::uint8_t codes[kMmaRows][kGroupK];
-            __nv_bfloat16 activations[kWarps][kTileCols * kTileK];
-            std::uint8_t scales[kMmaRows][Schedule::kScaleAccess == W8SmallTMmaScaleAccess::Shared
-                                              ? Schedule::kScaleBytesPerRow
-                                              : 1];
-        } staging;
+    using SharedStorage = W8SmallTMmaSharedStorage<Schedule>;
 
-        float partial[kWarps * kNt * 32 * 4];
-    };
-
-    __shared__ __align__(16) SharedStorage shared;
+    constexpr bool kDynamicShared = TiledColumns && ActiveCols > 64;
+    __shared__ __align__(
+        16) unsigned char static_shared[kDynamicShared ? 1 : sizeof(SharedStorage)];
+    extern __shared__ __align__(16) unsigned char dynamic_shared[];
+    auto& shared =
+        *reinterpret_cast<SharedStorage*>(kDynamicShared ? dynamic_shared : static_shared);
     auto& code_shared  = shared.staging.codes;
     auto& b_shared     = shared.staging.activations;
     auto& scale_shared = shared.staging.scales;
@@ -109,7 +124,14 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void w8_small_t
             const int col = item / (kTileK / 8);
             const int k8  = item - col * (kTileK / 8);
             auto* dst     = &b_shared[warp][col * kTileK + w8_small_t_swizzle_64(col, k8 * 8)];
-            if constexpr (!kPaddedStage || ActiveCols == kTileCols) {
+            if constexpr (TiledColumns) {
+                const int source_col = col < live_columns ? col : 0;
+                cp_async_zfill<16, Schedule::kActivationCache>(
+                    dst,
+                    &x[static_cast<std::int64_t>(source_col) * kHidden + group_k0 + warp * kTileK +
+                       k8 * 8],
+                    col < live_columns ? 16 : 0);
+            } else if constexpr (!kPaddedStage || ActiveCols == kTileCols) {
                 cp_async<16, Schedule::kActivationCache>(
                     dst, &x[static_cast<std::int64_t>(col) * kHidden + group_k0 + warp * kTileK +
                             k8 * 8]);
@@ -301,7 +323,10 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void w8_small_t
             if constexpr (std::is_same_v<Epilogue, W8SmallTMmaStoreEpilogue> ||
                           std::is_same_v<Epilogue, W8SmallTMmaResidualEpilogue>) {
                 const auto store = [&](int row, int col, float value) {
-                    __nv_bfloat16* destination = output_tile.at(row, col);
+                    if constexpr (TiledColumns) {
+                        if (col >= live_columns) return;
+                    }
+                    __nv_bfloat16* destination = output_tile.at(row, col + column_offset);
                     if constexpr (std::is_same_v<Epilogue, W8SmallTMmaResidualEpilogue>) {
                         value += __bfloat162float(*destination);
                     }

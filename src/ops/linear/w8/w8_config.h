@@ -35,7 +35,8 @@ template <int KWarps, int TileTokens, int MinBlocksPerSm, W8SmallTMmaScaleAccess
 struct W8SmallTMmaSchedule {
     static_assert(KWarps == 4 || KWarps == 8 || KWarps == 16);
     static_assert(TileTokens == 8 || TileTokens == 16 || TileTokens == 24 || TileTokens == 32 ||
-                  TileTokens == 40 || TileTokens == 48 || TileTokens == 56 || TileTokens == 64);
+                  TileTokens == 40 || TileTokens == 48 || TileTokens == 56 || TileTokens == 64 ||
+                  TileTokens == 72 || TileTokens == 80 || TileTokens == 88);
     static_assert(MinBlocksPerSm > 0);
 
     static constexpr int kKWarps            = KWarps;

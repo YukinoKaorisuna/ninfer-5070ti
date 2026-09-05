@@ -15,7 +15,6 @@ namespace ninfer::ops {
 namespace {
 
 constexpr std::int32_t kHidden          = 5120;
-constexpr std::int32_t kWidth           = 8;
 constexpr std::int32_t kGroups          = 320;
 constexpr std::int32_t kTaps            = 2;
 constexpr std::int32_t kSides           = 2;
@@ -186,10 +185,12 @@ void rmsnorm_dynamic_grouped_conv_prepare(const Tensor& residual, const Tensor& 
 }
 
 std::size_t linear_dynamic_grouped_conv_add_workspace_capacity_bytes(std::int32_t input_rows,
+                                                                     std::int32_t min_width,
+                                                                     std::int32_t max_width,
                                                                      std::int32_t min_batch_size,
                                                                      std::int32_t max_batch_size) {
     return detail::w8_linear_dynamic_grouped_conv_add_workspace_capacity_bytes(
-        input_rows, min_batch_size, max_batch_size);
+        input_rows, min_width, max_width, min_batch_size, max_batch_size);
 }
 
 void linear_dynamic_grouped_conv_add(const Tensor& x, const Weight& projection_weight,
@@ -198,17 +199,20 @@ void linear_dynamic_grouped_conv_add(const Tensor& x, const Weight& projection_w
                                      cudaStream_t stream) {
     const std::int32_t input_rows = x.ne[0];
     const std::int32_t batch_size = x.ne[2];
+    const std::int32_t width      = x.ne[1];
+    if (width < 2 || width > 16)
+        throw std::invalid_argument("linear dynamic grouped conv add: W must be in [2,16]");
     if (input_rows != 4096 && input_rows != 17408) {
         throw std::invalid_argument("linear dynamic grouped conv add: C must be 4096 or 17408");
     }
     if (batch_size < 1 || batch_size > 8) {
         throw std::invalid_argument("linear dynamic grouped conv add: B must be in [1,8]");
     }
-    require_tensor(x, DType::BF16, input_rows, kWidth, batch_size, 1, kAddOp, "x");
+    require_tensor(x, DType::BF16, input_rows, width, batch_size, 1, kAddOp, "x");
     require_tensor(base_kernel, DType::BF16, kHidden, kTaps, kSides, 1, kAddOp, "base_kernel");
-    require_tensor(finish_delta, DType::BF16, kGroups, kTaps, kWidth, batch_size, kAddOp,
+    require_tensor(finish_delta, DType::BF16, kGroups, kTaps, width, batch_size, kAddOp,
                    "finish_delta");
-    require_tensor(residual, DType::BF16, kHidden, kWidth, batch_size, 1, kAddOp, "residual");
+    require_tensor(residual, DType::BF16, kHidden, width, batch_size, 1, kAddOp, "residual");
     require_finish_projection_weight(projection_weight, input_rows);
     require_finish_nonoverlap(x, projection_weight, base_kernel, finish_delta, residual, workspace);
 

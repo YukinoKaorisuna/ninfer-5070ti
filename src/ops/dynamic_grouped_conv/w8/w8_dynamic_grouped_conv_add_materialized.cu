@@ -1,112 +1,145 @@
 #include "ops/dynamic_grouped_conv/w8/w8_dynamic_grouped_conv_add_kernels.h"
-
 #include "core/device.h"
 #include "ops/linear/w8/w8_config.h"
+#include "ops/linear/w8/w8_launch.h"
 #include "ops/linear/w8/w8_rowsplit_output.cuh"
 #include "ops/linear/w8/w8_small_t_mma.cuh"
-
 #include <cuda_bf16.h>
-
 #include <array>
-#include <cstddef>
-#include <cstdint>
-#include <stdexcept>
+#include <algorithm>
 #include <utility>
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
+constexpr int kRows = 5120, kGroups = 320;
 
-constexpr std::int32_t kRows   = 5120;
-constexpr std::int32_t kWidth  = 8;
-constexpr std::int32_t kGroups = 320;
-using Launch                   = void (*)(const Tensor&, const Weight&, Tensor&, cudaStream_t);
+__device__ __forceinline__ void finish_value(int row, int col, int width, float current,
+                                             float previous, const __nv_bfloat16* base,
+                                             const __nv_bfloat16* delta, __nv_bfloat16* residual) {
+    const int index = col * kRows + row, di = col * 2 * kGroups + row / 16;
+    float value = fmaf(__bfloat162float(base[2 * kRows + row]) + __bfloat162float(delta[di]),
+                       current, __bfloat162float(residual[index]));
+    if (col % width != 0)
+        value =
+            fmaf(__bfloat162float(base[3 * kRows + row]) + __bfloat162float(delta[di + kGroups]),
+                 previous, value);
+    residual[index] = __float2bfloat16_rn(value);
+}
 
-template <std::int32_t InputRows, int BatchSize>
-struct ProjectionSchedule {
-    // RTX 5090 cold-cache winners over the complete production domain. Attention uses eight
-    // K-split warps through B=5 and four thereafter; bypassing L1 for activation staging wins at
-    // B=4,5,7,8. The longer MLP projection switches from eight to four warps after B=4.
-    static constexpr int kKWarps =
-        InputRows == 4096 ? (BatchSize <= 5 ? 8 : 4) : (BatchSize <= 4 ? 8 : 4);
-    static constexpr int kMinBlocks = kKWarps == 8 ? 2 : 3;
-    static constexpr Cache kActivationCache =
-        InputRows == 4096 && (BatchSize == 4 || BatchSize == 5 || BatchSize == 7 || BatchSize == 8)
-            ? Cache::cg
-            : Cache::ca;
-    using Type = W8SmallTMmaSchedule<kKWarps, kWidth * BatchSize, kMinBlocks,
-                                     W8SmallTMmaScaleAccess::Shared, kActivationCache>;
-};
+using Launch = W8Launch;
 
-template <std::int32_t InputRows, int BatchSize>
-void launch_projection(const Tensor& x, const Weight& weight, Tensor& projected,
-                       cudaStream_t stream) {
-    using Geometry        = W8LinearGeometry<kRows, InputRows>;
-    using Schedule        = typename ProjectionSchedule<InputRows, BatchSize>::Type;
-    constexpr int kCols   = kWidth * BatchSize;
-    constexpr int kBlocks = kRows / W8SmallTMmaIdentityRows::kOutputRowsPerCta;
-    const W8ContiguousOutput output{static_cast<__nv_bfloat16*>(projected.data), kRows};
-    w8_small_t_mma_kernel<Geometry, kCols, Schedule, W8ContiguousOutput>
-        <<<kBlocks, Schedule::kThreads, 0, stream>>>(
+template <int InputRows, int Tokens>
+void launch_projection(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
+    constexpr int Warps = InputRows == 4096 ? (Tokens <= 40 ? 8 : 4) : (Tokens <= 32 ? 8 : 4);
+    constexpr Cache Activation =
+        InputRows == 4096 && ((Tokens > 24 && Tokens <= 40) || Tokens > 48) ? Cache::cg : Cache::ca;
+    using Geometry = W8LinearGeometry<kRows, InputRows>;
+    using Schedule = W8SmallTMmaSchedule<Warps, (Tokens + 7) / 8 * 8, Warps == 8 ? 2 : 3,
+                                         W8SmallTMmaScaleAccess::Shared, Activation>;
+    W8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), kRows};
+    w8_small_t_mma_kernel<Geometry, Tokens, Schedule>
+        <<<kRows / 16, Schedule::kThreads, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
             static_cast<const std::uint8_t*>(weight.scales), output);
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <std::int32_t InputRows, std::size_t... Offsets>
-constexpr auto make_launchers(std::index_sequence<Offsets...>) {
-    return std::array<Launch, sizeof...(Offsets)>{
-        &launch_projection<InputRows, 1 + static_cast<int>(Offsets)>...};
+template <int C, std::size_t... I>
+constexpr auto make_launchers(std::index_sequence<I...>) {
+    return std::array<Launch, sizeof...(I)>{&launch_projection<C, 1 + static_cast<int>(I)>...};
 }
 
-constexpr auto kAttentionLaunchers = make_launchers<4096>(std::make_index_sequence<8>{});
-constexpr auto kMlpLaunchers       = make_launchers<17408>(std::make_index_sequence<8>{});
+constexpr auto attention = make_launchers<4096>(std::make_index_sequence<64>{});
+constexpr auto mlp       = make_launchers<17408>(std::make_index_sequence<64>{});
 
-__global__ void finish_kernel(const __nv_bfloat16* __restrict__ projected,
-                              const __nv_bfloat16* __restrict__ base_kernel,
-                              const __nv_bfloat16* __restrict__ finish_delta,
-                              __nv_bfloat16* __restrict__ residual) {
-    const std::int32_t row = static_cast<std::int32_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    const std::int32_t col = static_cast<std::int32_t>(blockIdx.y);
-    if (row >= kRows) { return; }
-
-    const std::int32_t index         = col * kRows + row;
-    const std::int32_t group         = row / 16;
-    const std::int64_t delta0_offset = group + static_cast<std::int64_t>(kGroups) * (2 * col);
-    float value                      = __bfloat162float(residual[index]);
-    const float current_coefficient =
-        __bfloat162float(base_kernel[row + static_cast<std::int64_t>(2) * kRows]) +
-        __bfloat162float(finish_delta[delta0_offset]);
-    value = fmaf(current_coefficient, __bfloat162float(projected[index]), value);
-    if ((col & 7) != 0) {
-        const float previous_coefficient =
-            __bfloat162float(base_kernel[row + static_cast<std::int64_t>(3) * kRows]) +
-            __bfloat162float(finish_delta[delta0_offset + kGroups]);
-        value = fmaf(previous_coefficient, __bfloat162float(projected[index - kRows]), value);
+template <int InputRows, int TileColumns>
+void tiled_projection(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
+    constexpr int Warps =
+        InputRows == 4096 ? (TileColumns <= 40 ? 8 : 4) : (TileColumns <= 32 ? 8 : 4);
+    constexpr Cache Activation =
+        InputRows == 4096 && ((TileColumns > 24 && TileColumns <= 40) || TileColumns > 48)
+            ? Cache::cg
+            : Cache::ca;
+    using Geometry            = W8LinearGeometry<kRows, InputRows>;
+    using Schedule            = W8SmallTMmaSchedule<Warps, TileColumns, Warps == 8 ? 2 : 3,
+                                                    W8SmallTMmaScaleAccess::Shared, Activation>;
+    constexpr int SharedBytes = TileColumns > 64 ? sizeof(W8SmallTMmaSharedStorage<Schedule>) : 0;
+    if constexpr (SharedBytes > 0) {
+        static const cudaError_t attribute = cudaFuncSetAttribute(
+            w8_small_t_mma_kernel<Geometry, TileColumns, Schedule, W8ContiguousOutput,
+                                  W8SmallTMmaStoreEpilogue, W8SmallTMmaIdentityRows, false, true>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, SharedBytes);
+        CUDA_CHECK(attribute);
     }
-    residual[index] = __float2bfloat16_rn(value);
-}
-
-} // namespace
-
-void w8_dynamic_grouped_conv_add_materialized_launch(const Tensor& x, const Weight& weight,
-                                                     const Tensor& base_kernel,
-                                                     const Tensor& finish_delta, Tensor& residual,
-                                                     Tensor& projected, cudaStream_t stream) {
-    if (x.ne[2] < 1 || x.ne[2] > 8) {
-        throw std::invalid_argument("W8 dynamic grouped conv add materialized: invalid B");
-    }
-    const std::size_t index = static_cast<std::size_t>(x.ne[2] - 1);
-    const auto& launchers   = x.ne[0] == 4096 ? kAttentionLaunchers : kMlpLaunchers;
-    launchers[index](x, weight, projected, stream);
-
-    const dim3 grid(static_cast<unsigned>((kRows + 255) / 256),
-                    static_cast<unsigned>(kWidth * x.ne[2]), 1U);
-    finish_kernel<<<grid, 256, 0, stream>>>(static_cast<const __nv_bfloat16*>(projected.data),
-                                            static_cast<const __nv_bfloat16*>(base_kernel.data),
-                                            static_cast<const __nv_bfloat16*>(finish_delta.data),
-                                            static_cast<__nv_bfloat16*>(residual.data));
+    const int columns = x.ne[1];
+    W8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), kRows};
+    const dim3 grid(kRows / 16, (columns + TileColumns - 1) / TileColumns);
+    w8_small_t_mma_kernel<Geometry, TileColumns, Schedule, W8ContiguousOutput,
+                          W8SmallTMmaStoreEpilogue, W8SmallTMmaIdentityRows, false, true>
+        <<<grid, Schedule::kThreads, SharedBytes, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales), output, W8SmallTMmaStoreEpilogue{},
+            W8SmallTMmaIdentityRows{}, columns);
     CUDA_CHECK(cudaGetLastError());
 }
 
+__global__ void finish_kernel(const __nv_bfloat16* projected, const __nv_bfloat16* base,
+                              const __nv_bfloat16* delta, __nv_bfloat16* residual, int width) {
+    const int row = blockIdx.x * blockDim.x + threadIdx.x, col = blockIdx.y;
+    if (row >= kRows) return;
+    const int index = col * kRows + row;
+    finish_value(row, col, width, __bfloat162float(projected[index]),
+                 col % width ? __bfloat162float(projected[index - kRows]) : 0.0f, base, delta,
+                 residual);
+}
+
+void materialized(W8DynamicConvAddSchedule schedule, const Tensor& x, const Weight& weight,
+                  const Tensor& base, const Tensor& delta, Tensor& residual, Tensor& projected,
+                  cudaStream_t stream) {
+    const int tokens  = x.ne[1] * x.ne[2];
+    const Tensor flat = x.view({x.ne[0], tokens});
+    Tensor result     = projected.view({kRows, tokens});
+    switch (schedule) {
+    case W8DynamicConvAddSchedule::SmallT: {
+        const auto& launchers = x.ne[0] == 4096 ? attention : mlp;
+        launchers[tokens - 1](flat, weight, result, stream);
+        break;
+    }
+    case W8DynamicConvAddSchedule::Tiled32:
+        tiled_projection<4096, 32>(flat, weight, result, stream);
+        break;
+#define TILE(COLUMNS)                                                                              \
+    case W8DynamicConvAddSchedule::Tiled##COLUMNS:                                                 \
+        if (x.ne[0] == 4096)                                                                       \
+            tiled_projection<4096, COLUMNS>(flat, weight, result, stream);                         \
+        else                                                                                       \
+            tiled_projection<17408, COLUMNS>(flat, weight, result, stream);                        \
+        break
+        TILE(72);
+        TILE(80);
+        TILE(88);
+#undef TILE
+    case W8DynamicConvAddSchedule::MmaK128:
+        launch_w8_mma_r64x32_c64_k128_a1(flat, weight, result, stream);
+        break;
+    }
+    const dim3 grid((kRows + 255) / 256, tokens);
+    finish_kernel<<<grid, 256, 0, stream>>>(static_cast<const __nv_bfloat16*>(projected.data),
+                                            static_cast<const __nv_bfloat16*>(base.data),
+                                            static_cast<const __nv_bfloat16*>(delta.data),
+                                            static_cast<__nv_bfloat16*>(residual.data), x.ne[1]);
+    CUDA_CHECK(cudaGetLastError());
+}
+} // namespace
+
+void w8_dynamic_grouped_conv_add_materialized_launch(W8DynamicConvAddSchedule schedule,
+                                                     const Tensor& x, const Weight& weight,
+                                                     const Tensor& base, const Tensor& delta,
+                                                     Tensor& residual, Tensor& projected,
+                                                     cudaStream_t stream) {
+    materialized(schedule, x, weight, base, delta, residual, projected, stream);
+}
 } // namespace ninfer::ops::detail

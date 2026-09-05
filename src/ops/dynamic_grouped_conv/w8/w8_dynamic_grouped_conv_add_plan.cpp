@@ -1,64 +1,68 @@
 #include "ops/dynamic_grouped_conv/w8/w8_dynamic_grouped_conv_add_plan.h"
-
 #include "ops/dynamic_grouped_conv/w8/w8_dynamic_grouped_conv_add_kernels.h"
-
-#include <cstddef>
-#include <cstdint>
 #include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
-
-constexpr std::int32_t kRows  = 5120;
-constexpr std::int32_t kWidth = 8;
-
 struct Plan {
+    W8DynamicConvAddSchedule schedule;
     std::size_t workspace_bytes;
 };
 
-Plan resolve_plan(std::int32_t input_rows, std::int32_t batch_size) {
-    if (input_rows != 4096 && input_rows != 17408) {
+Plan resolve_plan(int input_rows, int width, int batch) {
+    if (input_rows != 4096 && input_rows != 17408)
         throw std::invalid_argument("linear dynamic grouped conv add: C must be 4096 or 17408");
-    }
-    if (batch_size < 1 || batch_size > 8) {
-        throw std::invalid_argument("linear dynamic grouped conv add: B must be in [1,8]");
-    }
-    return {static_cast<std::size_t>(kRows) * kWidth * static_cast<std::size_t>(batch_size) *
-            sizeof(std::uint16_t)};
+    if (width < 2 || width > 16 || batch < 1 || batch > 8)
+        throw std::invalid_argument("linear dynamic grouped conv add: invalid W/B profile");
+    const int columns = width * batch;
+    using S           = W8DynamicConvAddSchedule;
+    const S schedule  = columns <= 64                         ? S::SmallT
+                        : columns <= 72                       ? S::Tiled72
+                        : columns <= 80                       ? S::Tiled80
+                        : columns <= 88                       ? S::Tiled88
+                        : input_rows == 4096 && columns <= 96 ? S::Tiled32
+                                                              : S::MmaK128;
+    return {schedule, static_cast<std::size_t>(5120) * columns * sizeof(std::uint16_t)};
 }
-
 } // namespace
 
 std::size_t w8_linear_dynamic_grouped_conv_add_workspace_capacity_bytes(
-    std::int32_t input_rows, std::int32_t min_batch_size, std::int32_t max_batch_size) {
-    if (min_batch_size < 1 || max_batch_size > 8 || max_batch_size < min_batch_size) {
+    int input_rows, int min_width, int max_width, int min_batch, int max_batch) {
+    if (min_width < 2 || max_width > 16 || min_width > max_width || min_batch < 1 ||
+        max_batch > 8 || min_batch > max_batch)
         throw std::invalid_argument(
-            "linear dynamic grouped conv add workspace: invalid batch interval");
-    }
-    std::size_t maximum = 0;
-    for (std::int32_t batch_size = min_batch_size; batch_size <= max_batch_size; ++batch_size) {
-        const Plan plan = resolve_plan(input_rows, batch_size);
-        if (plan.workspace_bytes > maximum) { maximum = plan.workspace_bytes; }
-    }
-    return maximum;
+            "linear dynamic grouped conv add workspace: invalid W/B interval");
+    // Every route shares one projected BF16 matrix; its capacity is monotonic in W and B.
+    return resolve_plan(input_rows, max_width, max_batch).workspace_bytes;
 }
 
-const char* w8_linear_dynamic_grouped_conv_add_route_name(std::int32_t input_rows,
-                                                          std::int32_t batch_size) {
-    (void)resolve_plan(input_rows, batch_size);
-    return "dynamic_grouped_conv_add.w8.small_t.materialized_bf16";
+const char* w8_linear_dynamic_grouped_conv_add_route_name(int input_rows, int width, int batch) {
+    switch (resolve_plan(input_rows, width, batch).schedule) {
+    case W8DynamicConvAddSchedule::SmallT:
+        return "dynamic_grouped_conv_add.w8.small_t.materialized_bf16";
+    case W8DynamicConvAddSchedule::Tiled32:
+        return "dynamic_grouped_conv_add.w8.tiled32.materialized_bf16";
+    case W8DynamicConvAddSchedule::Tiled72:
+        return "dynamic_grouped_conv_add.w8.tiled72.materialized_bf16";
+    case W8DynamicConvAddSchedule::Tiled80:
+        return "dynamic_grouped_conv_add.w8.tiled80.materialized_bf16";
+    case W8DynamicConvAddSchedule::Tiled88:
+        return "dynamic_grouped_conv_add.w8.tiled88.materialized_bf16";
+    case W8DynamicConvAddSchedule::MmaK128:
+        return "dynamic_grouped_conv_add.w8.r64_c64_k128.materialized_bf16";
+    }
+    throw std::logic_error("linear dynamic grouped conv add: invalid production schedule");
 }
 
-void w8_linear_dynamic_grouped_conv_add_dispatch(const Tensor& x, const Weight& projection_weight,
-                                                 const Tensor& base_kernel,
-                                                 const Tensor& finish_delta, Tensor& residual,
-                                                 WorkspaceArena& workspace, cudaStream_t stream) {
-    const Plan plan          = resolve_plan(x.ne[0], x.ne[2]);
+void w8_linear_dynamic_grouped_conv_add_dispatch(const Tensor& x, const Weight& weight,
+                                                 const Tensor& base, const Tensor& delta,
+                                                 Tensor& residual, WorkspaceArena& workspace,
+                                                 cudaStream_t stream) {
+    const Plan plan          = resolve_plan(x.ne[0], x.ne[1], x.ne[2]);
     auto scope               = workspace.scope();
     const DeviceSpan storage = workspace.alloc_bytes(plan.workspace_bytes);
-    Tensor projected(storage.data, DType::BF16, {kRows, kWidth, x.ne[2]});
-    w8_dynamic_grouped_conv_add_materialized_launch(x, projection_weight, base_kernel, finish_delta,
-                                                    residual, projected, stream);
+    Tensor projected(storage.data, DType::BF16, {5120, x.ne[1], x.ne[2]});
+    w8_dynamic_grouped_conv_add_materialized_launch(plan.schedule, x, weight, base, delta, residual,
+                                                    projected, stream);
 }
-
 } // namespace ninfer::ops::detail
