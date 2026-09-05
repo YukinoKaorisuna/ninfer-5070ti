@@ -99,6 +99,9 @@ add_library(ninfer_ops STATIC
   ops/rmsnorm_rope/launch.cu
   ops/context_kv_materialize/context_kv_materialize.cpp
   ops/context_kv_materialize/decode.cu
+  ops/candidate_selector/bf16/candidate_selector_path.cu
+  ops/candidate_selector/bf16/candidate_selector_path_plan.cpp
+  ops/wrapper/candidate_selector.cpp
   # Gated DeltaNet Linear Attention core.
   ops/linear_attention/gated_delta_net/gated_delta_net.cpp
   ops/linear_attention/gated_delta_net/replay.cpp
