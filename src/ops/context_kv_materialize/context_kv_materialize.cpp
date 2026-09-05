@@ -1,9 +1,5 @@
 #include "ninfer/ops/context_kv_materialize.h"
 
-#include "ninfer/ops/kv_cache_append.h"
-#include "ninfer/ops/linear_pair.h"
-#include "ninfer/ops/rmsnorm_rope.h"
-
 #include "core/layout.h"
 #include "ops/context_kv_materialize/launch.h"
 
@@ -17,15 +13,13 @@
 namespace ninfer::ops {
 namespace {
 
-constexpr std::int32_t kHidden   = 5120;
-constexpr std::int32_t kKVSize   = 1024;
-constexpr std::int32_t kHeadDim  = 128;
-constexpr std::int32_t kKVHeads  = 8;
-constexpr std::int32_t kCapacity = 2048;
-constexpr std::int32_t kWidth    = 8;
-constexpr const char* kOp        = "context_kv_materialize";
-
-enum class Route : std::uint8_t { DecodeDirect, PrefillComposed };
+constexpr std::int32_t kHidden     = 5120;
+constexpr std::int32_t kKVSize     = 1024;
+constexpr std::int32_t kHeadDim    = 128;
+constexpr std::int32_t kKVHeads    = 8;
+constexpr std::int32_t kCapacity   = 2048;
+constexpr std::int32_t kBlockWidth = 16;
+constexpr const char* kOp          = "context_kv_materialize";
 
 bool aligned_to(const void* pointer, std::uintptr_t alignment) {
     return pointer != nullptr && (reinterpret_cast<std::uintptr_t>(pointer) & (alignment - 1)) == 0;
@@ -56,12 +50,12 @@ void require_weight(const Weight& weight, const char* name) {
     }
 }
 
-Route require_profile(std::int32_t width, std::int32_t batch) {
+void require_profile(std::int32_t width, std::int32_t batch) {
     if (batch < 1 || batch > 8 || width < 1) {
         throw std::invalid_argument("context_kv_materialize: invalid W/B");
     }
-    if (width == kWidth) return Route::DecodeDirect;
-    if (batch == 1 && width <= kCapacity) return Route::PrefillComposed;
+    if (width <= kBlockWidth) return;
+    if (batch == 1 && width <= kCapacity) return;
     throw std::invalid_argument("context_kv_materialize: unsupported W/B profile");
 }
 
@@ -75,40 +69,20 @@ void require_interval(std::int32_t batch, std::int32_t min_width, std::int32_t m
         }
         return;
     }
-    if (min_width != kWidth || max_width != kWidth) {
-        throw std::invalid_argument(
-            "context_kv_materialize workspace: batched profile requires W=8");
+    if (max_width > kBlockWidth) {
+        throw std::invalid_argument("context_kv_materialize workspace: batched W exceeds 16");
     }
 }
 
 template <class Allocator>
-Tensor allocate_decode(Allocator& allocator, std::int32_t columns) {
+Tensor allocate_key_scratch(Allocator& allocator, std::int32_t columns) {
     return allocator.alloc(
-        DType::BF16, {kKVSize, columns, static_cast<std::int32_t>(kContextKVMaterializeLayers)});
+        DType::FP32, {kKVSize, columns, static_cast<std::int32_t>(kContextKVMaterializeLayers)});
 }
 
-struct ComposedWorkspace {
-    Tensor key;
-    Tensor value;
-};
-
-template <class Allocator>
-ComposedWorkspace allocate_composed(Allocator& allocator, std::int32_t width) {
-    return {
-        allocator.alloc(DType::BF16, {kKVSize, width}),
-        allocator.alloc(DType::BF16, {kKVSize, width}),
-    };
-}
-
-std::size_t decode_capacity(std::int32_t batch) {
+std::size_t key_scratch_capacity(std::int32_t columns) {
     WorkspaceLayoutBuilder layout;
-    (void)allocate_decode(layout, kWidth * batch);
-    return layout.peak_bytes(1);
-}
-
-std::size_t composed_capacity(std::int32_t width) {
-    WorkspaceLayoutBuilder layout;
-    (void)allocate_composed(layout, width);
+    (void)allocate_key_scratch(layout, columns);
     return layout.peak_bytes(1);
 }
 
@@ -124,43 +98,20 @@ void validate_cache(const CyclicKVCacheLayerView& cache, std::int32_t padded,
     require_tensor(cache.v, DType::FP16, kHeadDim, padded, kKVHeads, lane_capacity, 16, "cache V");
 }
 
-void composed_materialize(
-    const Tensor& context, const Tensor& positions, const Tensor& counts, const Tensor& state_slots,
-    const std::array<ContextKVMaterializeLayerView, kContextKVMaterializeLayers>& layers,
-    ContextKVMaterializeExecutionEnvelope envelope, WorkspaceArena& workspace,
-    cudaStream_t stream) {
-    const std::int32_t width    = context.ne[1];
-    auto scope                  = workspace.scope();
-    ComposedWorkspace scratch   = allocate_composed(workspace, width);
-    const Tensor flat_context   = context.view({kHidden, width});
-    const Tensor flat_positions = positions.view({width});
-    const KVCacheAppendPrefixExecutionEnvelope append_envelope{envelope.min_count,
-                                                               envelope.max_count};
-    for (const ContextKVMaterializeLayerView& layer : layers) {
-        linear_pair(flat_context, layer.key_weight, layer.value_weight, scratch.key, scratch.value,
-                    stream);
-        Tensor key = scratch.key.view({kHeadDim, kKVHeads, width});
-        rmsnorm_rope(flat_positions, layer.key_norm_weight, key, stream);
-        Tensor key_batch   = key.view({kHeadDim, kKVHeads, width, 1});
-        Tensor value_batch = scratch.value.view({kHeadDim, kKVHeads, width, 1});
-        kv_cache_append_prefix(key_batch, value_batch, positions, counts, state_slots,
-                               append_envelope, layer.cache, stream);
-    }
-}
-
 } // namespace
 
 std::size_t context_kv_materialize_workspace_capacity_bytes(std::int32_t batch_size,
                                                             std::int32_t min_width,
                                                             std::int32_t max_width) {
     require_interval(batch_size, min_width, max_width);
-    if (batch_size > 1) return decode_capacity(batch_size);
-
     std::size_t capacity = 0;
-    if (min_width <= kWidth && kWidth <= max_width) { capacity = decode_capacity(1); }
-    if (min_width != kWidth || max_width != kWidth) {
-        const std::int32_t largest_composed = max_width == kWidth ? kWidth - 1 : max_width;
-        capacity = std::max(capacity, composed_capacity(largest_composed));
+    // Every W admits max_count=0..W. Thus max_width includes the envelopes of all smaller W,
+    // including scratch-requiring routes below the fully fused interval.
+    for (int count = 1; count <= max_width; ++count) {
+        const int columns = count * batch_size;
+        if (detail::context_kv_materialize_uses_scratch(
+                detail::context_kv_materialize_route(columns)))
+            capacity = std::max(capacity, key_scratch_capacity(columns));
     }
     return capacity;
 }
@@ -172,7 +123,7 @@ void context_kv_materialize(
     cudaStream_t stream) {
     const std::int32_t width = context.ne[1];
     const std::int32_t batch = context.ne[2];
-    const Route route        = require_profile(width, batch);
+    require_profile(width, batch);
     require_tensor(context, DType::BF16, kHidden, width, batch, 1, 16, "context");
     require_tensor(positions, DType::I32, width, batch, 1, 1, alignof(std::int32_t), "positions");
     require_tensor(counts, DType::I32, batch, 1, 1, 1, alignof(std::int32_t), "counts");
@@ -198,15 +149,14 @@ void context_kv_materialize(
     }
 
     if (envelope.max_count == 0) return;
-    if (route == Route::DecodeDirect) {
-        auto scope         = workspace.scope();
-        Tensor key_scratch = allocate_decode(workspace, width * batch);
-        detail::context_kv_materialize_decode_launch(context, positions, counts, state_slots,
-                                                     layers, envelope, key_scratch, stream);
-        return;
-    }
-    composed_materialize(context, positions, counts, state_slots, layers, envelope, workspace,
-                         stream);
+    const int columns = envelope.max_count * batch;
+    const auto route  = detail::context_kv_materialize_route(columns);
+    auto scope        = workspace.scope();
+    Tensor key_scratch;
+    if (detail::context_kv_materialize_uses_scratch(route))
+        key_scratch = allocate_key_scratch(workspace, columns);
+    detail::context_kv_materialize_launch(context, positions, counts, state_slots, layers, envelope,
+                                          route, key_scratch, stream);
 }
 
 } // namespace ninfer::ops

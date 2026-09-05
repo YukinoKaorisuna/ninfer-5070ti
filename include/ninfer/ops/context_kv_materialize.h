@@ -35,15 +35,16 @@ struct ContextKVMaterializeExecutionEnvelope {
  * Materialize one normalized context block into five layer-local cyclic K/V caches.
  *
  * context is contiguous BF16 [5120,W,B], positions is contiguous device I32 [W,B], and counts
- * and state_slots are contiguous device I32 [B]. The registered domains are decode W=8,B=1..8
- * and prefill B=1,W=1..2048. Each of the five layer views contains independent RowSplit
- * W8G32_F16S key/value weights [1024,5120], a BF16 key norm weight [128], and a capacity-2048
- * D128/H8 cyclic cache with BF16 K and FP16 V. All five caches share padded capacity and lane
- * capacity.
+ * and state_slots are contiguous device I32 [B]. The registered domains are context blocks
+ * W=1..16,B=1..8 and single-request prefill B=1,W=1..2048. W is the physical context width,
+ * independent of the draft width and the device-selected committed prefix. Each of the five layer
+ * views contains independent RowSplit W8G32_F16S key/value weights [1024,5120], a BF16 key norm
+ * weight [128], and a capacity-2048 D128/H8 cyclic cache with BF16 K and FP16 V. All five caches
+ * share padded capacity and lane capacity.
  *
  * For every layer l, row b, and i in [0,counts[b]), the complete operation is
  *
- *   k_raw = linear(context[:,i,b], key_weight[l])       // represented BF16
+ *   k_raw = linear(context[:,i,b], key_weight[l])
  *   v_raw = linear(context[:,i,b], value_weight[l])     // represented BF16
  *   inv   = 1 / sqrt(sum_d k_raw[h,d]^2 / 128 + 1e-6)
  *   n[d]  = k_raw[h,d] * inv * key_norm_weight[l][d]
@@ -58,12 +59,12 @@ struct ContextKVMaterializeExecutionEnvelope {
  * allocation.
  *
  * The caller guarantees min_count <= counts[b] <= max_count <= W, sequential nonnegative live
- * positions, in-range state slots, and disjoint live destinations. Each selected lane's old live
- * interval ends immediately before positions[0,b], and advancing it by counts[b] makes every
- * overwritten ring slot dead. Inputs, weights, live workspace, and all cache planes are mutually
- * non-overlapping. Reduction association and intermediate arithmetic beyond the represented BF16
- * projection boundary are implementation details. The Op is safe for CUDA Graph capture and
- * replay over the complete envelope.
+ * positions, in-range state slots for live rows, and disjoint live destinations. Each selected
+ * lane's old live interval ends immediately before positions[0,b], and advancing it by counts[b]
+ * makes every overwritten ring slot dead. Inputs, weights, live workspace, and all cache planes are
+ * mutually non-overlapping. Raw K has no semantic storage cast. Reduction association, projection
+ * staging precision, and intermediate arithmetic are implementation details. The Op is safe for
+ * CUDA Graph capture and replay over the complete envelope.
  */
 void context_kv_materialize(
     const Tensor& context, const Tensor& positions, const Tensor& counts, const Tensor& state_slots,
@@ -72,7 +73,7 @@ void context_kv_materialize(
 
 /**
  * Return transient capacity for every registered W in the inclusive interval at the exact batch
- * size. The query follows the same shape-selected route as context_kv_materialize().
+ * size, covering every valid count envelope and its selected route.
  */
 [[nodiscard]] std::size_t context_kv_materialize_workspace_capacity_bytes(std::int32_t batch_size,
                                                                           std::int32_t min_width,

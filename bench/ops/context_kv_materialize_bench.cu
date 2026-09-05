@@ -2,10 +2,6 @@
 
 #include "ninfer/ops/context_kv_materialize.h"
 
-#include "ninfer/ops/kv_cache_append.h"
-#include "ninfer/ops/linear_pair.h"
-#include "ninfer/ops/rmsnorm_rope.h"
-
 #include "ninfer_bench_common.h"
 #include "quantized_weight.cuh"
 
@@ -34,13 +30,14 @@ constexpr int kHidden       = 5120;
 constexpr int kRows         = 1024;
 constexpr int kHeadDim      = 128;
 constexpr int kHeads        = 8;
-constexpr int kWidth        = 8;
 constexpr int kCapacity     = 2048;
 constexpr int kLaneCapacity = 8;
 
 enum class Execution : std::uint8_t { Eager, Graph };
 
 struct Options {
+    std::vector<int> widths{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+    std::string counts = "full";
     std::vector<int> batches{1, 2, 3, 4, 5, 6, 7, 8};
     Execution execution     = Execution::Graph;
     int warmup              = 10;
@@ -50,7 +47,8 @@ struct Options {
 
 [[noreturn]] void usage(const char* program, const char* error) {
     std::fprintf(stderr,
-                 "error: %s\nusage: %s [--batches B,...] [--execution eager|graph] "
+                 "error: %s\nusage: %s [--widths W,...] [--batches B,...] [--counts "
+                 "full|one|ragged|zero] [--execution eager|graph] "
                  "[--warmup N] [--repeat N] [--flush-mib N]\n",
                  error, program);
     std::exit(2);
@@ -66,12 +64,12 @@ int parse_i32(std::string_view text, int minimum, int maximum, const char* flag)
     return static_cast<int>(parsed);
 }
 
-std::vector<int> parse_batches(std::string_view text) {
+std::vector<int> parse_list(std::string_view text, int maximum) {
     std::vector<int> result;
     while (!text.empty()) {
         const std::size_t comma     = text.find(',');
         const std::string_view item = text.substr(0, comma);
-        result.push_back(parse_i32(item, 1, 8, "--batches"));
+        result.push_back(parse_i32(item, 1, maximum, "list"));
         if (comma == std::string_view::npos) break;
         text.remove_prefix(comma + 1);
     }
@@ -90,7 +88,14 @@ Options parse_options(int argc, char** argv) {
             return argv[index];
         };
         if (argument == "--batches") {
-            options.batches = parse_batches(next());
+            options.batches = parse_list(next(), 8);
+        } else if (argument == "--widths") {
+            options.widths = parse_list(next(), 2048);
+        } else if (argument == "--counts") {
+            options.counts = next();
+            if (options.counts != "full" && options.counts != "one" && options.counts != "ragged" &&
+                options.counts != "zero")
+                usage(argv[0], "invalid --counts");
         } else if (argument == "--execution") {
             const std::string_view value = next();
             if (value == "eager")
@@ -121,36 +126,19 @@ struct Fixture {
     std::array<DeviceBuffer, kLayers> cache_k;
     std::array<DeviceBuffer, kLayers> cache_v;
     std::array<ops::ContextKVMaterializeLayerView, kLayers> layers;
-    DeviceBuffer context = bench::make_bf16(static_cast<std::size_t>(kHidden) * kWidth * 8);
+    DeviceBuffer context = bench::make_bf16(static_cast<std::size_t>(kHidden) * 2048);
     DeviceBuffer positions;
     DeviceBuffer counts;
     DeviceBuffer slots;
     DeviceBuffer direct_workspace;
     WorkspaceArena direct_arena;
-    DeviceBuffer composed_key;
-    DeviceBuffer composed_value;
+    ops::ContextKVMaterializeExecutionEnvelope envelope{};
 
     Fixture()
-        : positions(sizeof(std::int32_t) * kWidth * 8), counts(sizeof(std::int32_t) * 8),
+        : positions(sizeof(std::int32_t) * 2048), counts(sizeof(std::int32_t) * 8),
           slots(sizeof(std::int32_t) * 8),
-          direct_workspace(ops::context_kv_materialize_workspace_capacity_bytes(8, kWidth, kWidth)),
-          direct_arena(DeviceSpan{direct_workspace.p, direct_workspace.bytes}),
-          composed_key(static_cast<std::size_t>(kRows) * kWidth * 8 * 2),
-          composed_value(static_cast<std::size_t>(kRows) * kWidth * 8 * 2) {
-        std::vector<std::int32_t> host_positions(kWidth * 8);
-        std::vector<std::int32_t> host_counts(8, kWidth);
-        std::vector<std::int32_t> host_slots(8);
-        for (int batch = 0; batch < 8; ++batch) {
-            host_slots[static_cast<std::size_t>(batch)] = batch;
-            for (int index = 0; index < kWidth; ++index) {
-                host_positions[static_cast<std::size_t>(batch * kWidth + index)] =
-                    8192 * batch + 1024 + index;
-            }
-        }
-        positions.copy_from_host(host_positions.data(), positions.bytes);
-        counts.copy_from_host(host_counts.data(), counts.bytes);
-        slots.copy_from_host(host_slots.data(), slots.bytes);
-
+          direct_workspace(ops::context_kv_materialize_workspace_capacity_bytes(1, 1, 2048)),
+          direct_arena(DeviceSpan{direct_workspace.p, direct_workspace.bytes}) {
         const std::size_t cache_bytes = static_cast<std::size_t>(kHeadDim) * kCapacity * kHeads *
                                         kLaneCapacity * sizeof(std::uint16_t);
         for (int layer = 0; layer < kLayers; ++layer) {
@@ -179,31 +167,31 @@ struct Fixture {
         }
     }
 
-    void direct(int batch, cudaStream_t stream) {
-        Tensor x(context.p, DType::BF16, {kHidden, kWidth, batch});
-        Tensor pos(positions.p, DType::I32, {kWidth, batch});
-        Tensor count(counts.p, DType::I32, {batch});
-        Tensor lane(slots.p, DType::I32, {batch});
-        ops::context_kv_materialize(x, pos, count, lane, layers, {kWidth, kWidth}, direct_arena,
-                                    stream);
+    void prepare(int width, int batch, const std::string& mode) {
+        direct_arena.reset_peak();
+        std::vector<int> host_positions(width * batch), host_counts(batch), host_slots(batch);
+        for (int b = 0; b < batch; ++b) {
+            host_counts[b] = mode == "zero"     ? 0
+                             : mode == "one"    ? 1
+                             : mode == "ragged" ? (b * 7 + width) % (width + 1)
+                                                : width;
+            host_slots[b]  = 7 - b;
+            for (int i = 0; i < width; ++i) host_positions[b * width + i] = 262140 + 8192 * b + i;
+        }
+        envelope = {
+            static_cast<std::uint32_t>(*std::min_element(host_counts.begin(), host_counts.end())),
+            static_cast<std::uint32_t>(*std::max_element(host_counts.begin(), host_counts.end()))};
+        positions.copy_from_host(host_positions.data(), host_positions.size() * 4);
+        counts.copy_from_host(host_counts.data(), host_counts.size() * 4);
+        slots.copy_from_host(host_slots.data(), host_slots.size() * 4);
     }
 
-    void composed(int batch, cudaStream_t stream) {
-        const int columns = kWidth * batch;
-        Tensor x(context.p, DType::BF16, {kHidden, columns});
-        Tensor pos(positions.p, DType::I32, {kWidth, batch});
+    void launch(int width, int batch, cudaStream_t stream) {
+        Tensor x(context.p, DType::BF16, {kHidden, width, batch});
+        Tensor pos(positions.p, DType::I32, {width, batch});
         Tensor count(counts.p, DType::I32, {batch});
         Tensor lane(slots.p, DType::I32, {batch});
-        Tensor key(composed_key.p, DType::BF16, {kRows, columns});
-        Tensor value(composed_value.p, DType::BF16, {kRows, columns});
-        for (const auto& layer : layers) {
-            ops::linear_pair(x, layer.key_weight, layer.value_weight, key, value, stream);
-            Tensor key_heads = key.view({kHeadDim, kHeads, columns});
-            ops::rmsnorm_rope(pos.view({columns}), layer.key_norm_weight, key_heads, stream);
-            ops::kv_cache_append_prefix(key_heads.view({kHeadDim, kHeads, kWidth, batch}),
-                                        value.view({kHeadDim, kHeads, kWidth, batch}), pos, count,
-                                        lane, {kWidth, kWidth}, layer.cache, stream);
-        }
+        ops::context_kv_materialize(x, pos, count, lane, layers, envelope, direct_arena, stream);
     }
 };
 
@@ -238,26 +226,44 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaGetDeviceProperties(&properties, device));
         Fixture fixture;
         DeviceBuffer flush(options.flush_bytes);
-        std::printf("# gpu=%s public=context_kv_materialize geometry=L5_W8_K5120_N1024 cache=cold "
+        std::printf("# gpu=%s public=context_kv_materialize geometry=L5_K5120_N1024 cache=cold "
                     "flush_mib=%zu execution=%s\n",
                     properties.name, options.flush_bytes >> 20,
                     options.execution == Execution::Graph ? "graph" : "eager");
-        for (const int batch : options.batches) {
-            std::size_t direct_nodes   = 0;
-            std::size_t composed_nodes = 0;
-            const auto direct          = measure(
-                options, [&](cudaStream_t s) { fixture.direct(batch, s); }, flush, stream,
-                &direct_nodes);
-            const auto composed = measure(
-                options, [&](cudaStream_t s) { fixture.composed(batch, s); }, flush, stream,
-                &composed_nodes);
-            std::printf(
-                "B=%d T=%d direct=%.3f_us direct_nodes=%zu composed=%.3f_us composed_nodes=%zu "
-                "speedup=%.3fx direct_min=%.3f_us direct_p95=%.3f_us\n",
-                batch, kWidth * batch, direct.median_us, direct_nodes, composed.median_us,
-                composed_nodes, composed.median_us / direct.median_us, direct.min_us,
-                direct.p95_us);
-        }
+        std::printf("width,batch,columns,counts,min_count,max_count,median_us,min_us,p95_us,nodes,"
+                    "workspace_bytes,workspace_peak_bytes\n");
+        for (const int width : options.widths)
+            for (const int batch : options.batches) {
+                if (width > 16 && batch != 1) continue;
+                fixture.prepare(width, batch, options.counts);
+                std::size_t nodes = 0;
+                if (fixture.envelope.max_count == 0) {
+                    // No GPU interval exists to time. Verify the public no-op produces no
+                    // capture nodes or scratch and report latency as not applicable.
+                    cudaGraph_t empty = nullptr;
+                    CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+                    fixture.launch(width, batch, stream);
+                    CUDA_CHECK(cudaStreamEndCapture(stream, &empty));
+                    CUDA_CHECK(cudaGraphGetNodes(empty, nullptr, &nodes));
+                    CUDA_CHECK(cudaGraphDestroy(empty));
+                    if (nodes != 0 || fixture.direct_arena.peak_used() != 0)
+                        throw std::runtime_error("zero-count materialization is not empty");
+                    std::printf(
+                        "%d,%d,%d,%s,0,0,nan,nan,nan,0,%zu,0\n", width, batch, width * batch,
+                        options.counts.c_str(),
+                        ops::context_kv_materialize_workspace_capacity_bytes(batch, width, width));
+                    continue;
+                }
+                const auto timing = measure(
+                    options, [&](cudaStream_t s) { fixture.launch(width, batch, s); }, flush,
+                    stream, &nodes);
+                std::printf(
+                    "%d,%d,%d,%s,%u,%u,%.3f,%.3f,%.3f,%zu,%zu,%zu\n", width, batch, width * batch,
+                    options.counts.c_str(), fixture.envelope.min_count, fixture.envelope.max_count,
+                    timing.median_us, timing.min_us, timing.p95_us, nodes,
+                    ops::context_kv_materialize_workspace_capacity_bytes(batch, width, width),
+                    fixture.direct_arena.peak_used());
+            }
         CUDA_CHECK(cudaStreamDestroy(stream));
         return 0;
     } catch (const std::exception& error) {

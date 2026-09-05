@@ -658,15 +658,23 @@ cmake --build build --parallel --target ninfer_linear_pair_bench
 ## Five-layer context K/V materialization benchmark
 
 `ninfer_context_kv_materialize_bench` measures the complete capacity-2048 DFlash2 context-cache
-state transition at the decode shapes `W=8,B=1..8`. It reports the public two-kernel direct route
-against the equivalent five-layer composition of `linear_pair`, `rmsnorm_rope`, and cyclic
-`kv_cache_append_prefix`; both routes consume the existing K/V row views of five independent
-`[6144,5120]` QKV parents. Every timed sample uses a cold cache.
+state transition over `W=1..16,B=1..8` and single-request prefill `W=1..2048`. It calls the public
+Op with five independent `[6144,5120]` QKV-parent K/V row views and caller-owned workspace.
+CSV rows report physical geometry, count envelope, whole-Op latency, Graph nodes, and the public
+workspace bound and actual arena peak. Every timed sample follows a 256 MiB cache flush; setup and input transfers are
+outside the measurement. Zero-count rows verify an empty Graph and report latency as `nan`
+(not applicable). `--counts full|one|ragged|zero` selects the device prefixes and their host
+envelope. Widths above 16 are measured only for B=1. These are Op measurements, not Engine results.
 
 ```bash
 cmake --build build -j --target ninfer_context_kv_materialize_bench
 ./build/bench/ninfer_context_kv_materialize_bench \
-  --batches 1,2,3,4,5,6,7,8 --execution graph --warmup 10 --repeat 50
+  --widths 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16 \
+  --batches 1,2,3,4,5,6,7,8 --counts full --execution graph --warmup 8 --repeat 60
+./build/bench/ninfer_context_kv_materialize_bench \
+  --widths 8,16,128,2048 --batches 1,8 --counts one --warmup 8 --repeat 60
+./build/bench/ninfer_context_kv_materialize_bench \
+  --widths 17,85,86,128,512,1024,2048 --batches 1 --warmup 8 --repeat 60
 ```
 
 ## MTP exact-transform benchmark

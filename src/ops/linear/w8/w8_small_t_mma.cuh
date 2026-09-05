@@ -68,22 +68,25 @@ union alignas(16) W8SmallTMmaSharedStorage {
     float partial[Schedule::kKWarps * (Schedule::kTileTokens / 8) * 32 * 4];
 };
 
+struct W8SmallTMmaIdentityColumns {
+    __device__ __forceinline__ int operator()(int column) const { return column; }
+};
+
 template <class Geometry, int ActiveCols, class Schedule, class Output,
           class Epilogue = W8SmallTMmaStoreEpilogue, class RowPolicy = W8SmallTMmaIdentityRows,
-          bool DirectPairEpilogue = false, bool TiledColumns = false>
-__global__
-__launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void w8_small_t_mma_kernel(
-    const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
-    const std::uint8_t* __restrict__ scales, Output output, Epilogue epilogue = {},
-    RowPolicy row_policy = {}, std::int32_t columns = ActiveCols) {
-    static_assert(!TiledColumns || std::is_same_v<Epilogue, W8SmallTMmaStoreEpilogue>);
+          bool DirectPairEpilogue = false, bool TiledColumns = false,
+          class ColumnPolicy = W8SmallTMmaIdentityColumns>
+__device__ __forceinline__ void
+w8_small_t_mma(const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
+               const std::uint8_t* __restrict__ scales, Output output, Epilogue epilogue = {},
+               RowPolicy row_policy = {}, std::int32_t columns = ActiveCols,
+               ColumnPolicy column_policy = {}) {
     const int column_offset = TiledColumns ? static_cast<int>(blockIdx.y) * ActiveCols : 0;
     const int live_columns  = TiledColumns ? min(ActiveCols, columns - column_offset) : ActiveCols;
-    x += static_cast<std::int64_t>(column_offset) * Geometry::kInputRows;
-    constexpr int kHidden     = Geometry::kInputRows;
-    constexpr int kTileK      = Schedule::kTileKPerWarp;
-    constexpr int kWarps      = Schedule::kKWarps;
-    constexpr int kMmaRows    = Schedule::kRowsPerCta;
+    constexpr int kHidden   = Geometry::kInputRows;
+    constexpr int kTileK    = Schedule::kTileKPerWarp;
+    constexpr int kWarps    = Schedule::kKWarps;
+    constexpr int kMmaRows  = Schedule::kRowsPerCta;
     constexpr int kRowsPerCta = Schedule::kRowsPerCta;
     constexpr int kGroupK     = Schedule::kGroupK;
     constexpr int kGroups     = kHidden / kGroupK;
@@ -128,19 +131,22 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void w8_small_t
                 const int source_col = col < live_columns ? col : 0;
                 cp_async_zfill<16, Schedule::kActivationCache>(
                     dst,
-                    &x[static_cast<std::int64_t>(source_col) * kHidden + group_k0 + warp * kTileK +
-                       k8 * 8],
+                    &x[static_cast<std::int64_t>(column_policy(column_offset + source_col)) *
+                           kHidden +
+                       group_k0 + warp * kTileK + k8 * 8],
                     col < live_columns ? 16 : 0);
             } else if constexpr (!kPaddedStage || ActiveCols == kTileCols) {
                 cp_async<16, Schedule::kActivationCache>(
-                    dst, &x[static_cast<std::int64_t>(col) * kHidden + group_k0 + warp * kTileK +
-                            k8 * 8]);
+                    dst,
+                    &x[static_cast<std::int64_t>(column_policy(column_offset + col)) * kHidden +
+                       group_k0 + warp * kTileK + k8 * 8]);
             } else {
                 const int source_col = col < ActiveCols ? col : 0;
                 cp_async_zfill<16, Schedule::kActivationCache>(
                     dst,
-                    &x[static_cast<std::int64_t>(source_col) * kHidden + group_k0 + warp * kTileK +
-                       k8 * 8],
+                    &x[static_cast<std::int64_t>(column_policy(column_offset + source_col)) *
+                           kHidden +
+                       group_k0 + warp * kTileK + k8 * 8],
                     col < ActiveCols ? 16 : 0);
             }
         }
@@ -305,8 +311,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void w8_small_t
     __syncthreads();
 
     if (k_split == 0) {
-        const W8OutputTile output_tile = output.tile(cta_row0);
-        float* projected               = partial;
+        float* projected = partial;
 #pragma unroll
         for (int ni = 0; ni < kNt; ++ni) {
             float4 sum = make_float4(acc[ni][0], acc[ni][1], acc[ni][2], acc[ni][3]);
@@ -326,7 +331,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void w8_small_t
                     if constexpr (TiledColumns) {
                         if (col >= live_columns) return;
                     }
-                    __nv_bfloat16* destination = output_tile.at(row, col + column_offset);
+                    __nv_bfloat16* destination = output.tile(cta_row0).at(row, col + column_offset);
                     if constexpr (std::is_same_v<Epilogue, W8SmallTMmaResidualEpilogue>) {
                         value += __bfloat162float(*destination);
                     }
@@ -367,6 +372,19 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void w8_small_t
             }
         }
     }
+}
+
+// Standard projection entry. Multi-layer fused Ops call the same contraction after selecting
+// their independent weight views and provide a closed FP32 epilogue.
+template <class Geometry, int ActiveCols, class Schedule, class Output,
+          class Epilogue = W8SmallTMmaStoreEpilogue, class RowPolicy = W8SmallTMmaIdentityRows,
+          bool DirectPairEpilogue = false, bool TiledColumns = false>
+__global__
+__launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void w8_small_t_mma_kernel(
+    const __nv_bfloat16* x, const std::uint8_t* codes, const std::uint8_t* scales, Output output,
+    Epilogue epilogue = {}, RowPolicy row_policy = {}, std::int32_t columns = ActiveCols) {
+    w8_small_t_mma<Geometry, ActiveCols, Schedule, Output, Epilogue, RowPolicy, DirectPairEpilogue,
+                   TiledColumns>(x, codes, scales, output, epilogue, row_policy, columns);
 }
 
 } // namespace ninfer::ops::detail
