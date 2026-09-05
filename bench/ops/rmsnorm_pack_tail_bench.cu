@@ -1,67 +1,84 @@
-// Public hot-cache benchmark for the exact fused tail-pack RMSNorm contract.
+// Public warm-cache Graph benchmark for the fused tail-pack RMSNorm contract.
 #include "ninfer/ops/rmsnorm_pack_tail.h"
-
 #include "ninfer_bench_common.h"
-
-#include <cuda_runtime.h>
-
-#include <cstdint>
-#include <cstdio>
 #include <cstdlib>
-
+#include <stdexcept>
+#include <string>
 using namespace ninfer;
 using namespace ninfer::bench;
 
 namespace {
+struct Options {
+    int width = 0, batch = 0, warmup = 8, repeat = 60;
+};
 
-void run(std::int32_t batch) {
-    constexpr std::int32_t kRows       = 5120;
-    constexpr std::int32_t kInputWidth = 8;
-    constexpr std::int32_t kTailWidth  = 7;
-    const std::size_t input_elements   = static_cast<std::size_t>(kRows) * kInputWidth * batch;
-    const std::size_t output_elements  = static_cast<std::size_t>(kRows) * kTailWidth * batch;
-    DeviceBuffer input                 = make_bf16(input_elements);
-    DeviceBuffer weight                = make_bf16(kRows);
-    DeviceBuffer output                = make_zeros(output_elements * sizeof(std::uint16_t));
-    Tensor input_tensor(input.p, DType::BF16, {kRows, kInputWidth, batch});
-    Tensor weight_tensor(weight.p, DType::BF16, {kRows});
-    Tensor output_tensor(output.p, DType::BF16, {kRows, kTailWidth * batch});
-
-    // Anchor rows are not read. As in the general RMSNorm benchmark, the shared weight is reused
-    // across rows and excluded from effective payload bandwidth.
-    const double payload_bytes = 2.0 * static_cast<double>(output_elements) * sizeof(std::uint16_t);
-    const Result result        = bench_loop(
-        [&](cudaStream_t stream) {
-            ops::rmsnorm_pack_tail(input_tensor, weight_tensor, output_tensor, stream);
-        },
-        payload_bytes);
-    char label[96];
-    std::snprintf(label, sizeof(label), "rmsnorm_pack_tail B=%d rows=%d", batch,
-                  kTailWidth * batch);
-    print_result(label, result);
+Options parse(int argc, char** argv) {
+    Options out;
+    for (int i = 1; i < argc; ++i) {
+        const std::string flag = argv[i];
+        if (flag == "--help") {
+            std::printf("usage: %s [--width W] [--batch B] [--warmup N] [--repeat N]\n", argv[0]);
+            std::exit(0);
+        }
+        if (i + 1 >= argc) throw std::invalid_argument("missing argument");
+        const int value = std::atoi(argv[++i]);
+        if (flag == "--width")
+            out.width = value;
+        else if (flag == "--batch")
+            out.batch = value;
+        else if (flag == "--warmup")
+            out.warmup = value;
+        else if (flag == "--repeat")
+            out.repeat = value;
+        else
+            throw std::invalid_argument("unknown flag: " + flag);
+    }
+    if ((out.width && (out.width < 2 || out.width > 16)) || out.batch < 0 || out.batch > 8 ||
+        out.warmup < 0 || out.repeat < 1)
+        throw std::invalid_argument("invalid width/batch/timing domain");
+    return out;
 }
 
+void run(int width, int batch, const Options& options, cudaStream_t stream) {
+    const int columns  = (width - 1) * batch;
+    DeviceBuffer input = make_bf16(5120ULL * width * batch), weight = make_bf16(5120),
+                 output = make_zeros(5120ULL * columns * 2);
+    Tensor x(input.p, DType::BF16, {5120, width, batch}), w(weight.p, DType::BF16, {5120}),
+        y(output.p, DType::BF16, {5120, columns});
+    TimedGraph graph;
+    constexpr int repeats = 32;
+    graph.capture(stream, [&](cudaStream_t s) {
+        for (int i = 0; i < repeats; ++i) { ops::rmsnorm_pack_tail(x, w, y, s); }
+    });
+    const auto timing = measure_graph(graph, stream, options.warmup, options.repeat);
+    std::printf("%d,%d,%d,%d,%.3f,%.3f,%.3f,%zu\n", width, batch, columns, 512,
+                timing.median_us / repeats, timing.min_us / repeats, timing.p95_us / repeats,
+                graph.nodes());
+}
 } // namespace
 
 int main(int argc, char** argv) {
     int devices = 0;
-    if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
-        std::printf("SKIP: no usable CUDA device\n");
+    if (cudaGetDeviceCount(&devices) != cudaSuccess || !devices) {
+        std::puts("SKIP: no usable CUDA device");
         return 0;
     }
-    if (argc == 1) {
-        for (std::int32_t batch = 1; batch <= 8; ++batch) { run(batch); }
+    try {
+        const auto options  = parse(argc, argv);
+        cudaStream_t stream = nullptr;
+        CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        std::puts("W,B,U,threads,median_us,min_us,p95_us,graph_repetitions");
+        for (int width = 2; width <= 16; ++width)
+            for (int batch = 1; batch <= 8; ++batch) {
+                if ((options.width && width != options.width) ||
+                    (options.batch && batch != options.batch))
+                    continue;
+                run(width, batch, options, stream);
+            }
+        CUDA_CHECK(cudaStreamDestroy(stream));
         return 0;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "rmsnorm_pack_tail: %s\n", e.what());
+        return 1;
     }
-    if (argc != 2) {
-        std::fprintf(stderr, "usage: %s [B]\n", argv[0]);
-        return 2;
-    }
-    const int batch = std::atoi(argv[1]);
-    if (batch < 1 || batch > 8) {
-        std::fprintf(stderr, "B must be in 1..8\n");
-        return 2;
-    }
-    run(batch);
-    return 0;
 }

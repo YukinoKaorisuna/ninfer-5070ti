@@ -32,21 +32,24 @@ void rmsnorm_pack_tail(const Tensor& input, const Tensor& weight, Tensor& output
     require_bf16_contiguous_aligned(output, "output");
 
     const std::int32_t batch = input.ne[2];
-    if (input.ne[0] != 5120 || input.ne[1] != 8 || batch < 1 || batch > 8 || input.ne[3] != 1) {
-        throw std::invalid_argument("rmsnorm_pack_tail: input must have shape [5120,8,B], B=1..8");
+    const std::int32_t width = input.ne[1];
+    if (input.ne[0] != 5120 || (width < 2 || width > 16) || batch < 1 || batch > 8 ||
+        input.ne[3] != 1) {
+        throw std::invalid_argument(
+            "rmsnorm_pack_tail: input must have shape [5120,W,B], W=2..16, B=1..8");
     }
     if (weight.ne[0] != 5120 || weight.ne[1] != 1 || weight.ne[2] != 1 || weight.ne[3] != 1) {
         throw std::invalid_argument("rmsnorm_pack_tail: weight must have shape [5120]");
     }
-    if (output.ne[0] != 5120 || output.ne[1] != 7 * batch || output.ne[2] != 1 ||
+    if (output.ne[0] != 5120 || output.ne[1] != (width - 1) * batch || output.ne[2] != 1 ||
         output.ne[3] != 1) {
-        throw std::invalid_argument("rmsnorm_pack_tail: output must have shape [5120,7B]");
+        throw std::invalid_argument("rmsnorm_pack_tail: output must have shape [5120,(W-1)B]");
     }
     if (overlaps(input, weight) || overlaps(input, output) || overlaps(weight, output)) {
         throw std::invalid_argument("rmsnorm_pack_tail: tensors must not overlap");
     }
 
-    detail::rmsnorm_pack_tail_launch(input, weight, output, batch, stream);
+    detail::rmsnorm_pack_tail_launch(input, weight, output, stream);
 }
 
 } // namespace ninfer::ops

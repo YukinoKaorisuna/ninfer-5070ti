@@ -9,15 +9,12 @@
 namespace ninfer::ops {
 
 inline constexpr int kRmsnormPackTailRows        = 5120;
-inline constexpr int kRmsnormPackTailInputWidth  = 8;
-inline constexpr int kRmsnormPackTailOutputWidth = 7;
 inline constexpr int kRmsnormPackTailPairsPerRow = kRmsnormPackTailRows / 2;
-inline constexpr int kRmsnormPackTailBlock       = 512;
 inline constexpr float kRmsnormPackTailEps       = 1.0e-6F;
 
+template <int kBlock>
 __device__ __forceinline__ float rmsnorm_pack_tail_inverse(float local_sum, float* warp_sums,
                                                            float* inverse) {
-    constexpr int kBlock = kRmsnormPackTailBlock;
     constexpr int kWarps = kBlock / kWarpSize;
     const int lane       = static_cast<int>(threadIdx.x) & (kWarpSize - 1);
     const int warp       = static_cast<int>(threadIdx.x) / kWarpSize;
@@ -36,24 +33,20 @@ __device__ __forceinline__ float rmsnorm_pack_tail_inverse(float local_sum, floa
     return *inverse;
 }
 
-// Implements include/ninfer/ops/rmsnorm_pack_tail.h for the fixed [5120,8,B] -> [5120,7B]
-// geometry. Grid x selects one of the seven tail rows and grid y selects the request, so anchors
-// are absent from both the reduction and the output address space.
-__global__ __launch_bounds__(kRmsnormPackTailBlock) void rmsnorm_pack_tail_kernel(
+// Grid x selects a mask column, grid y its request. Anchor columns are never read.
+template <int kBlock>
+__global__ __launch_bounds__(kBlock) void rmsnorm_pack_tail_kernel(
     const __nv_bfloat162* __restrict__ input, const __nv_bfloat162* __restrict__ weight,
-    __nv_bfloat162* __restrict__ output) {
-    constexpr int kBlock          = kRmsnormPackTailBlock;
+    __nv_bfloat162* __restrict__ output, int width) {
     constexpr int kPairsPerThread = kRmsnormPackTailPairsPerRow / kBlock;
     static_assert(kRmsnormPackTailPairsPerRow % kBlock == 0);
 
     const int tail  = static_cast<int>(blockIdx.x);
     const int batch = static_cast<int>(blockIdx.y);
     const std::int64_t input_base =
-        static_cast<std::int64_t>(batch * kRmsnormPackTailInputWidth + tail + 1) *
-        kRmsnormPackTailPairsPerRow;
+        static_cast<std::int64_t>(batch * width + tail + 1) * kRmsnormPackTailPairsPerRow;
     const std::int64_t output_base =
-        static_cast<std::int64_t>(batch * kRmsnormPackTailOutputWidth + tail) *
-        kRmsnormPackTailPairsPerRow;
+        static_cast<std::int64_t>(batch * (width - 1) + tail) * kRmsnormPackTailPairsPerRow;
 
     __nv_bfloat162 values[kPairsPerThread];
     __nv_bfloat162 weights[kPairsPerThread];
@@ -69,7 +62,7 @@ __global__ __launch_bounds__(kRmsnormPackTailBlock) void rmsnorm_pack_tail_kerne
 
     __shared__ float warp_sums[kBlock / kWarpSize];
     __shared__ float inverse;
-    const float inv = rmsnorm_pack_tail_inverse(local_sum, warp_sums, &inverse);
+    const float inv = rmsnorm_pack_tail_inverse<kBlock>(local_sum, warp_sums, &inverse);
 
 #pragma unroll
     for (int item = 0; item < kPairsPerThread; ++item) {

@@ -7,17 +7,17 @@
 namespace ninfer::ops {
 
 /**
- * @brief Applies plain RMSNorm to the seven non-anchor rows of each fixed-width block and packs
+ * @brief Applies plain RMSNorm to the non-anchor rows of each request block and packs
  * them into one dense matrix.
  *
- * @details `input` is contiguous BF16 `[5120,8,B]`, `weight` is contiguous BF16 `[5120]`, and
- * `output` is contiguous BF16 `[5120,7B]`, for `B` in `[1,8]`. Dimension zero is stored fastest.
- * For `b in [0,B)` and `i in [1,7]`, the ideal result is
+ * @details `input` is contiguous BF16 `[5120,W,B]`, `weight` is contiguous BF16 `[5120]`, and
+ * `output` is contiguous BF16 `[5120,(W-1)B]`, for `W` in `[2,16]` and `B` in `[1,8]`. Dimension
+ * zero is stored fastest. For `b in [0,B)` and `i in [1,W-1]`, the ideal result is
  *
  * @f[
  *   s_{i,b} = \sum_{d=0}^{5119} \mathrm{FP32}(input_{d,i,b})^2,
  *   \qquad
- *   output_{d,7b+i-1} =
+ *   output_{d,(W-1)b+i-1} =
  *     \mathrm{FP32}(input_{d,i,b})
  *     \frac{\mathrm{FP32}(weight_d)}{\sqrt{s_{i,b}/5120 + 10^{-6}}}.
  * @f]
