@@ -183,6 +183,27 @@ cmake --build build -j --target ninfer_embedding_bench
 ./build/bench/ninfer_embedding_bench --format fp8-d5120 --tokens 128 --profile
 ```
 
+## RMSNorm Op benchmark
+
+`ninfer_rmsnorm_bench` measures public RMSNorm, with `--kind dflash2_hidden` for plain D=5120,
+`hidden27` for offset D=5120, and `target_q27` / `target_k27` for offset D=256 with 24 / 4 heads.
+The existing DFlash, 35B target and GatedRMSNorm profiles remain selectable in `--help`.
+`--tokens` supplies aggregate matrix columns, independently of the speculative block width.
+Inputs and gains are nonuniform represented BF16 values. CSV reports actual geometry, Graph
+nodes/calls, zero scratch, logical bytes and median/min/p95 public-call latency.
+
+Cold mode flushes 256 MiB before each measured interval. Warm Graph bundles avoid host launch
+gaps and normalize time per public call; a cold bundle flushes only before its first call.
+`--profile` brackets one public call with CUDA profiler start/stop.
+
+```bash
+cmake --build build -j --target ninfer_rmsnorm_bench
+./build/bench/ninfer_rmsnorm_bench --kind dflash2_hidden --tokens 1,8,16,32,64,96,128,2048
+./build/bench/ninfer_rmsnorm_bench --kind target_q27 --tokens 1,8,16,32,64,96,128 \
+  --cache warm --graph-calls 32 --csv-out /tmp/rmsnorm.csv
+./build/bench/ninfer_rmsnorm_bench --kind hidden27 --tokens 128 --profile
+```
+
 ## GDN control-projection Op benchmark
 
 `ninfer_gdn_gating_proj_bench` measures the registered BF16 control projection. With
