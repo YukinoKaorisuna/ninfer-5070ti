@@ -35,9 +35,10 @@ current artifact contains the complete 66-object suffix. A partial suffix is mal
 a third compatible inventory.
 
 At startup, `none` and MTP do not materialize DFlash2 weights; DFlash2 does not materialize MTP
-weights. Vision and DFlash2 may be resident together. The full proposal-head route materializes
-`text/output_head`; the optimized route materializes `text/draft_head` and
-`text/draft_head_token_ids` instead.
+weights. Vision and DFlash2 may be resident together. The target always materializes `text/output_head`. The full proposal-head route reuses it; the
+optimized route additionally materializes `text/draft_head` and `text/draft_head_token_ids`.
+The Engine accepts startup-fixed `draft_tokens=1..15` (recommended 7), independently of the
+checkpoint’s source block size. See [DFlash2 mathematics and state](qwen3.8-27b-dflash2.md).
 
 The identity is read from the version-2 artifact directory. The filename, object count, and any
 representative tensor descriptor do not select the model or weights profile.
@@ -74,7 +75,7 @@ groupwise integer formats quantize along `K`; row-scaled FP8 owns one scale per 
 | DFlash2 target layers | 64 |
 | DFlash2 target-feature layers | `[5,19,33,47,61]` |
 | DFlash2 target-feature input width | `5 x 5120 = 25600` |
-| DFlash2 block size / draft positions | 8 / 7 |
+| DFlash2 source recommended block size / draft positions | 8 / 7; runtime K=1..15 |
 | DFlash2 mask token id | 248070 |
 | DFlash2 sliding window | 2048 |
 | DFlash2 dynamic-conv taps / group size | 2 / 16 |

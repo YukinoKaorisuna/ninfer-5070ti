@@ -48,8 +48,8 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
         }
         return;
     case SpeculativeBackend::DFlash2:
-        if (options.draft_tokens != 7) {
-            throw std::invalid_argument("--spec dflash2 requires --draft-tokens 7");
+        if (options.draft_tokens == 0 || options.draft_tokens > 15) {
+            throw std::invalid_argument("--spec dflash2 requires --draft-tokens in [1,15]");
         }
         return;
     }

@@ -22,8 +22,7 @@ struct RoundStateSpec {
     std::int32_t output_rows     = 0;
     std::uint32_t batch_capacity = 1;
     std::uint32_t draft_window   = 0;
-    bool enable_mtp              = false;
-    bool enable_dflash           = false;
+    SpeculativeBackend backend   = SpeculativeBackend::None;
 };
 
 // Stable pinned/device transfer format for ordinary decode. The full fixed-size object is copied
@@ -75,6 +74,7 @@ struct DFlashDecodeIngress {
     std::array<std::int32_t, kMaximumConcurrency> context_frontiers{};
     std::array<std::int32_t, kMaximumConcurrency> proposal_extents{};
     std::array<std::int32_t, kMaximumConcurrency> target_valid_columns{};
+    std::array<std::int32_t, kMaximumConcurrency> proposal_valid_columns{};
     std::array<std::int32_t, kMaximumConcurrency> text_kv_table_rows{};
     std::array<std::int32_t, kMaximumConcurrency> dflash_kv_table_rows{};
     std::array<std::int32_t, kMaximumConcurrency> lanes{};
@@ -130,6 +130,9 @@ struct DFlashDecodeStateLayout {
     LayoutRegion egress;
     TensorRegion proposal_ids;
     TensorRegion proposal_positions;
+    TensorRegion verify_positions;
+    std::optional<TensorRegion> candidate_ids;
+    std::optional<TensorRegion> proposal_q;
     TensorRegion append_positions;
     TensorRegion append_counts;
     TensorRegion draft_tokens;
@@ -248,6 +251,7 @@ struct DFlashDecodeState {
     Tensor context_frontiers;
     Tensor proposal_extents;
     Tensor target_valid_columns;
+    Tensor proposal_valid_columns;
     Tensor text_kv_table_rows;
     Tensor dflash_kv_table_rows;
     Tensor lanes;
@@ -257,6 +261,9 @@ struct DFlashDecodeState {
     Tensor accepted_drafts;
     Tensor proposal_ids;
     Tensor proposal_positions;
+    Tensor verify_positions;
+    Tensor candidate_ids;
+    Tensor proposal_q;
     Tensor append_positions;
     Tensor append_counts;
     Tensor draft_tokens;

@@ -199,7 +199,7 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
                    ? std::make_optional<PinnedHostBuffer>(sizeof(qwen3_6::MtpDecodeIngress) +
                                                           sizeof(qwen3_6::MtpDecodeEgress))
                    : std::nullopt),
-      dflash_host(plan.speculative_backend == SpeculativeBackend::DFlash
+      dflash_host(is_masked_draft_backend(plan.speculative_backend)
                       ? std::make_optional<PinnedHostBuffer>(sizeof(qwen3_6::DFlashDecodeIngress) +
                                                              sizeof(qwen3_6::DFlashDecodeEgress))
                       : std::nullopt) {
@@ -207,7 +207,7 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
         throw std::invalid_argument("Qwen3.6 model view has no owning weight arena");
     }
     if (model.features != plan.features || model.mtp.has_value() != plan.features.mtp() ||
-        model.dflash.has_value() != plan.features.dflash() ||
+        model.dflash.has_value() != plan.features.masked_draft() ||
         model.optimized_proposal.has_value() != plan.features.optimized_proposal() ||
         model.vision.has_value() != plan.features.vision) {
         throw std::invalid_argument(
@@ -289,10 +289,10 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
     if (io.ordinary.has_value() != (speculative_backend == SpeculativeBackend::None)) {
         throw std::logic_error("ordinary decode frame does not match the sequence plan");
     }
-    if (io.dflash_prefill.has_value() != (speculative_backend == SpeculativeBackend::DFlash)) {
+    if (io.dflash_prefill.has_value() != (is_masked_draft_backend(speculative_backend))) {
         throw std::logic_error("DFlash prefill scratch does not match the sequence plan");
     }
-    if (io.dflash_decode.has_value() != (speculative_backend == SpeculativeBackend::DFlash)) {
+    if (io.dflash_decode.has_value() != (is_masked_draft_backend(speculative_backend))) {
         throw std::logic_error("DFlash decode frame does not match the sequence plan");
     }
     prefill_hidden                  = plan.persistent.prefill_hidden.bind(backing);
@@ -574,7 +574,7 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
                     throw std::logic_error("resident MTP KV is shorter than the bridge frontier");
                 }
                 sequence.mtp_kv_valid = mtp_base;
-            } else if (speculative_backend == SpeculativeBackend::DFlash &&
+            } else if (is_masked_draft_backend(speculative_backend) &&
                        sequence.dflash_context_frontier != base) {
                 throw std::logic_error("resident DFlash context is not at the append frontier");
             }
@@ -595,7 +595,7 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
                         "rewrite-checkpoint MTP KV is shorter than the bridge frontier");
                 }
                 sequence.mtp_kv_valid = mtp_base;
-            } else if (speculative_backend == SpeculativeBackend::DFlash) {
+            } else if (is_masked_draft_backend(speculative_backend)) {
                 if (!dflash || !sequence.kv->backend || sequence.dflash_context_frontier < base) {
                     throw std::logic_error("planned DFlash rewrite checkpoint is unavailable");
                 }
@@ -630,7 +630,7 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
             speculative_backend == SpeculativeBackend::Mtp
                 ? std::min(capacity,
                            prompt_tokens + (initial_mtp_extent == 0 ? 0U : initial_mtp_extent - 1U))
-            : speculative_backend == SpeculativeBackend::DFlash ? prompt_tokens
+            : is_masked_draft_backend(speculative_backend) ? prompt_tokens
                                                                 : 0U;
         materialize_sequence_kv(sequence, prompt_tokens, backend_materialized);
         install_sampling(sequence, request, request_plan.sampling);
@@ -651,13 +651,17 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
         sequence.ledger.assign(prompt.token_ids.begin(), prompt.token_ids.end());
         sequence.prefix_identity.assign(prompt);
 
-        if (speculative_backend == SpeculativeBackend::DFlash) {
+        if (is_masked_draft_backend(speculative_backend)) {
             if (!dflash || !io.dflash_decode || !sequence.kv->backend) {
                 throw std::logic_error("DFlash prefill state is incomplete");
             }
             *dflash_host_ingress                         = {};
-            dflash_host_ingress->lanes[0]                = static_cast<std::int32_t>(sequence.lane);
-            dflash_host_ingress->dflash_kv_table_rows[0] = sequence.kv->backend->bound_row();
+            dflash_host_ingress->active_lanes[0] = static_cast<std::int32_t>(sequence.lane);
+            const StateImageSelectors selectors = state_selectors(sequence);
+            dflash_host_ingress->state_source_slots[0] = selectors.source;
+            dflash_host_ingress->state_destination_slots[0] = selectors.destination;
+            dflash_host_ingress->dflash_kv_table_rows[0] =
+                sequence.kv->backend ? sequence.kv->backend->bound_row() : 0;
             CUDA_CHECK(cudaMemcpyAsync(io.dflash_decode->ingress.data, dflash_host_ingress,
                                        sizeof(qwen3_6::DFlashDecodeIngress), cudaMemcpyHostToDevice,
                                        device.stream));
@@ -771,7 +775,7 @@ void ProgramImplCore::resolve_pending_batch(std::span<const std::uint32_t> lanes
             sequence.text_kv_valid != pending.base_E ||
             (speculative_backend == SpeculativeBackend::Mtp &&
              sequence.mtp_kv_valid != pending.base_E) ||
-            (speculative_backend == SpeculativeBackend::DFlash &&
+            (is_masked_draft_backend(speculative_backend) &&
              sequence.dflash_context_frontier != pending.base_E)) {
             throw std::logic_error("speculative pending row is not at its recorded base");
         }
@@ -892,6 +896,26 @@ void ProgramImplCore::resolve_pending_batch(std::span<const std::uint32_t> lanes
                 device.stream));
         }
 
+        // Sparse acceptance reads counts. Publish only the prefix licensed by the Frontend.
+        if (speculative_backend == SpeculativeBackend::DFlash2) {
+            for (std::size_t row = 0; row < lanes.size(); ++row) {
+                if (cancelled[row] || !requests[lanes[row]].sampling_host.token_counts) {
+                    continue;
+                }
+                const auto count = static_cast<std::int32_t>(accepted_tokens[row]);
+                Tensor ids =
+                    io.dflash_decode->licensed_tokens
+                        .slice(1, static_cast<std::int32_t>(row), 1)
+                        .slice(0, 0, count)
+                        .view({count});
+                Tensor counts =
+                    token_counts
+                        .slice(1, static_cast<std::int32_t>(lanes[row]), 1)
+                        .view({TextConfig::token_domain});
+                ops::increment_token_counts(ids, counts, device.stream);
+            }
+        }
+
         if (needs_hidden_correction) {
             const auto batch = static_cast<std::int32_t>(lanes.size());
             Tensor selector_tensor;
@@ -903,8 +927,8 @@ void ProgramImplCore::resolve_pending_batch(std::span<const std::uint32_t> lanes
                 selector_tensor                = frame.current_extents.slice(0, 0, batch);
                 hidden                         = frame.target_hidden.slice(2, 0, batch);
                 selected     = frame.target_continuation_hidden.slice(1, 0, batch);
-                destinations = frame.lanes.slice(0, 0, batch);
-            } else if (speculative_backend == SpeculativeBackend::DFlash && io.dflash_decode) {
+                destinations = frame.state_destination_slots.slice(0, 0, batch);
+            } else if (is_masked_draft_backend(speculative_backend) && io.dflash_decode) {
                 qwen3_6::DFlashDecodeState& frame = *io.dflash_decode;
                 selector_tensor                   = frame.proposal_extents.slice(0, 0, batch);
                 hidden                            = frame.target_hidden.slice(2, 0, batch);
@@ -921,7 +945,7 @@ void ProgramImplCore::resolve_pending_batch(std::span<const std::uint32_t> lanes
             ops::scatter(selected, destinations, tail_hidden_store, device.stream);
         }
 
-        if (speculative_backend == SpeculativeBackend::DFlash) {
+        if (is_masked_draft_backend(speculative_backend)) {
             std::array<std::uint32_t, kMaximumConcurrency> append_lanes{};
             std::array<std::uint32_t, kMaximumConcurrency> append_starts{};
             std::array<std::uint32_t, kMaximumConcurrency> append_counts{};
@@ -1058,13 +1082,13 @@ void ProgramImplCore::clear_lane(SequenceState& sequence, RequestControl& reques
 
 qwen3_6::PagedKVCache* ProgramImplCore::backend_kv_cache() noexcept {
     if (speculative_backend == SpeculativeBackend::Mtp) { return decoder->mtp_cache(); }
-    if (speculative_backend == SpeculativeBackend::DFlash && dflash) { return &dflash->full; }
+    if (dflash && dflash->full) { return &*dflash->full; }
     return nullptr;
 }
 
 const qwen3_6::PagedKVCache* ProgramImplCore::backend_kv_cache() const noexcept {
     if (speculative_backend == SpeculativeBackend::Mtp) { return decoder->mtp_cache(); }
-    if (speculative_backend == SpeculativeBackend::DFlash && dflash) { return &dflash->full; }
+    if (dflash && dflash->full) { return &*dflash->full; }
     return nullptr;
 }
 
@@ -1255,8 +1279,8 @@ void ProgramImplCore::prepare_graphs() {
     reserve_capture_rows(decoder->text_kv, text_capture_allocations, "target KV cache");
     if (speculative_backend == SpeculativeBackend::Mtp) {
         reserve_capture_rows(*decoder->mtp_cache(), mtp_capture_allocations, "MTP KV cache");
-    } else if (speculative_backend == SpeculativeBackend::DFlash) {
-        reserve_capture_rows(dflash->full, dflash_capture_allocations, "DFlash Full KV cache");
+    } else if (dflash && dflash->full) {
+        reserve_capture_rows(*dflash->full, dflash_capture_allocations, "DFlash Full KV cache");
     }
     device.synchronize();
 
@@ -1312,7 +1336,9 @@ void ProgramImplCore::prepare_graphs() {
         if (decoder->mtp_cache() != nullptr) {
             zero_capture_pages(*decoder->mtp_cache(), mtp_capture_allocations, batch_size);
         }
-        if (dflash) { zero_capture_pages(dflash->full, dflash_capture_allocations, batch_size); }
+        if (dflash && dflash->full) {
+            zero_capture_pages(*dflash->full, dflash_capture_allocations, batch_size);
+        }
         for (std::uint32_t row = 0; row < batch_size; ++row) {
             decoder->linear_attention.zero_slot(
                 LinearStateSlots::current_state_slot(row, max_concurrency), device.stream);
@@ -1339,6 +1365,7 @@ void ProgramImplCore::prepare_graphs() {
                     checked_i32(frontier, "graph representative DFlash frontier");
                 dflash_host_ingress->context_frontiers[row] =
                     checked_i32(frontier, "graph representative DFlash context frontier");
+                dflash_host_ingress->proposal_valid_columns[row] = static_cast<std::int32_t>(width);
                 dflash_host_ingress->proposal_extents[row] = static_cast<std::int32_t>(extent);
                 dflash_host_ingress->target_valid_columns[row] =
                     static_cast<std::int32_t>(extent + 1U);
@@ -1470,7 +1497,7 @@ void ProgramImplCore::prepare_graphs() {
             }
         }
     }
-    if (speculative_backend == SpeculativeBackend::DFlash) {
+    if (is_masked_draft_backend(speculative_backend)) {
         const auto batch_one_profiles = dflash_graph_profiles(capacity, draft_window, 1);
         validate_graph_profiles(batch_one_profiles, capacity - 1, "DFlash");
         schedule::DFlashBatchContext dflash_state{
@@ -1520,7 +1547,7 @@ void ProgramImplCore::prepare_graphs() {
     if (speculative_backend == SpeculativeBackend::Mtp) {
         instantiate_graph_family(mtp_graphs, "MTP", device, prepare_representative);
     }
-    if (speculative_backend == SpeculativeBackend::DFlash) {
+    if (is_masked_draft_backend(speculative_backend)) {
         instantiate_graph_family(dflash_graphs, "DFlash", device, prepare_representative);
     }
 
@@ -1612,7 +1639,7 @@ void ProgramImplCore::mark_workspace_usage(std::size_t phase_bytes) noexcept {
 void ProgramImplCore::enqueue_dflash_context_append(std::span<const std::uint32_t> lanes,
                                                     std::span<const std::uint32_t> starts,
                                                     std::span<const std::uint32_t> counts) {
-    if (speculative_backend != SpeculativeBackend::DFlash || !dflash || !io.dflash_decode ||
+    if (!is_masked_draft_backend(speculative_backend) || !dflash || !io.dflash_decode ||
         lanes.empty() || lanes.size() > max_concurrency || starts.size() != lanes.size() ||
         counts.size() != lanes.size()) {
         throw std::logic_error("DFlash context append has invalid membership");
@@ -1632,17 +1659,24 @@ void ProgramImplCore::enqueue_dflash_context_append(std::span<const std::uint32_
         const std::uint32_t start = starts[row];
         const std::uint64_t end64 = static_cast<std::uint64_t>(start) + counts[row];
         const std::uint32_t end   = static_cast<std::uint32_t>(end64);
-        if (!sequence.kv || !sequence.kv->backend || sequence.kv->text.bound_row() < 0 ||
-            sequence.kv->backend->bound_row() < 0 || end64 > capacity) {
+        if (!sequence.kv || sequence.kv->text.bound_row() < 0 ||
+            (backend_kv_cache() &&
+             (!sequence.kv->backend || sequence.kv->backend->bound_row() < 0)) ||
+            end64 > capacity) {
             throw std::logic_error("DFlash context append is outside retained target storage");
         }
         dflash_host_ingress->context_frontiers[row] =
             checked_i32(start, "DFlash append context frontier");
         dflash_host_ingress->execution_frontiers[row] =
             checked_i32(end, "DFlash append target frontier");
-        dflash_host_ingress->dflash_kv_table_rows[row] = sequence.kv->backend->bound_row();
-        dflash_host_ingress->lanes[row]                = static_cast<std::int32_t>(lane);
-        materialize_sequence_kv(sequence, std::max(sequence.text_kv_valid, end), end);
+        dflash_host_ingress->dflash_kv_table_rows[row] =
+            sequence.kv->backend ? sequence.kv->backend->bound_row() : 0;
+        dflash_host_ingress->active_lanes[row] = static_cast<std::int32_t>(lane);
+        const StateImageSelectors selectors = state_selectors(sequence);
+        dflash_host_ingress->state_source_slots[row] = selectors.source;
+        dflash_host_ingress->state_destination_slots[row] = selectors.destination;
+        materialize_sequence_kv(sequence, std::max(sequence.text_kv_valid, end),
+                                backend_kv_cache() ? end : 0U);
         minimum_count = std::min(minimum_count, counts[row]);
         maximum_count = std::max(maximum_count, counts[row]);
     }
@@ -1757,7 +1791,7 @@ runtime::PrefillStepResult ProgramImplCore::advance_prefill(SequenceState& seque
             const bool final_candidate = staged.cursor + nominal == staged.prompt_tokens;
             mark_workspace_usage(staged.prepare_mtp ? workspace_plan.mtp_prefill
                                                     : workspace_plan.text_prefill);
-            if (speculative_backend == SpeculativeBackend::DFlash) {
+            if (is_masked_draft_backend(speculative_backend)) {
                 mark_workspace_usage(workspace_plan.dflash_context);
             }
             schedule::PrefillChunkResult result;
@@ -1783,7 +1817,7 @@ runtime::PrefillStepResult ProgramImplCore::advance_prefill(SequenceState& seque
             staged.cursor += result.processed_tokens;
             sequence.text_kv_valid = staged.cursor;
             if (staged.prepare_mtp) { sequence.mtp_kv_valid = staged.cursor; }
-            if (speculative_backend == SpeculativeBackend::DFlash) {
+            if (is_masked_draft_backend(speculative_backend)) {
                 sequence.dflash_context_frontier = staged.cursor;
             }
 
@@ -1855,7 +1889,7 @@ runtime::PrefillStepResult ProgramImplCore::advance_prefill(SequenceState& seque
             sequence.mtp_draft_count = staged.initial_mtp_extent;
             std::copy_n(initial_drafts.begin(), staged.initial_mtp_extent,
                         sequence.mtp_drafts.begin());
-        } else if (speculative_backend == SpeculativeBackend::DFlash &&
+        } else if (is_masked_draft_backend(speculative_backend) &&
                    sequence.dflash_context_frontier != prompt_tokens) {
             throw std::logic_error("staged DFlash prefill did not reach the prompt frontier");
         }
@@ -1871,7 +1905,7 @@ runtime::PrefillStepResult ProgramImplCore::advance_prefill(SequenceState& seque
                 (!staged.prepare_mtp || sequence.mtp_kv_valid < frontier - 1)) {
                 throw std::logic_error("rewrite checkpoint has no complete MTP prefix");
             }
-            if (speculative_backend == SpeculativeBackend::DFlash &&
+            if (is_masked_draft_backend(speculative_backend) &&
                 (!dflash || !sequence.kv || !sequence.kv->backend ||
                  sequence.dflash_context_frontier < frontier)) {
                 throw std::logic_error("rewrite checkpoint has no complete DFlash prefix");
@@ -2302,7 +2336,7 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
 runtime::BatchedGeneratedRound
 ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                                      std::span<const runtime::RoundBudget> budgets) {
-    if (speculative_backend != SpeculativeBackend::DFlash || !io.dflash_decode || !dflash) {
+    if (!is_masked_draft_backend(speculative_backend) || !io.dflash_decode || !dflash) {
         throw std::logic_error("DFlash batch execution requires the DFlash backend");
     }
     if (lanes.empty() || lanes.size() > max_concurrency || budgets.size() != lanes.size()) {
@@ -2322,8 +2356,10 @@ ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         const SequenceState& sequence = sequences[lane];
         const RequestControl& request = requests[lane];
         if (request.lifecycle != Lifecycle::Active ||
-            budgets[row].generated_tokens_remaining == 0 || !sequence.kv || !sequence.kv->backend ||
-            sequence.kv->text.bound_row() < 0 || sequence.kv->backend->bound_row() < 0 ||
+            budgets[row].generated_tokens_remaining == 0 || !sequence.kv ||
+            sequence.kv->text.bound_row() < 0 ||
+            (backend_kv_cache() &&
+             (!sequence.kv->backend || sequence.kv->backend->bound_row() < 0)) ||
             sequence.execution_frontier >= capacity ||
             sequence.text_kv_valid != sequence.execution_frontier ||
             sequence.dflash_context_frontier > sequence.execution_frontier ||
@@ -2375,13 +2411,25 @@ ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                 checked_i32(frontier, "DFlash batch frontier");
             dflash_host_ingress->context_frontiers[row] =
                 checked_i32(sequence.dflash_context_frontier, "DFlash context frontier");
+            dflash_host_ingress->proposal_valid_columns[row] = static_cast<std::int32_t>(width);
             dflash_host_ingress->proposal_extents[row]     = static_cast<std::int32_t>(extent);
             dflash_host_ingress->target_valid_columns[row] = static_cast<std::int32_t>(extent + 1U);
+            for (std::uint32_t column = 0; column < width; ++column) {
+                const std::uint32_t position = frontier + std::min(column, extent);
+                dflash_host_ingress->target_rope_positions[row * width + column] =
+                    checked_i32(position, "DFlash target RoPE position") + sequence.rope_delta;
+            }
             dflash_host_ingress->text_kv_table_rows[row]   = sequence.kv->text.bound_row();
-            dflash_host_ingress->dflash_kv_table_rows[row] = sequence.kv->backend->bound_row();
-            dflash_host_ingress->lanes[row]    = static_cast<std::int32_t>(sequence.lane);
+            dflash_host_ingress->dflash_kv_table_rows[row] =
+            sequence.kv->backend ? sequence.kv->backend->bound_row() : 0;
+            dflash_host_ingress->active_lanes[row] =
+                static_cast<std::int32_t>(sequence.lane);
+            const StateImageSelectors selectors = state_selectors(sequence);
+            dflash_host_ingress->state_source_slots[row] = selectors.source;
+            dflash_host_ingress->state_destination_slots[row] = selectors.destination;
             dflash_host_ingress->sampling[row] = request.sampling_host;
-            materialize_sequence_kv(sequence, frontier + extent + 1U, frontier);
+            materialize_sequence_kv(sequence, frontier + extent + 1U,
+                                    backend_kv_cache() ? frontier : 0U);
         }
 
         schedule::DFlashBatchContext schedule_state{{device, model, work, decoder->linear_attention,

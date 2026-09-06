@@ -133,7 +133,6 @@ struct ModelView {
     std::optional<OptimizedProposalWeights> optimized_proposal;
     std::optional<MtpLayer> mtp;
     std::optional<DFlashPayload> dflash;
-    std::optional<DFlash2Weights> dflash2;
     std::optional<VisionWeights> vision;
 };
 

@@ -691,7 +691,7 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
             throw std::logic_error("selected DFlash2 weights are absent from the binding plan");
         }
         const DFlash2Plan& source = *plan.dflash2;
-        auto& dflash2             = runtime.dflash2.emplace();
+        auto& dflash2             = runtime.dflash.emplace();
         dflash2.feature_projection =
             materialized_weight(backing, source.feature_projection, 5120, 25600);
         dflash2.context_norm = artifact::materialized_tensor(backing, source.context_norm,
