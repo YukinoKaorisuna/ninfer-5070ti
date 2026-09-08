@@ -49,3 +49,26 @@ profiles/
 
 # Local model artifacts (large)
 models/
+
+# ---------------------------------------------------------------------------
+# Local research / kernel experiment artifacts
+# These files are intentionally kept locally for provenance but should not
+# normally be committed.
+# ---------------------------------------------------------------------------
+
+research/
+iterable
+
+*.pre-*
+*.bak
+*.bak2
+*.v1
+
+# Named local experiment snapshots that do not follow .pre-* convention
+*.direct-x-*
+*.fast-t1
+*.fast-t1-*
+*.funnel-*
+*.qwen38-*
+*.t32-mma-current
+*.xloadbatch-*
