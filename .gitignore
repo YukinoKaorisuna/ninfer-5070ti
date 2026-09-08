@@ -72,3 +72,5 @@ iterable
 *.qwen38-*
 *.t32-mma-current
 *.xloadbatch-*
+*.q3-directx-*
+*.q3-t32-mma-*
