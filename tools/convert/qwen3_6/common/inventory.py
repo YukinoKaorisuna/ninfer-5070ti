@@ -17,6 +17,7 @@ RESOURCE_ENCODING = "raw-bytes-v1"
 BF16 = "BF16"
 FP32 = "FP32"
 I32 = "I32"
+Q3 = "Q3G64_F16S"
 Q4 = "Q4G64_F16S"
 Q5 = "Q5G64_F16S"
 Q6 = "Q6G64_F16S"
@@ -151,6 +152,7 @@ __all__ = [
     "LAYOUT_NAMES",
     "LogicalAliasSpec",
     "LogicalRowViewSpec",
+    "Q3",
     "Q4",
     "Q5",
     "Q6",

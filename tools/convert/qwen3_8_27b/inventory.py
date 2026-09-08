@@ -17,6 +17,7 @@ TARGET_KEY = "qwen3_8_27b"
 BF16 = qwen3_6_inventory.BF16
 FP32 = qwen3_6_inventory.FP32
 I32 = qwen3_6_inventory.I32
+Q3 = qwen3_6_inventory.Q3
 Q4 = qwen3_6_inventory.Q4
 Q5 = qwen3_6_inventory.Q5
 Q6 = qwen3_6_inventory.Q6
@@ -34,8 +35,32 @@ RESOURCE_SPECS = qwen3_6_inventory.RESOURCE_SPECS
 
 
 def _w8_vocabulary_endpoint(spec: TensorSpec) -> TensorSpec:
-    if spec.name in ("text/token_embedding", "text/output_head"):
-        return qwen3_6_inventory.tensor_spec(spec.name, spec.shape, W8)
+    # RTX 5080 16 GB profile v3.
+    if spec.name == "text/token_embedding":
+        return qwen3_6_inventory.tensor_spec(spec.name, spec.shape, Q5)
+
+    if spec.name == "text/output_head":
+        return qwen3_6_inventory.tensor_spec(spec.name, spec.shape, Q4)
+
+    # Keep fused GDN value/z on Q5.
+    # Quantize the GDN output projection to Q4 instead; runtime uses
+    # ordinary Q4 linear followed by residual_add.
+    if spec.name.startswith("text/layers/") and spec.name.endswith("/gdn/output"):
+        return qwen3_6_inventory.tensor_spec(spec.name, spec.shape, Q4)
+
+    # Full-attention output projection. Qwen3.8 uses the ordinary Q4
+    # linear + residual_add path; Qwen3.6 remains on fused Q5 linear_add.
+    if spec.name.startswith("text/layers/") and spec.name.endswith("/attention/output"):
+        return qwen3_6_inventory.tensor_spec(spec.name, spec.shape, Q4)
+
+    # Largest tensor family in the model. Q3 is introduced narrowly here
+    # so the rest of the existing Q4/Q5 kernel contracts remain unchanged.
+    if spec.name.startswith("text/layers/") and spec.name.endswith("/mlp/gate_up"):
+        return qwen3_6_inventory.tensor_spec(spec.name, spec.shape, Q3)
+
+    if spec.name.startswith("text/layers/") and spec.name.endswith("/mlp/down"):
+        return qwen3_6_inventory.tensor_spec(spec.name, spec.shape, Q4)
+
     return spec
 
 

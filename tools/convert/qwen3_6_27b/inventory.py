@@ -16,6 +16,7 @@ from tools.convert.qwen3_6.common.inventory import (
     LAYOUT_NAMES,
     LogicalAliasSpec,
     LogicalRowViewSpec,
+    Q3,
     Q4,
     Q5,
     Q6,

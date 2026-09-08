@@ -35,6 +35,8 @@ struct QuantGeometry {
 
 QuantGeometry quant_geometry(NumericFormat format) {
     switch (format) {
+    case NumericFormat::Q3G64_F16S:
+        return {64, 24, 0};
     case NumericFormat::Q4G64_F16S:
         return {64, 32, 0};
     case NumericFormat::Q5G64_F16S:
@@ -70,6 +72,8 @@ std::string_view format_name(NumericFormat format) noexcept {
         return "FP32";
     case NumericFormat::I32:
         return "I32";
+    case NumericFormat::Q3G64_F16S:
+        return "Q3G64_F16S";
     case NumericFormat::Q4G64_F16S:
         return "Q4G64_F16S";
     case NumericFormat::Q5G64_F16S:

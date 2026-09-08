@@ -51,6 +51,10 @@ bool matches(const Tensor& x, const Weight& weight) {
 
 } // namespace
 
+using Qwen38DownGeometry   = Q4LinearGeometry<5120, 17408>;
+using Qwen38GdnOutGeometry = Q4LinearGeometry<5120, 6144>;
+using Qwen38HeadGeometry   = Q4LinearGeometry<248320, 5120>;
+
 void launch_q4_draft_head_small_t(const Tensor& x, const Weight& weight, Tensor& out,
                                   cudaStream_t stream) {
     if (matches<FullGeometry>(x, weight) && x.ne[1] <= kLastFullT) {
@@ -63,6 +67,35 @@ void launch_q4_draft_head_small_t(const Tensor& x, const Weight& weight, Tensor&
         return;
     }
     throw std::invalid_argument("Q4 Linear draft-head small-T: unsupported exact problem");
+}
+
+
+void launch_q4_qwen38_down_t4(const Tensor& x, const Weight& weight, Tensor& out,
+                              cudaStream_t stream) {
+    if (!matches<Qwen38DownGeometry>(x, weight) || x.ne[1] != 4) {
+        throw std::invalid_argument("Q4 Qwen3.8 down T4: unsupported exact problem");
+    }
+
+    launch_exact<Qwen38DownGeometry, 8, 4>(x, weight, out, stream);
+}
+
+void launch_q4_qwen38_gdn_out_t4(const Tensor& x, const Weight& weight, Tensor& out,
+                                 cudaStream_t stream) {
+    if (!matches<Qwen38GdnOutGeometry>(x, weight) || x.ne[1] != 4) {
+        throw std::invalid_argument("Q4 Qwen3.8 GDN output T4: unsupported exact problem");
+    }
+
+    launch_exact<Qwen38GdnOutGeometry, 8, 4>(x, weight, out, stream);
+}
+
+
+void launch_q4_qwen38_head_t4(const Tensor& x, const Weight& weight, Tensor& out,
+                              cudaStream_t stream) {
+    if (!matches<Qwen38HeadGeometry>(x, weight) || x.ne[1] != 4) {
+        throw std::invalid_argument("Q4 Qwen3.8 output head T4: unsupported exact problem");
+    }
+
+    launch_exact<Qwen38HeadGeometry, 8, 4>(x, weight, out, stream);
 }
 
 } // namespace ninfer::ops::detail

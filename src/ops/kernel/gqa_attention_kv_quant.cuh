@@ -22,6 +22,9 @@ inline constexpr int kGqaKvQuantHeadDim = 256;
 inline constexpr int kGqaKvQuantGroup   = 64;
 inline constexpr int kGqaKvQuantGroups  = kGqaKvQuantHeadDim / kGqaKvQuantGroup;
 
+// INT4-G64 stores two signed 4-bit codes per byte.
+inline constexpr int kGqaKvQ4CodeExtent = kGqaKvQuantHeadDim / 2;
+
 template <typename Geometry>
 __device__ __forceinline__ std::int64_t gqa_kv_quant_code_index(int physical_page, int kv_head,
                                                                 int d, int page_offset) {
@@ -34,6 +37,13 @@ __device__ __forceinline__ std::int64_t gqa_kv_quant_scale_index(int physical_pa
                                                                  int group, int page_offset) {
     return paged_kv_element_offset<kGqaKvQuantGroups, Geometry::KVHeads>(physical_page, kv_head,
                                                                          page_offset, group);
+}
+
+template <typename Geometry>
+__device__ __forceinline__ std::int64_t gqa_kv_q4_code_index(int physical_page, int kv_head,
+                                                              int d, int page_offset) {
+    return paged_kv_element_offset<kGqaKvQ4CodeExtent, Geometry::KVHeads>(
+        physical_page, kv_head, page_offset, d >> 1);
 }
 
 template <typename Geometry>
@@ -51,6 +61,32 @@ __device__ __forceinline__ std::int8_t gqa_kv_quant_code(float x, float inv_scal
     if (inv_scale == 0.0f) { return static_cast<std::int8_t>(0); }
     int q = __float2int_rn(x * inv_scale);
     q     = max(-127, min(127, q));
+    return static_cast<std::int8_t>(q);
+}
+
+// Signed symmetric INT4-G64 codec. The per-group FP16 scale is absmax/7,
+// mirroring the INT8-G64 absmax/127 contract while keeping equal positive
+// and negative representable magnitude.
+__device__ __forceinline__ std::int8_t gqa_kv_quant_q4_code(float x, float inv_scale) {
+    if (inv_scale == 0.0f) { return static_cast<std::int8_t>(0); }
+    int q = __float2int_rn(x * inv_scale);
+    q     = max(-7, min(7, q));
+    return static_cast<std::int8_t>(q);
+}
+
+__device__ __forceinline__ std::uint8_t gqa_kv_pack_q4(std::int8_t q0, std::int8_t q1) {
+    const std::uint8_t lo = static_cast<std::uint8_t>(q0) & 0x0fu;
+    const std::uint8_t hi = static_cast<std::uint8_t>(q1) & 0x0fu;
+    return static_cast<std::uint8_t>(lo | (hi << 4));
+}
+
+__device__ __forceinline__ std::int8_t gqa_kv_unpack_q4_low(std::uint8_t packed) {
+    const int q = (static_cast<int>(packed & 0x0fu) ^ 0x08) - 0x08;
+    return static_cast<std::int8_t>(q);
+}
+
+__device__ __forceinline__ std::int8_t gqa_kv_unpack_q4_high(std::uint8_t packed) {
+    const int q = (static_cast<int>(packed >> 4) ^ 0x08) - 0x08;
     return static_cast<std::int8_t>(q);
 }
 
@@ -72,6 +108,24 @@ __device__ __forceinline__ int4 gqa_kv_dequant_i8x8_from(const std::int8_t* code
     }
     return make_int4(static_cast<int>(packed[0]), static_cast<int>(packed[1]),
                      static_cast<int>(packed[2]), static_cast<int>(packed[3]));
+}
+
+// Dequantize 8 consecutive signed INT4 codes from 4 packed bytes.
+__device__ __forceinline__ int4 gqa_kv_dequant_q4x8_from(const std::uint8_t* codes4, float s) {
+    std::uint32_t raw = 0;
+    __builtin_memcpy(&raw, codes4, sizeof(raw));
+
+    unsigned values[4];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const std::uint8_t b = static_cast<std::uint8_t>(raw >> (8 * i));
+        const float x0 = static_cast<float>(gqa_kv_unpack_q4_low(b)) * s;
+        const float x1 = static_cast<float>(gqa_kv_unpack_q4_high(b)) * s;
+        values[i] = pack_bf16x2(x0, x1);
+    }
+
+    return make_int4(static_cast<int>(values[0]), static_cast<int>(values[1]),
+                     static_cast<int>(values[2]), static_cast<int>(values[3]));
 }
 
 } // namespace ninfer::ops

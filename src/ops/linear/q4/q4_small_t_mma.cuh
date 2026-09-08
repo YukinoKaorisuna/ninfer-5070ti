@@ -28,6 +28,14 @@ struct Q4DraftHeadGeometry {
     static constexpr int kGroupsPerRow = kInputRows / 64;
 };
 
+// Generic Q4 geometry for exact small-T linear projections.
+template <int OutputRows, int InputRows>
+struct Q4LinearGeometry {
+    static constexpr int kOutputRows   = OutputRows;
+    static constexpr int kInputRows    = InputRows;
+    static constexpr int kGroupsPerRow = kInputRows / 64;
+};
+
 struct Q4DraftSmallTSchedule {
     static constexpr int kKWarps            = 8;
     static constexpr int kMinBlocksPerSm    = 6;

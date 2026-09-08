@@ -91,6 +91,7 @@ NumericFormat parse_format(std::string_view name) {
     if (name == "BF16") { return NumericFormat::BF16; }
     if (name == "FP32") { return NumericFormat::FP32; }
     if (name == "I32") { return NumericFormat::I32; }
+    if (name == "Q3G64_F16S") { return NumericFormat::Q3G64_F16S; }
     if (name == "Q4G64_F16S") { return NumericFormat::Q4G64_F16S; }
     if (name == "Q5G64_F16S") { return NumericFormat::Q5G64_F16S; }
     if (name == "Q6G64_F16S") { return NumericFormat::Q6G64_F16S; }

@@ -107,8 +107,16 @@ std::size_t post_mixer_workspace_bytes(QType gate_up_qtype, QType down_qtype,
     }
     {
         auto scope = layout.scope();
-        (void)layout.alloc_bytes(ops::linear_add_workspace_capacity_bytes(
-            down_qtype, TextConfig::hidden, TextConfig::intermediate, policy, first, last));
+        if (down_qtype == QType::Q4G64_F16S) {
+            (void)layout.alloc(DType::BF16, {TextConfig::hidden, last});
+            (void)layout.alloc_bytes(ops::linear_workspace_capacity_bytes(
+                down_qtype, TextConfig::hidden, TextConfig::intermediate,
+                policy, first, last));
+        } else {
+            (void)layout.alloc_bytes(ops::linear_add_workspace_capacity_bytes(
+                down_qtype, TextConfig::hidden, TextConfig::intermediate,
+                policy, first, last));
+        }
     }
     return layout.peak_bytes(1);
 }
@@ -172,6 +180,15 @@ void Variant::attention_projection(const Tensor& hidden,
 void Variant::attention_output_projection(const Tensor& attention, const Weight& weight,
                                           Tensor& residual, qwen3_6::TextPhase,
                                           WorkspaceArena& workspace, cudaStream_t stream) {
+    if (weight.qtype == QType::Q4G64_F16S) {
+        auto scope = workspace.scope();
+        Tensor delta =
+            workspace.alloc(DType::BF16, {TextConfig::hidden, attention.ne[1]});
+        ops::linear(attention, weight, delta, stream);
+        ops::residual_add(delta, residual, stream);
+        return;
+    }
+
     ops::linear_add(attention, weight, residual, text_policy(weight), workspace, stream);
 }
 
@@ -271,6 +288,15 @@ void Variant::gdn_input_projection_record(const Tensor& hidden, const GdnProject
 void Variant::gdn_output_projection(const Tensor& hidden, const Weight& weight, Tensor& residual,
                                     qwen3_6::TextPhase, WorkspaceArena& workspace,
                                     cudaStream_t stream) {
+    if (weight.qtype == QType::Q4G64_F16S) {
+        auto scope = workspace.scope();
+        Tensor delta =
+            workspace.alloc(DType::BF16, {TextConfig::hidden, hidden.ne[1]});
+        ops::linear(hidden, weight, delta, stream);
+        ops::residual_add(delta, residual, stream);
+        return;
+    }
+
     ops::linear_add(hidden, weight, residual, text_policy(weight), workspace, stream);
 }
 
@@ -297,8 +323,16 @@ void Variant::post_mixer(const Tensor& hidden, const PostMixerWeights& weights, 
     Tensor activation = workspace.alloc(DType::BF16, {TextConfig::intermediate, hidden.ne[1]});
     ops::linear_swiglu(hidden, weights.gate_up, activation, text_policy(weights.gate_up), workspace,
                        stream);
-    ops::linear_add(activation, weights.down, residual, text_policy(weights.down), workspace,
-                    stream);
+
+    if (weights.down.qtype == QType::Q4G64_F16S) {
+        Tensor delta =
+            workspace.alloc(DType::BF16, {TextConfig::hidden, hidden.ne[1]});
+        ops::linear(activation, weights.down, delta, text_policy(weights.down), workspace, stream);
+        ops::residual_add(delta, residual, stream);
+    } else {
+        ops::linear_add(activation, weights.down, residual, text_policy(weights.down), workspace,
+                        stream);
+    }
 }
 
 void Variant::mtp_post_mixer(const Tensor& hidden, const MtpPostMixerWeights& weights,
@@ -360,10 +394,16 @@ std::size_t Variant::attention_output_projection_workspace_capacity_bytes(
     validate_token_interval(first, last);
     switch (weights_profile) {
     case WeightsProfile::Qwen36GroupwiseInt:
-    case WeightsProfile::Qwen38GroupwiseInt:
         return ops::linear_add_workspace_capacity_bytes(QType::Q5G64_F16S, TextConfig::hidden,
                                                         TextConfig::query_size,
                                                         ops::LinearPolicy::A16Only, first, last);
+
+    case WeightsProfile::Qwen38GroupwiseInt: {
+        WorkspaceLayoutBuilder layout;
+        (void)layout.alloc(DType::BF16, {TextConfig::hidden, last});
+        return layout.peak_bytes(1);
+    }
+
     case WeightsProfile::Qwen36Nvfp4:
         return ops::linear_add_workspace_capacity_bytes(QType::NVFP4, TextConfig::hidden,
                                                         TextConfig::query_size, kNvfp4TextPolicy,
@@ -452,10 +492,16 @@ std::size_t Variant::gdn_output_projection_workspace_capacity_bytes(WeightsProfi
     validate_token_interval(first, last);
     switch (weights_profile) {
     case WeightsProfile::Qwen36GroupwiseInt:
-    case WeightsProfile::Qwen38GroupwiseInt:
         return ops::linear_add_workspace_capacity_bytes(QType::Q5G64_F16S, TextConfig::hidden,
                                                         TextConfig::value_dim,
                                                         ops::LinearPolicy::A16Only, first, last);
+
+    case WeightsProfile::Qwen38GroupwiseInt: {
+        WorkspaceLayoutBuilder layout;
+        (void)layout.alloc(DType::BF16, {TextConfig::hidden, last});
+        return layout.peak_bytes(1);
+    }
+
     case WeightsProfile::Qwen36Nvfp4:
         return ops::linear_add_workspace_capacity_bytes(
             QType::NVFP4, TextConfig::hidden, TextConfig::value_dim, kNvfp4TextPolicy, first, last);

@@ -16,6 +16,7 @@ StorageLayout storage_layout_for(NumericFormat format) {
     case NumericFormat::FP32:
     case NumericFormat::I32:
         return StorageLayout::ContiguousLeV1;
+    case NumericFormat::Q3G64_F16S:
     case NumericFormat::Q4G64_F16S:
     case NumericFormat::Q5G64_F16S:
     case NumericFormat::Q6G64_F16S:
@@ -37,6 +38,8 @@ QType qtype_for(NumericFormat format) {
         return QType::FP32_CTRL;
     case NumericFormat::I32:
         return QType::I32_CTRL;
+    case NumericFormat::Q3G64_F16S:
+        return QType::Q3G64_F16S;
     case NumericFormat::Q4G64_F16S:
         return QType::Q4G64_F16S;
     case NumericFormat::Q5G64_F16S:

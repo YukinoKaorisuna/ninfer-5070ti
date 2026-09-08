@@ -22,6 +22,7 @@ enum class NumericFormat {
     BF16,
     FP32,
     I32,
+    Q3G64_F16S,
     Q4G64_F16S,
     Q5G64_F16S,
     Q6G64_F16S,
