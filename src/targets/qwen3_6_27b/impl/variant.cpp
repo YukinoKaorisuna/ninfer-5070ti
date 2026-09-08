@@ -52,6 +52,8 @@ ops::LinearPolicy text_policy(const Weight& weight) {
         return kNvfp4TextPolicy;
     case QType::FP8_E4M3FN_ROW_BF16S:
         return kFp8TextPolicy;
+    case QType::Q3G64_F16S:
+        return ops::LinearPolicy::AllowA8;
     default:
         return ops::LinearPolicy::A16Only;
     }

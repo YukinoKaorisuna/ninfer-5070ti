@@ -14,7 +14,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <stdexcept>
-#include <string_view>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -31,15 +30,6 @@ constexpr int kBytesPerGroup = 24;
 constexpr int kThreads      = 256;
 
 constexpr int kQ3Int8MaxTokenTile = 4096;
-
-bool q3_e101_enabled() noexcept {
-    static const bool enabled = [] {
-        const char* v = std::getenv("NINFER_Q3_E101");
-        return v == nullptr || std::string_view(v) != "0";
-    }();
-    return enabled;
-}
-
 
 struct Q3LinearSwiGluInt8Workspace {
     std::int8_t* codes = nullptr;
@@ -1531,19 +1521,21 @@ std::size_t q3_linear_swiglu_workspace_capacity_bytes(
 
     if (gate_up_rows != kGateUpRows ||
         input_rows != kK ||
-        policy != LinearPolicy::A16Only ||
+        (policy != LinearPolicy::A16Only &&
+         policy != LinearPolicy::AllowA8) ||
         min_tokens <= 0 ||
         max_tokens < min_tokens) {
         throw std::invalid_argument(
             "q3 linear_swiglu: unsupported profile");
     }
 
-    // Existing decode/small-T routes remain fully fused.
-    if (max_tokens < 257 || !q3_e101_enabled()) {
+    // Decode and small-T remain on the existing A16 routes.
+    // A16Only also preserves the complete historical prefill path.
+    if (policy != LinearPolicy::AllowA8 || max_tokens < 257) {
         return 0;
     }
 
-    // E101 A8 staging is bounded to at most 4096 tokens.
+    // AllowA8 uses bounded activation-quantization staging for T >= 257.
     return q3_int8_workspace_bytes(max_tokens);
 }
 
@@ -1555,7 +1547,8 @@ void q3_linear_swiglu_dispatch(
     WorkspaceArena& workspace,
     cudaStream_t stream) {
 
-    if (policy != LinearPolicy::A16Only ||
+    if ((policy != LinearPolicy::A16Only &&
+         policy != LinearPolicy::AllowA8) ||
         w.qtype != QType::Q3G64_F16S ||
         w.n != kGateUpRows ||
         w.k != kK ||
@@ -1624,9 +1617,9 @@ void q3_linear_swiglu_dispatch(
         return;
     }
 
-    // E101: only large prefill changes numerical path.
+    // AllowA8 changes only large prefill.
     // T=1 through T=256 remain on the existing A16 kernels.
-    if (tokens >= 257 && q3_e101_enabled()) {
+    if (policy == LinearPolicy::AllowA8 && tokens >= 257) {
         auto scratch_scope = workspace.scope();
 
         const int tile =
