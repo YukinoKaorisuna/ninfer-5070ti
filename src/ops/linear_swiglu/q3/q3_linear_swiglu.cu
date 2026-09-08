@@ -5,12 +5,16 @@
 #include "ops/common/memory.cuh"
 #include "ops/common/mma.cuh"
 #include "ops/common/warp.cuh"
+#include "ops/common/act_quant_g64.h"
+#include "ops/linear_swiglu/q3/q3_linear_swiglu_int8_gemm.cuh"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <stdexcept>
+#include <string_view>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -25,6 +29,41 @@ constexpr int kGroupK       = 64;
 constexpr int kGroups       = kK / kGroupK;       // 80
 constexpr int kBytesPerGroup = 24;
 constexpr int kThreads      = 256;
+
+constexpr int kQ3Int8MaxTokenTile = 4096;
+
+bool q3_e101_enabled() noexcept {
+    static const bool enabled = [] {
+        const char* v = std::getenv("NINFER_Q3_E101");
+        return v == nullptr || std::string_view(v) != "0";
+    }();
+    return enabled;
+}
+
+
+struct Q3LinearSwiGluInt8Workspace {
+    std::int8_t* codes = nullptr;
+    float* scales      = nullptr;
+};
+
+constexpr int q3_int8_token_tile(int tokens) noexcept {
+    return tokens < kQ3Int8MaxTokenTile
+        ? tokens
+        : kQ3Int8MaxTokenTile;
+}
+
+constexpr std::size_t q3_int8_workspace_bytes(int tokens) noexcept {
+    const std::size_t tile =
+        static_cast<std::size_t>(q3_int8_token_tile(tokens));
+
+    // I8 [5120,tile] + FP32 [80,tile].
+    //
+    // 5120 is itself a 256-byte multiple, so the second default-aligned
+    // WorkspaceArena allocation begins without any extra padding.
+    return static_cast<std::size_t>(kK) * tile
+        + static_cast<std::size_t>(kGroups) * tile * sizeof(float);
+}
+
 
 // Host-side profiling only. This counts dispatcher calls by token count,
 // without touching the CUDA kernels.
@@ -1369,6 +1408,118 @@ __global__ void q3_linear_swiglu_kernel(
     }
 }
 
+
+// -----------------------------------------------------------------------------
+// E101: Q3 weight / group-64 A8 large-prefill fused SwiGLU.
+//
+// Decode and small-T kernels are intentionally untouched.
+// Initial schedule is inherited from the measured RTX 4090 INT8 route;
+// Blackwell-specific retuning comes only after correctness/performance gating.
+// -----------------------------------------------------------------------------
+using Q3Int8FoldedCfg =
+    Q3Int8SwiGluSchedule<64, 256, 16, 128, 3, 1>;
+
+template <class Cfg, bool Full>
+void q3_launch_folded_int8(
+    const std::int8_t* xq,
+    const float* xs,
+    const Weight& weight,
+    Tensor& out,
+    std::int32_t tokens,
+    cudaStream_t stream) {
+
+    static const bool configured = [] {
+        CUDA_CHECK(
+            cudaFuncSetAttribute(
+                q3_linear_swiglu_int8_gemm_kernel<Cfg, Full>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                Cfg::kSharedBytes));
+        return true;
+    }();
+
+    (void)configured;
+
+    const dim3 grid(
+        static_cast<unsigned>(
+            div_up(out.ne[0], Cfg::kPairRows)),
+        static_cast<unsigned>(
+            div_up(tokens, Cfg::kBlockCols)));
+
+    q3_linear_swiglu_int8_gemm_kernel<Cfg, Full>
+        <<<grid,
+           Cfg::kThreads,
+           Cfg::kSharedBytes,
+           stream>>>(
+            xq,
+            xs,
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales),
+            static_cast<__nv_bfloat16*>(out.data),
+            out.ne[0],
+            tokens,
+            kK);
+
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void q3_linear_swiglu_int8_launch(
+    const Tensor& x,
+    const Weight& weight,
+    Tensor& out,
+    const Q3LinearSwiGluInt8Workspace& scratch,
+    cudaStream_t stream) {
+
+    using Cfg = Q3Int8FoldedCfg;
+
+    const std::int32_t tile =
+        q3_int8_token_tile(x.ne[1]);
+
+    for (std::int32_t offset = 0;
+         offset < x.ne[1];
+         offset += tile) {
+
+        const std::int32_t count =
+            std::min(tile, x.ne[1] - offset);
+
+        const Tensor x_slice =
+            x.slice(1, offset, count);
+
+        Tensor out_slice =
+            out.slice(1, offset, count);
+
+        act_quant_g64_launch(
+            static_cast<const __nv_bfloat16*>(x_slice.data),
+            scratch.codes,
+            scratch.scales,
+            kK,
+            count,
+            kK,
+            stream);
+
+        const bool full =
+            (count % Cfg::kBlockCols) == 0
+            && (out.ne[0] % Cfg::kPairRows) == 0;
+
+        if (full) {
+            q3_launch_folded_int8<Cfg, true>(
+                scratch.codes,
+                scratch.scales,
+                weight,
+                out_slice,
+                count,
+                stream);
+        } else {
+            q3_launch_folded_int8<Cfg, false>(
+                scratch.codes,
+                scratch.scales,
+                weight,
+                out_slice,
+                count,
+                stream);
+        }
+    }
+}
+
 } // namespace
 
 std::size_t q3_linear_swiglu_workspace_capacity_bytes(
@@ -1387,8 +1538,13 @@ std::size_t q3_linear_swiglu_workspace_capacity_bytes(
             "q3 linear_swiglu: unsupported profile");
     }
 
-    // Fully fused: no materialized [34816,T] intermediate.
-    return 0;
+    // Existing decode/small-T routes remain fully fused.
+    if (max_tokens < 257 || !q3_e101_enabled()) {
+        return 0;
+    }
+
+    // E101 A8 staging is bounded to at most 4096 tokens.
+    return q3_int8_workspace_bytes(max_tokens);
 }
 
 void q3_linear_swiglu_dispatch(
@@ -1396,7 +1552,7 @@ void q3_linear_swiglu_dispatch(
     const Weight& w,
     Tensor& out,
     LinearPolicy policy,
-    WorkspaceArena&,
+    WorkspaceArena& workspace,
     cudaStream_t stream) {
 
     if (policy != LinearPolicy::A16Only ||
@@ -1465,6 +1621,39 @@ void q3_linear_swiglu_dispatch(
     if (tokens == 4) {
         q3_linear_swiglu_small_t_pair_launch<4>(
             x, w, out, stream);
+        return;
+    }
+
+    // E101: only large prefill changes numerical path.
+    // T=1 through T=256 remain on the existing A16 kernels.
+    if (tokens >= 257 && q3_e101_enabled()) {
+        auto scratch_scope = workspace.scope();
+
+        const int tile =
+            q3_int8_token_tile(tokens);
+
+        Tensor code_storage =
+            workspace.alloc(
+                DType::I8,
+                {kK, tile});
+
+        Tensor scale_storage =
+            workspace.alloc(
+                DType::FP32,
+                {kGroups, tile});
+
+        const Q3LinearSwiGluInt8Workspace scratch{
+            static_cast<std::int8_t*>(code_storage.data),
+            static_cast<float*>(scale_storage.data),
+        };
+
+        q3_linear_swiglu_int8_launch(
+            x,
+            w,
+            out,
+            scratch,
+            stream);
+
         return;
     }
 
