@@ -62,6 +62,7 @@ target_link_libraries(ninfer_nvfp4_tma PRIVATE ninfer_core CUDA::cudart CUDA::cu
 # source is a build-boundary decision, not an accidental recursive-glob side effect.
 add_library(ninfer_ops STATIC
   ops/common/act_quant_g64.cu
+  ops/common/int8_proj_launch.cu
   ops/launcher/add_bias.cu
   ops/launcher/argmax.cu
   ops/launcher/cast.cu
@@ -113,6 +114,7 @@ add_library(ninfer_ops STATIC
   ops/attn_input_proj/nvfp4/nvfp4_attn_input_w4a4.cu
   ops/attn_input_proj/nvfp4/nvfp4_attn_input_plan.cpp
   ops/attn_input_proj/q4_q5/q4_q5_attn_input_gemm_mma.cu
+  ops/attn_input_proj/q4_q5/q4_q5_attn_input_int8.cu
   ops/attn_input_proj/q4_q5/q4_q5_attn_input_small_t.cu
   ops/attn_input_proj/q4_q5/q4_q5_attn_input_plan.cpp
   ops/attn_input_proj/w8/w8_attn_input_decode.cu
@@ -135,6 +137,7 @@ add_library(ninfer_ops STATIC
   ops/gdn_input_proj/nvfp4/nvfp4_gdn_snapshot_post.cu
   ops/gdn_input_proj/nvfp4/nvfp4_gdn_snapshot_plan.cpp
   ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_gemm_mma.cu
+  ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_int8.cu
   ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_independent.cu
   ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_conv_snapshot.cu
   ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_plan.cpp

@@ -34,6 +34,21 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
                      cudaStream_t stream);
 
 /**
+ * Returns the caller-owned transient capacity the split Q4/Q5 parents require for every T in the
+ * inclusive `[min_tokens,max_tokens]` interval under `policy`. A16Only requires none; AllowA8
+ * admits the INT8 prefill route, which stages the group-64 quantized activation once per call and
+ * shares it across the four projections.
+ */
+[[nodiscard]] std::size_t attn_input_proj_workspace_capacity_bytes(std::int32_t input_rows,
+                                                                   LinearPolicy policy,
+                                                                   std::int32_t min_tokens,
+                                                                   std::int32_t max_tokens);
+
+void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
+                     const Weight& gate_value_weight, Tensor& q, Tensor& gate, Tensor& k, Tensor& v,
+                     LinearPolicy policy, WorkspaceArena& workspace, cudaStream_t stream);
+
+/**
  * Computes the single-parent Q/K/output-gate/V projection.
  *
  * The parent stores rows in physical order query, key, output gate, value while the public output

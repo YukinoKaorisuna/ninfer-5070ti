@@ -59,6 +59,18 @@ ops::LinearPolicy text_policy(const Weight& weight) {
     }
 }
 
+
+// Q4/Q5 split attention/GDN projection pairs use A8 only during
+// Qwen3.8 prefill. Decode/verify remains on the established A16 path.
+ops::LinearPolicy text_proj_pair_policy(const Weight& weight,
+                                        qwen3_6::TextPhase phase) {
+    if (weight.qtype != QType::Q4G64_F16S ||
+        phase != qwen3_6::TextPhase::Prefill) {
+        return ops::LinearPolicy::A16Only;
+    }
+    return ops::LinearPolicy::AllowA8;
+}
+
 constexpr std::size_t kMinimumLeafWorkspaceBytes = 1;
 
 std::size_t gdn_snapshot_workspace_bytes(const Tensor& hidden,
@@ -167,11 +179,12 @@ std::vector<GraphExecutionProfile> Variant::dflash_graph_profiles(std::uint32_t,
 
 void Variant::attention_projection(const Tensor& hidden,
                                    const FullAttentionProjectionWeights& weights, Tensor& query,
-                                   Tensor& gate, Tensor& key, Tensor& value, qwen3_6::TextPhase,
+                                   Tensor& gate, Tensor& key, Tensor& value,
+                                   qwen3_6::TextPhase phase,
                                    WorkspaceArena& workspace, cudaStream_t stream) {
     if (const auto* split = std::get_if<SplitAttentionProjectionPayload>(&weights)) {
         ops::attn_input_proj(hidden, split->query_key, split->gate_value, query, gate, key, value,
-                             stream);
+                             text_proj_pair_policy(split->query_key, phase), workspace, stream);
         return;
     }
     const Weight& fused = std::get<FusedAttentionProjectionPayload>(weights).query_key_gate_value;
@@ -222,14 +235,15 @@ void Variant::mtp_q_gate_projection(const Tensor& hidden,
 }
 
 void Variant::gdn_input_projection(const Tensor& hidden, const GdnProjectionWeights& weights,
-                                   Tensor& qkv, Tensor& output_gate, qwen3_6::TextPhase,
+                                   Tensor& qkv, Tensor& output_gate,
+                                   qwen3_6::TextPhase phase,
                                    WorkspaceArena& workspace, cudaStream_t stream) {
     Tensor output_gate_flat =
         output_gate.view({TextConfig::value_dim, static_cast<int>(hidden.ne[1])});
     if (const auto* split =
             std::get_if<SplitGdnInputProjectionPayload>(&weights.input_projection)) {
         ops::gdn_input_proj(hidden, split->query_key, split->value_z, qkv, output_gate_flat,
-                            stream);
+                            text_proj_pair_policy(split->query_key, phase), workspace, stream);
         return;
     }
     const Weight& fused =
@@ -379,8 +393,10 @@ std::size_t Variant::attention_projection_workspace_capacity_bytes(WeightsProfil
     validate_token_interval(first, last);
     switch (weights_profile) {
     case WeightsProfile::Qwen36GroupwiseInt:
-    case WeightsProfile::Qwen38GroupwiseInt:
         return 0;
+    case WeightsProfile::Qwen38GroupwiseInt:
+        return ops::attn_input_proj_workspace_capacity_bytes(
+            TextConfig::hidden, ops::LinearPolicy::AllowA8, first, last);
     case WeightsProfile::Qwen36Nvfp4:
         return ops::attn_input_proj_workspace_capacity_bytes(
             QType::NVFP4, 14336, TextConfig::hidden, kNvfp4TextPolicy, first, last);
@@ -425,8 +441,10 @@ std::size_t Variant::gdn_input_projection_workspace_capacity_bytes(WeightsProfil
     validate_token_interval(first, last);
     switch (weights_profile) {
     case WeightsProfile::Qwen36GroupwiseInt:
-    case WeightsProfile::Qwen38GroupwiseInt:
         return 0;
+    case WeightsProfile::Qwen38GroupwiseInt:
+        return ops::gdn_input_proj_workspace_capacity_bytes(
+            TextConfig::hidden, ops::LinearPolicy::AllowA8, first, last);
     case WeightsProfile::Qwen36Nvfp4:
         return ops::gdn_input_proj_workspace_capacity_bytes(QType::NVFP4, 16384, TextConfig::hidden,
                                                             kNvfp4TextPolicy, first, last);

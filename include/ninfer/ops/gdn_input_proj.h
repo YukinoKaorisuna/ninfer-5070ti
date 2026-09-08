@@ -43,6 +43,21 @@ void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& valu
                     Tensor& qkv, Tensor& z, cudaStream_t stream);
 
 /**
+ * Returns the caller-owned transient capacity the split Q4/Q5 parents require for every T in the
+ * inclusive `[min_tokens,max_tokens]` interval under `policy`. A16Only requires none; AllowA8
+ * admits the INT8 prefill route, which stages the group-64 quantized activation once per call and
+ * shares it across the three projections.
+ */
+[[nodiscard]] std::size_t gdn_input_proj_workspace_capacity_bytes(std::int32_t input_rows,
+                                                                  LinearPolicy policy,
+                                                                  std::int32_t min_tokens,
+                                                                  std::int32_t max_tokens);
+
+void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
+                    Tensor& qkv, Tensor& z, LinearPolicy policy, WorkspaceArena& workspace,
+                    cudaStream_t stream);
+
+/**
  * Single-parent GDN projection. Registered parent forms are:
  *
  * - W8G32_F16S RowSplit [12288,2048], with stored row counts [2048,2048,4096,4096];

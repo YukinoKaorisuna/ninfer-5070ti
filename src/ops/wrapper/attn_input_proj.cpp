@@ -219,11 +219,20 @@ std::size_t attn_input_proj_workspace_capacity_bytes(QType parent_qtype, std::in
     throw std::invalid_argument("attn_input_proj workspace: unsupported parent qtype");
 }
 
-void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
-                     const Weight& gate_value_weight, Tensor& q, Tensor& gate, Tensor& k, Tensor& v,
-                     cudaStream_t stream) {
+namespace {
+
+void dispatch_split_parent(const Tensor& x, const Weight& query_key_weight,
+                           const Weight& gate_value_weight, Tensor& q, Tensor& gate, Tensor& k,
+                           Tensor& v, LinearPolicy policy, WorkspaceArena* workspace,
+                           cudaStream_t stream) {
+    validate_policy(policy);
+    if (policy == LinearPolicy::AllowA4) {
+        throw std::invalid_argument("attn_input_proj: Q4/Q5 parents admit only A16 or A8");
+    }
+
     const std::int32_t cols = x.ne[1];
     if (cols <= 0) { throw std::invalid_argument("attn_input_proj: T must be positive"); }
+
     switch (x.ne[0]) {
     case 5120: {
         constexpr std::int32_t kQRows  = 6144;
@@ -240,6 +249,9 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
         break;
     }
     case 4096: {
+        if (policy != LinearPolicy::A16Only) {
+            throw std::invalid_argument("4096-wide Q4/Q5 attn_input_proj admits only A16");
+        }
         constexpr std::int32_t kQRows  = 4096;
         constexpr std::int32_t kKvRows = 1024;
         require_matrix(x, 4096, cols, "x");
@@ -257,8 +269,35 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
         throw std::invalid_argument("attn_input_proj: unsupported input width");
     }
 
-    detail::q4_q5_attn_input_dispatch(x, query_key_weight, gate_value_weight, q, gate, k, v,
-                                      stream);
+    detail::q4_q5_attn_input_dispatch(
+        x, query_key_weight, gate_value_weight, q, gate, k, v, workspace, policy, stream);
+}
+
+} // namespace
+
+std::size_t attn_input_proj_workspace_capacity_bytes(std::int32_t input_rows,
+                                                     LinearPolicy policy,
+                                                     std::int32_t min_tokens,
+                                                     std::int32_t max_tokens) {
+    validate_policy(policy);
+    if (input_rows != 5120 || policy == LinearPolicy::AllowA4) {
+        throw std::invalid_argument("attn_input_proj workspace: unsupported Q4/Q5 profile");
+    }
+    return detail::q4_q5_attn_input_capacity_workspace_bytes(min_tokens, max_tokens, policy);
+}
+
+void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
+                     const Weight& gate_value_weight, Tensor& q, Tensor& gate, Tensor& k, Tensor& v,
+                     LinearPolicy policy, WorkspaceArena& workspace, cudaStream_t stream) {
+    dispatch_split_parent(x, query_key_weight, gate_value_weight, q, gate, k, v,
+                          policy, &workspace, stream);
+}
+
+void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
+                     const Weight& gate_value_weight, Tensor& q, Tensor& gate, Tensor& k, Tensor& v,
+                     cudaStream_t stream) {
+    dispatch_split_parent(x, query_key_weight, gate_value_weight, q, gate, k, v,
+                          LinearPolicy::A16Only, nullptr, stream);
 }
 
 void attn_input_proj(const Tensor& x, const Weight& query_key_gate_value_weight, Tensor& q,

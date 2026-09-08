@@ -727,10 +727,19 @@ void dispatch_single_parent_record(const Tensor& x, const Weight& weight, const 
 
 } // namespace
 
-void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
-                    Tensor& qkv, Tensor& z, cudaStream_t stream) {
+namespace {
+
+void dispatch_split_parent(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
+                           Tensor& qkv, Tensor& z, LinearPolicy policy, WorkspaceArena* workspace,
+                           cudaStream_t stream) {
+    validate_policy(policy);
+    if (policy == LinearPolicy::AllowA4) {
+        throw std::invalid_argument("gdn_input_proj: Q4/Q5 parents admit only A16 or A8");
+    }
+
     const std::int32_t cols = x.ne[1];
     if (cols <= 0) { throw std::invalid_argument("gdn_input_proj: T must be positive"); }
+
     switch (x.ne[0]) {
     case 5120: {
         constexpr std::int32_t kQkRows    = 4096;
@@ -744,7 +753,12 @@ void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& valu
                          "value/z weight");
         break;
     }
+
     case 4096: {
+        if (policy != LinearPolicy::A16Only) {
+            throw std::invalid_argument("4096-wide Q4/Q5 gdn_input_proj admits only A16");
+        }
+
         constexpr std::int32_t kQkRows    = 4096;
         constexpr std::int32_t kValueRows = 4096;
         constexpr std::int32_t kZRows     = 4096;
@@ -756,11 +770,41 @@ void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& valu
                          "value/z weight");
         break;
     }
+
     default:
         throw std::invalid_argument("gdn_input_proj: unsupported input width");
     }
 
-    detail::q4_q5_gdn_input_dispatch(x, qk_weight, value_z_weight, qkv, z, stream);
+    detail::q4_q5_gdn_input_dispatch(
+        x, qk_weight, value_z_weight, qkv, z, workspace, policy, stream);
+}
+
+} // namespace
+
+std::size_t gdn_input_proj_workspace_capacity_bytes(std::int32_t input_rows,
+                                                    LinearPolicy policy,
+                                                    std::int32_t min_tokens,
+                                                    std::int32_t max_tokens) {
+    validate_policy(policy);
+    if (input_rows != 5120 || policy == LinearPolicy::AllowA4) {
+        throw std::invalid_argument("gdn_input_proj workspace: unsupported Q4/Q5 profile");
+    }
+
+    return detail::q4_q5_gdn_input_capacity_workspace_bytes(
+        min_tokens, max_tokens, policy);
+}
+
+void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
+                    Tensor& qkv, Tensor& z, LinearPolicy policy, WorkspaceArena& workspace,
+                    cudaStream_t stream) {
+    dispatch_split_parent(
+        x, qk_weight, value_z_weight, qkv, z, policy, &workspace, stream);
+}
+
+void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
+                    Tensor& qkv, Tensor& z, cudaStream_t stream) {
+    dispatch_split_parent(
+        x, qk_weight, value_z_weight, qkv, z, LinearPolicy::A16Only, nullptr, stream);
 }
 
 std::size_t gdn_input_proj_workspace_capacity_bytes(QType parent_qtype, std::int32_t parent_rows,
