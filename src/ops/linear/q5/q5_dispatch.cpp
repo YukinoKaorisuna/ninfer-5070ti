@@ -25,8 +25,20 @@ Q5Launch select_q5_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
             if (t <= 6) { return launch_q5_simt_split4_exact; }
             if (t <= 16) { return launch_q5_simt_r8_c4; }
             return launch_q5_mma_r64_c128;
+        case 14336:
+        case 34816:
+            if (t <= 4) { return launch_q5_simt_r8_c4; }
+            if (t <= 16) { return launch_q5_simt_r8_c8; }
+            return launch_q5_mma_r64_c128;
         default:
             break;
+        }
+        break;
+    case 10240:
+        if (n == 5120) {
+            if (t <= 4) { return launch_q5_simt_r8_c4; }
+            if (t <= 16) { return launch_q5_simt_r8_c8; }
+            return launch_q5_mma_r64_c128;
         }
         break;
     case 6144:
