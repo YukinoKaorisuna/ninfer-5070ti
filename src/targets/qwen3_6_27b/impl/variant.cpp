@@ -545,9 +545,11 @@ std::size_t Variant::post_mixer_workspace_capacity_bytes(WeightsProfile weights_
     validate_token_interval(first, last);
     switch (weights_profile) {
     case WeightsProfile::Qwen36GroupwiseInt:
-    case WeightsProfile::Qwen38GroupwiseInt:
         return post_mixer_workspace_bytes(QType::Q4G64_F16S, QType::Q5G64_F16S,
                                           ops::LinearPolicy::A16Only, first, last);
+    case WeightsProfile::Qwen38GroupwiseInt:
+        return post_mixer_workspace_bytes(QType::Q3G64_F16S, QType::Q4G64_F16S,
+                                          ops::LinearPolicy::AllowA8, first, last);
     case WeightsProfile::Qwen36Nvfp4:
         return post_mixer_workspace_bytes(QType::NVFP4, QType::NVFP4, kNvfp4TextPolicy, first,
                                           last);
