@@ -446,7 +446,8 @@ __global__ void q3_linear_swiglu_small_t_pair_kernel(
     static_assert(kGroups % kGroupsPerWarpTileFast == 0);
     static_assert(kIntermediate % kPairsPerBlockFast == 0);
 
-    constexpr int kStages   = 3;
+    constexpr int kStages =
+        ActiveTokens == 4 ? 2 : 3;
     constexpr int kPrefetch = kStages - 1;
 
     // Q3_SMALL_T_DIRECT_X
