@@ -284,6 +284,10 @@ ninfer_add_fused_linear_test(
   ops/linear_pair/test_w8_a16.cpp
   ops/linear_pair/linear_pair_test_common.cpp)
 ninfer_add_fused_linear_test(
+  ninfer_linear_swiglu_q3_a16_test
+  ops/linear_swiglu/test_q3_a16.cpp
+  ops/linear_swiglu/linear_swiglu_test_common.cpp)
+ninfer_add_fused_linear_test(
   ninfer_linear_swiglu_q4_a16_test
   ops/linear_swiglu/test_q4_a16.cpp
   ops/linear_swiglu/linear_swiglu_test_common.cpp)

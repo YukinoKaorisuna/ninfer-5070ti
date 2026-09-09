@@ -7,6 +7,7 @@
 #include "ops/common/warp.cuh"
 #include "ops/common/act_quant_g64.h"
 #include "ops/linear_swiglu/q3/q3_linear_swiglu_int8_gemm.cuh"
+#include "ops/linear_swiglu/q3/q3_small_t_mma.cuh"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -722,6 +723,128 @@ void q3_linear_swiglu_small_t_pair_launch(
     CUDA_CHECK(cudaGetLastError());
 }
 
+
+
+
+// -----------------------------------------------------------------------------
+// Q3 exact small-T BF16 Tensor-Core POC.
+//
+// Stage A intentionally mirrors Q4's proven exact-small-T schedule.
+// For the first experiment only T=4 is dispatched here.
+// -----------------------------------------------------------------------------
+
+struct Q3SwiGluSmallTGeometry {
+    static constexpr int kInputRows =
+        kK;
+
+    static constexpr int kGroupsPerRow =
+        kGroups;
+};
+
+
+struct Q3SwiGluSmallTRows {
+    static constexpr int kOutputRowsPerCta =
+        8;
+
+    __device__ __forceinline__
+    int weight_row(
+        int output_row0,
+        int local_row) const {
+
+        return output_row0
+            + (local_row & 7)
+            + (
+                local_row >= 8
+                    ? kIntermediate
+                    : 0);
+    }
+};
+
+
+struct Q3SwiGluSmallTEpilogue {
+
+    __nv_bfloat16* out;
+
+    template <int ActiveCols>
+    __device__ __forceinline__
+    void store(
+        int row,
+        int col0,
+        float4 projected) const {
+
+        if (col0 < ActiveCols) {
+
+            out[
+                static_cast<std::int64_t>(col0)
+                    * kIntermediate
+                + row] =
+                __float2bfloat16_rn(
+                    silu(projected.x)
+                    * projected.z);
+        }
+
+        if (col0 + 1 < ActiveCols) {
+
+            out[
+                static_cast<std::int64_t>(col0 + 1)
+                    * kIntermediate
+                + row] =
+                __float2bfloat16_rn(
+                    silu(projected.y)
+                    * projected.w);
+        }
+    }
+};
+
+
+void q3_linear_swiglu_t4_mma_launch(
+    const Tensor& x,
+    const Weight& w,
+    Tensor& out,
+    cudaStream_t stream) {
+
+    if (x.ne[1] != 4) {
+        throw std::invalid_argument(
+            "Q3 T4 MMA POC requires exactly 4 tokens");
+    }
+
+    constexpr int kTileCols =
+        8;
+
+    constexpr int kActiveCols =
+        4;
+
+    constexpr int kBlocks =
+        kIntermediate
+        / Q3SwiGluSmallTRows::kOutputRowsPerCta;
+
+    const Q3SwiGluSmallTEpilogue epilogue{
+        static_cast<__nv_bfloat16*>(out.data)
+    };
+
+    q3_small_t_mma_kernel<
+        Q3SwiGluSmallTGeometry,
+        kTileCols,
+        kActiveCols,
+        Q3SwiGluSmallTEpilogue,
+        Q3SwiGluSmallTRows>
+        <<<kBlocks,
+           Q3SmallTMmaSchedule::kThreads,
+           0,
+           stream>>>(
+            static_cast<
+                const __nv_bfloat16*>(x.data),
+            static_cast<
+                const std::uint8_t*>(w.qdata),
+            static_cast<
+                const std::uint8_t*>(w.scales),
+            static_cast<
+                __nv_bfloat16*>(out.data),
+            epilogue,
+            Q3SwiGluSmallTRows{});
+
+    CUDA_CHECK(cudaGetLastError());
+}
 
 
 // -----------------------------------------------------------------------------
@@ -1613,7 +1736,7 @@ void q3_linear_swiglu_dispatch(
     }
 
     if (tokens == 4) {
-        q3_linear_swiglu_small_t_pair_launch<4>(
+        q3_linear_swiglu_t4_mma_launch(
             x, w, out, stream);
         return;
     }

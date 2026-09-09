@@ -321,6 +321,181 @@ inline PackedWeight make_patterned_weight(QType qtype, std::int32_t n, std::int3
     if (n <= 0 || k <= 0) {
         throw std::invalid_argument("quantized-weight fixture: shape must be positive");
     }
+    if (qtype == QType::Q3G64_F16S) {
+        constexpr std::int32_t kGroupSize = 64;
+        constexpr std::int32_t kCodeBytesPerGroup = 24;
+
+        const std::int32_t padded_k =
+            detail::align_up(k, kGroupSize);
+        const std::int32_t groups_per_row =
+            padded_k / kGroupSize;
+
+        PackedWeight packed;
+
+        packed.code_plane_bytes =
+            static_cast<std::uint64_t>(n) *
+            static_cast<std::uint64_t>(groups_per_row) *
+            kCodeBytesPerGroup;
+
+        packed.high_plane_offset =
+            detail::align_up_size(
+                static_cast<std::size_t>(packed.code_plane_bytes),
+                256);
+
+        packed.high_plane_bytes = 0;
+
+        packed.scale_plane_offset =
+            packed.high_plane_offset;
+
+        packed.scale_plane_bytes =
+            static_cast<std::uint64_t>(n) *
+            static_cast<std::uint64_t>(groups_per_row) *
+            sizeof(std::uint16_t);
+
+        packed.payload.assign(
+            static_cast<std::size_t>(
+                packed.scale_plane_offset +
+                packed.scale_plane_bytes),
+            0);
+
+        constexpr std::uint16_t kUnitScales[] = {
+            0x3800u, 0x3a00u, 0x3c00u, 0x3d00u
+        };
+        constexpr std::uint16_t kSmallScales[] = {
+            0x2040u, 0x2440u, 0x2840u, 0x2c40u
+        };
+        constexpr std::uint16_t kTinyScales[] = {
+            0x1840u, 0x1c40u, 0x2040u, 0x2440u
+        };
+
+        const std::uint16_t* scales = nullptr;
+
+        switch (options.row_split_scale) {
+        case RowSplitScalePattern::Unit:
+            scales = kUnitScales;
+            break;
+        case RowSplitScalePattern::Small:
+            scales = kSmallScales;
+            break;
+        case RowSplitScalePattern::Tiny:
+            scales = kTinyScales;
+            break;
+        }
+
+        for (std::int32_t row = 0; row < n; ++row) {
+            for (std::int32_t group = 0;
+                 group < groups_per_row;
+                 ++group) {
+
+                const std::size_t group_index =
+                    static_cast<std::size_t>(row) *
+                        groups_per_row +
+                    group;
+
+                std::uint8_t* dst =
+                    packed.payload.data() +
+                    group_index * kCodeBytesPerGroup;
+
+                for (std::int32_t lane = 0;
+                     lane < kGroupSize;
+                     ++lane) {
+
+                    const std::int32_t column =
+                        group * kGroupSize + lane;
+
+                    std::uint32_t raw = 0;
+
+                    if (column < k) {
+                        if (options.row_split_codes ==
+                            RowSplitCodePattern::Hashed) {
+
+                            const std::uint64_t key =
+                                (static_cast<std::uint64_t>(
+                                     static_cast<std::uint32_t>(row))
+                                 << 32) ^
+                                static_cast<std::uint32_t>(column) ^
+                                (static_cast<std::uint64_t>(seed)
+                                 << 17);
+
+                            raw = static_cast<std::uint32_t>(
+                                      detail::mix64(key)) &
+                                  0x7u;
+                        } else {
+                            raw =
+                                (static_cast<std::uint32_t>(row) * 13U +
+                                 static_cast<std::uint32_t>(column) * 7U +
+                                 seed) &
+                                0x7u;
+                        }
+                    }
+
+                    // Q3 is a contiguous little-endian 3-bit stream.
+                    // raw 0..7 represents signed values:
+                    // 0..3, -4..-1.
+                    const int bit = lane * 3;
+
+                    for (int b = 0; b < 3; ++b) {
+                        if ((raw >> b) & 1U) {
+                            const int dst_bit = bit + b;
+                            dst[dst_bit >> 3] |=
+                                static_cast<std::uint8_t>(
+                                    1U << (dst_bit & 7));
+                        }
+                    }
+                }
+
+                const std::uint64_t scale_index =
+                    options.row_split_codes ==
+                            RowSplitCodePattern::Hashed
+                        ? (detail::mix64(
+                               group_index ^
+                               (static_cast<std::uint64_t>(seed)
+                                << 17)) >>
+                           8) &
+                              3U
+                        : (static_cast<std::uint64_t>(row) ^
+                           (static_cast<std::uint64_t>(row) >> 8) ^
+                           static_cast<std::uint64_t>(group) ^
+                           seed) &
+                              3U;
+
+                detail::store_u16_le(
+                    packed.payload,
+                    static_cast<std::size_t>(
+                        packed.scale_plane_offset +
+                        group_index * sizeof(std::uint16_t)),
+                    scales[scale_index]);
+            }
+        }
+
+        packed.weight.qtype = QType::Q3G64_F16S;
+        packed.weight.layout = QuantLayout::RowSplit;
+        packed.weight.scale_dtype = DType::FP16;
+        packed.weight.payload = packed.payload.data();
+        packed.weight.payload_bytes = packed.payload.size();
+        packed.weight.high_plane_bytes = 0;
+        packed.weight.qdata = packed.payload.data();
+        packed.weight.qhigh = nullptr;
+        packed.weight.scales =
+            packed.payload.data() +
+            packed.scale_plane_offset;
+        packed.weight.group_size = kGroupSize;
+        packed.weight.group = kGroupSize;
+        packed.weight.ndim = 2;
+        packed.weight.shape[0] = n;
+        packed.weight.shape[1] = k;
+        packed.weight.shape[2] = 1;
+        packed.weight.shape[3] = 1;
+        packed.weight.padded_shape[0] = n;
+        packed.weight.padded_shape[1] = padded_k;
+        packed.weight.padded_shape[2] = 1;
+        packed.weight.padded_shape[3] = 1;
+        packed.weight.n = n;
+        packed.weight.k = k;
+
+        return packed;
+    }
+
     if (qtype == QType::FP8_E4M3FN_ROW_BF16S) {
         if (options.weight_scale_divisor != 0.0F || options.input_scale_divisor != 0.0F) {
             throw std::invalid_argument(
@@ -687,6 +862,85 @@ inline double logical_weight_fp64(const PackedWeight& packed, std::int32_t row,
         return static_cast<double>(static_cast<float>(decoded));
     }
 
+    if (weight.qtype == QType::Q3G64_F16S) {
+        constexpr std::int32_t kGroupSize = 64;
+        constexpr std::int32_t kCodeBytesPerGroup = 24;
+
+        if (weight.layout != QuantLayout::RowSplit ||
+            weight.scale_dtype != DType::FP16 ||
+            weight.group != kGroupSize ||
+            weight.group_size != kGroupSize ||
+            weight.qhigh != nullptr ||
+            weight.high_plane_bytes != 0) {
+            throw std::invalid_argument(
+                "quantized-weight fixture: invalid Q3 metadata");
+        }
+
+        const std::int32_t padded_k =
+            weight.padded_shape[1];
+
+        if (padded_k < weight.shape[1] ||
+            padded_k % kGroupSize != 0) {
+            throw std::invalid_argument(
+                "quantized-weight fixture: invalid Q3 padded K");
+        }
+
+        const std::int32_t groups_per_row =
+            padded_k / kGroupSize;
+
+        const std::int32_t group =
+            column / kGroupSize;
+
+        const std::int32_t lane =
+            column - group * kGroupSize;
+
+        const std::size_t group_index =
+            static_cast<std::size_t>(row) *
+                groups_per_row +
+            group;
+
+        const std::uint8_t* src =
+            packed.payload.data() +
+            group_index * kCodeBytesPerGroup;
+
+        const int bit = lane * 3;
+        const int byte = bit >> 3;
+        const int shift = bit & 7;
+
+        // Read enough little-endian bits to cover a 3-bit value
+        // crossing a byte boundary.
+        std::uint16_t word = src[byte];
+
+        if (byte + 1 < kCodeBytesPerGroup) {
+            word |= static_cast<std::uint16_t>(
+                        src[byte + 1])
+                    << 8;
+        }
+
+        const std::uint32_t raw =
+            (static_cast<std::uint32_t>(word) >> shift) &
+            0x7U;
+
+        const int signed_code =
+            (raw & 0x4U)
+                ? static_cast<int>(raw) - 8
+                : static_cast<int>(raw);
+
+        const std::uint16_t stored_scale =
+            detail::load_u16_le(
+                packed.payload,
+                packed.scale_plane_offset +
+                    group_index *
+                        sizeof(std::uint16_t));
+
+        const double exact_stored_fp16_scale =
+            static_cast<double>(
+                detail::f16_to_f32(stored_scale));
+
+        return static_cast<double>(signed_code) *
+               exact_stored_fp16_scale;
+    }
+
     const detail::QuantSpec spec = detail::quant_spec(weight.qtype);
     const std::int32_t padded_k  = weight.padded_shape[1];
     if (padded_k < weight.shape[1] || padded_k % spec.group_size != 0) {
@@ -746,6 +1000,8 @@ inline std::vector<float> materialize_rows_fp32(const PackedWeight& packed,
 inline std::vector<float> decode_row_split_lowbit(const std::vector<std::uint8_t>& payload,
                                                   std::int32_t n, std::int32_t k,
                                                   std::int32_t padded_k, QType qtype) {
+
+
     const detail::QuantSpec spec = detail::quant_spec(qtype);
     const int nib                = detail::nibble_bytes_per_group(spec);
     const int high_bpr           = detail::high_bytes_per_group(spec);
