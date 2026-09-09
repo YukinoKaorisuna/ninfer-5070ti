@@ -25,6 +25,9 @@ inline constexpr int kGqaKvQuantGroups  = kGqaKvQuantHeadDim / kGqaKvQuantGroup;
 // INT4-G64 stores two signed 4-bit codes per byte.
 inline constexpr int kGqaKvQ4CodeExtent = kGqaKvQuantHeadDim / 2;
 
+// INT2-G64 stores four 2-bit codes per byte.
+inline constexpr int kGqaKvQ2CodeExtent = kGqaKvQuantHeadDim / 4;
+
 template <typename Geometry>
 __device__ __forceinline__ std::int64_t gqa_kv_quant_code_index(int physical_page, int kv_head,
                                                                 int d, int page_offset) {
@@ -44,6 +47,13 @@ __device__ __forceinline__ std::int64_t gqa_kv_q4_code_index(int physical_page, 
                                                               int d, int page_offset) {
     return paged_kv_element_offset<kGqaKvQ4CodeExtent, Geometry::KVHeads>(
         physical_page, kv_head, page_offset, d >> 1);
+}
+
+template <typename Geometry>
+__device__ __forceinline__ std::int64_t gqa_kv_q2_code_index(int physical_page, int kv_head,
+                                                              int d, int page_offset) {
+    return paged_kv_element_offset<kGqaKvQ2CodeExtent, Geometry::KVHeads>(
+        physical_page, kv_head, page_offset, d >> 2);
 }
 
 template <typename Geometry>
@@ -90,6 +100,50 @@ __device__ __forceinline__ std::int8_t gqa_kv_unpack_q4_high(std::uint8_t packed
     return static_cast<std::int8_t>(q);
 }
 
+
+// Symmetric 2-bit KV codec for the experimental MTP cache.
+// Reconstruction levels are {-1, -1/3, +1/3, +1} * scale.
+// The per-G64 FP16 scale is the group's absolute maximum.
+__device__ __forceinline__ std::uint8_t gqa_kv_quant_q2_code(float x, float scale) {
+    if (scale == 0.0f) { return 1u; }
+
+    const float y = x / scale;
+
+    if (y < -0.6666666667f) return 0u;
+    if (y <  0.0f)          return 1u;
+    if (y <  0.6666666667f) return 2u;
+    return 3u;
+}
+
+__device__ __forceinline__ std::uint8_t gqa_kv_pack_q2(
+    std::uint8_t q0, std::uint8_t q1, std::uint8_t q2, std::uint8_t q3) {
+    return static_cast<std::uint8_t>(
+        (q0 & 0x03u) |
+        ((q1 & 0x03u) << 2) |
+        ((q2 & 0x03u) << 4) |
+        ((q3 & 0x03u) << 6));
+}
+
+__device__ __forceinline__ std::int8_t gqa_kv_unpack_q2_i8(std::uint8_t q) {
+    switch (q & 0x03u) {
+    case 0: return static_cast<std::int8_t>(-3);
+    case 1: return static_cast<std::int8_t>(-1);
+    case 2: return static_cast<std::int8_t>( 1);
+    default: return static_cast<std::int8_t>(3);
+    }
+}
+
+__device__ __forceinline__ float gqa_kv_dequant_q2_code(std::uint8_t q, float scale) {
+    constexpr float one_third = 0.3333333333333333f;
+    switch (q & 0x03u) {
+    case 0: return -scale;
+    case 1: return -one_third * scale;
+    case 2: return  one_third * scale;
+    default: return scale;
+    }
+}
+
+
 // Dequantize 8 consecutive int8 codes (dims [d, d+8), aligned to a multiple of 8
 // so they lie inside one 64-group) into 8 bf16 packed as an int4, given a pointer
 // to the 8 codes and the group's dequant scale. The codes are read with ONE 64-bit
@@ -127,5 +181,37 @@ __device__ __forceinline__ int4 gqa_kv_dequant_q4x8_from(const std::uint8_t* cod
     return make_int4(static_cast<int>(values[0]), static_cast<int>(values[1]),
                      static_cast<int>(values[2]), static_cast<int>(values[3]));
 }
+
+// Dequantize 8 consecutive Q2 values from two packed bytes.
+// Each 2-bit code reconstructs to {-1, -1/3, +1/3, +1} * scale.
+__device__ __forceinline__ int4 gqa_kv_dequant_q2x8_from(
+    const std::uint8_t* codes2, float scale) {
+
+    std::uint16_t raw = 0;
+    __builtin_memcpy(&raw, codes2, sizeof(raw));
+
+    unsigned values[4];
+
+#pragma unroll
+    for (int pair = 0; pair < 4; ++pair) {
+        const int bit0 = pair * 4;
+        const std::uint8_t q0 =
+            static_cast<std::uint8_t>((raw >> bit0) & 0x03u);
+        const std::uint8_t q1 =
+            static_cast<std::uint8_t>((raw >> (bit0 + 2)) & 0x03u);
+
+        values[pair] =
+            pack_bf16x2(
+                gqa_kv_dequant_q2_code(q0, scale),
+                gqa_kv_dequant_q2_code(q1, scale));
+    }
+
+    return make_int4(
+        static_cast<int>(values[0]),
+        static_cast<int>(values[1]),
+        static_cast<int>(values[2]),
+        static_cast<int>(values[3]));
+}
+
 
 } // namespace ninfer::ops

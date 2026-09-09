@@ -15,4 +15,6 @@ void add_i32_scalars_launch(const Tensor& lhs, const Tensor& rhs, Tensor& destin
 void increment_i32_scalar_launch(Tensor& scalar, cudaStream_t stream);
 void increment_i64_scalar_launch(Tensor& scalar, cudaStream_t stream);
 
+void scalar_prewarm();
+
 } // namespace ninfer::ops::detail

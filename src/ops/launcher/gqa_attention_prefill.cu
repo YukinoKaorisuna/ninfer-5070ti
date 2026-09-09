@@ -6,6 +6,7 @@
 #include "ops/kernel/gqa_attention_prefill_bf16.cuh"
 #include "ops/kernel/gqa_attention_prefill_i8.cuh"
 #include "ops/kernel/gqa_attention_prefill_q4.cuh"
+#include "ops/kernel/gqa_attention_prefill_q2.cuh"
 #include "core/device.h" // CUDA_CHECK
 
 #include <cstdint>
@@ -127,6 +128,37 @@ void gqa_kv_append_launch_for(const Tensor& k, const Tensor& v, const Tensor& po
         }
         CUDA_CHECK(cudaGetLastError());
 
+    } else if (cache.dtype == DType::Q2KV) {
+        Tensor& cache_k_scale = cache.k_scale_pages;
+        Tensor& cache_v_scale = cache.v_scale_pages;
+
+        constexpr int kFillBlock = 256;
+        constexpr int kFillWarps = kFillBlock / 32;
+
+        const std::int64_t fill_units =
+            static_cast<std::int64_t>(tokens) *
+            Geometry::KVHeads *
+            kGqaKvQuantGroups;
+
+        const int fill_grid =
+            static_cast<int>(
+                div_up(fill_units,
+                       static_cast<std::int64_t>(kFillWarps)));
+
+        gqa_attention_prefill_fill_q2_kernel<Geometry, Metadata>
+            <<<fill_grid, kFillBlock, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(k.data),
+                static_cast<const __nv_bfloat16*>(v.data),
+                static_cast<const std::int32_t*>(positions.data),
+                metadata,
+                static_cast<std::uint8_t*>(cache_k.data),
+                static_cast<std::uint8_t*>(cache_v.data),
+                static_cast<__half*>(cache_k_scale.data),
+                static_cast<__half*>(cache_v_scale.data),
+                tokens);
+
+        CUDA_CHECK(cudaGetLastError());
+
     } else if (cache.dtype == DType::U8) {
         Tensor& cache_k_scale    = cache.k_scale_pages;
         Tensor& cache_v_scale    = cache.v_scale_pages;
@@ -229,6 +261,53 @@ void gqa_kv_append_launch(const Tensor& k, const Tensor& v, const Tensor& positi
         return;
     }
     gqa_kv_append_launch_for<Gqa35Geometry>(k, v, positions, cache, metadata, stream);
+}
+
+void gqa_kv_append_batch_launch(const Tensor& k, const Tensor& v,
+                                const Tensor& positions,
+                                const Tensor& valid_columns,
+                                const Tensor& table_rows,
+                                PagedKVBatchLayerView cache,
+                                cudaStream_t stream) {
+    // The current append kernels consume one logical sequence at a time.
+    // This is exactly the MTP path we are enabling here.
+    if (k.ne[3] != 1 || v.ne[3] != 1) {
+        throw std::invalid_argument(
+            "gqa_kv_append_batch_launch currently requires batch=1");
+    }
+
+    const auto launch = [&]<bool Masked>() {
+        const GqaPrefillBatchMetadata<Masked> metadata{
+            .tables = static_cast<const std::int32_t*>(cache.block_tables.data),
+            .valid_columns =
+                Masked ? static_cast<const std::int32_t*>(valid_columns.data)
+                       : nullptr,
+            .table_rows =
+                static_cast<const std::int32_t*>(table_rows.data),
+            .table_stride = cache.block_tables.ne[0],
+        };
+
+        if (k.ne[1] == Gqa27Geometry::KVHeads) {
+            gqa_kv_append_launch_for<Gqa27Geometry>(
+                k, v, positions, cache, metadata, stream);
+            return;
+        }
+
+        if (k.ne[1] == Gqa9Geometry::KVHeads) {
+            gqa_kv_append_launch_for<Gqa9Geometry>(
+                k, v, positions, cache, metadata, stream);
+            return;
+        }
+
+        gqa_kv_append_launch_for<Gqa35Geometry>(
+            k, v, positions, cache, metadata, stream);
+    };
+
+    if (valid_columns.data == nullptr) {
+        launch.template operator()<false>();
+    } else {
+        launch.template operator()<true>();
+    }
 }
 
 void gqa_attention_prompt_launch(const Tensor& q, const Tensor& k, const Tensor& v,

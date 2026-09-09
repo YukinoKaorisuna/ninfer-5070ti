@@ -42,11 +42,35 @@ void gqa_attention_small_t_launch(const Tensor& q, const Tensor& k, const Tensor
                                   Tensor& partial_acc, Tensor& partial_m, Tensor& partial_l,
                                   Tensor& out, cudaStream_t stream);
 
+// Experimental Q2KV cached small-T launcher lives in its own CUDA translation
+// unit so Q2 kernel iteration does not recompile the full BF16/I8/Q4 decode TU.
+void gqa_attention_q2_cached_small_t_launch(
+    const Tensor& q,
+    const Tensor& positions,
+    float scale,
+    PagedKVBatchLayerView cache,
+    const GqaSmallTInvocation& invocation,
+    std::int32_t logical_capacity,
+    std::int32_t implementation_window,
+    std::int32_t splits,
+    Tensor& partial_acc,
+    Tensor& partial_m,
+    Tensor& partial_l,
+    cudaStream_t stream);
+
 void gqa_attention_cached_small_t_launch(const Tensor& q, const Tensor& positions, float scale,
                                          const PagedKVLayerView& cache,
                                          GqaExecutionEnvelope envelope, Tensor& partial_acc,
                                          Tensor& partial_m, Tensor& partial_l, Tensor& out,
                                          cudaStream_t stream);
+
+void gqa_attention_cached_small_t_batch_launch(
+    const Tensor& q, const Tensor& positions,
+    const Tensor& valid_columns, const Tensor& table_rows,
+    float scale, PagedKVBatchLayerView cache,
+    GqaExecutionEnvelope envelope, Tensor& partial_acc,
+    Tensor& partial_m, Tensor& partial_l, Tensor& out,
+    cudaStream_t stream);
 
 void gqa_attention_prompt_launch(const Tensor& q, const Tensor& k, const Tensor& v,
                                  const Tensor& positions, const Tensor& valid_columns,
@@ -55,6 +79,13 @@ void gqa_attention_prompt_launch(const Tensor& q, const Tensor& k, const Tensor&
 
 void gqa_kv_append_launch(const Tensor& k, const Tensor& v, const Tensor& positions,
                           PagedKVLayerView cache, cudaStream_t stream);
+
+void gqa_kv_append_batch_launch(const Tensor& k, const Tensor& v,
+                                const Tensor& positions,
+                                const Tensor& valid_columns,
+                                const Tensor& table_rows,
+                                PagedKVBatchLayerView cache,
+                                cudaStream_t stream);
 
 void gqa_attention_prompt_attention_launch(const Tensor& q, const Tensor& positions, float scale,
                                            const PagedKVLayerView& cache, Tensor& out,

@@ -117,6 +117,8 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                      .attention_head_dim        = TextConfig::head_dim,
                      .kv_dtype                  = plan.kv_dtype,
                      .kv_quant_group            = plan.kv_quant_group,
+                     .mtp_kv_dtype              = DType::Q2KV,
+                     .mtp_kv_quant_group        = qwen3_6::kKvQuantGroup,
                      .enable_mtp                = plan.features.mtp(),
                      .kv_table_rows             = static_cast<std::int32_t>(plan.max_concurrency),
                      .text_physical_page_groups = physical_pages,
@@ -540,7 +542,7 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
         throw std::invalid_argument("max_context exceeds the variant native context capacity");
     }
     if (options.prefill_chunk == 0 || options.prefill_chunk % kPrefillChunkAlignment != 0) {
-        throw std::invalid_argument("prefill_chunk must be a nonzero multiple of 128");
+        throw std::invalid_argument("prefill_chunk must be a nonzero multiple of 16");
     }
     if (options.max_concurrency == 0 || options.max_concurrency > kMaximumConcurrency) {
         throw std::invalid_argument("max_concurrency must be in [1,8]");

@@ -4,6 +4,10 @@
 #include "artifact/materializer.h"
 #include "artifact/reader.h"
 #include "core/device.h"
+#include "ops/attn_input_proj/q4_q5/q4_q5_attn_input_kernels.h"
+#include "ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_kernels.h"
+#include "ops/launcher/speculative_round.h"
+#include "ops/launcher/scalar.h"
 #include "runtime/engine/kv_capacity.h"
 
 #include <chrono>
@@ -109,6 +113,18 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
 
     auto model = Target::construct_loaded_model(std::move(load_plan), std::move(materialized));
     device.synchronize();
+
+    // Account for the Qwen3.8 Q4/Q5 small-T CUDA kernel residency before
+    // resolving the explicit KV/runtime capacity. Without this, lazy module
+    // loading can consume the final few MiB only after startup is complete.
+    if (target_key == Qwen3_6_27B::qwen3_8_target_key) {
+        ops::detail::q4_q5_attn_input_small_t_prewarm();
+        ops::detail::q4_q5_gdn_input_independent_prewarm();
+        ops::detail::speculative_round_prewarm();
+        ops::detail::scalar_prewarm();
+        device.synchronize();
+    }
+
     runtime::KvCapacityResolution capacity_resolution =
         runtime::resolve_kv_capacity(options.kv_capacity, curve, current_free_device_bytes());
     auto sequence_plan = std::move(sequence_planner).finalize(capacity_resolution.main_page_groups);

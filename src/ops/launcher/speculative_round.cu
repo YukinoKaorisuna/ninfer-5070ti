@@ -122,4 +122,13 @@ void proposal_remap_token_ids_launch(Tensor& proposal_tokens, const std::int32_t
     CUDA_CHECK(cudaGetLastError());
 }
 
+
+void speculative_round_prewarm() {
+    cudaFuncAttributes attr{};
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attr,
+        speculative_prepare_verify_inputs_kernel));
+}
+
+
 } // namespace ninfer::ops::detail

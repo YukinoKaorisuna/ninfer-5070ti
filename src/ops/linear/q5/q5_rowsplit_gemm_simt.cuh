@@ -293,12 +293,12 @@ __launch_bounds__(128, 10) __global__ void q5_rowsplit_gemm_simt_split4_kernel(
     static_assert(kFullSlabs > 0 && kStride > 0, "direct split4 requires exact positive shape");
     static_assert(!SplitOutput || SplitRow > 0,
                   "split-output Q5 split4 requires a positive compile-time seam");
+    if (t <= 0 || t > kTt) { return; }
     if constexpr (TriggerPdl) {
         if (threadIdx.x == 0) { pdl::trigger_dependents(); }
     }
     (void)full_slabs;
     (void)k;
-    (void)t;
 
     __shared__ float s_part[4][kTt];
 
@@ -348,7 +348,7 @@ __launch_bounds__(128, 10) __global__ void q5_rowsplit_gemm_simt_split4_kernel(
 
         const std::int64_t xoff = static_cast<std::int64_t>(s) * 1024 + chunk * 256 + lane * 8;
 #pragma unroll
-        for (int tt = 0; tt < kTt; ++tt) {
+        for (int tt = 0; tt < t; ++tt) {
             const uint4 xv  = load_vec<uint4>(x + static_cast<std::int64_t>(tt) * kStride + xoff);
             const float2 f0 = bf16x2_bits_to_float2(xv.x);
             const float2 f1 = bf16x2_bits_to_float2(xv.y);
@@ -366,7 +366,7 @@ __launch_bounds__(128, 10) __global__ void q5_rowsplit_gemm_simt_split4_kernel(
     }
 
 #pragma unroll
-    for (int tt = 0; tt < kTt; ++tt) {
+    for (int tt = 0; tt < t; ++tt) {
         float a = acc[tt];
         a       = warp_reduce_sum(a);
         if (lane == 0) { s_part[chunk][tt] = a; }
@@ -375,7 +375,7 @@ __launch_bounds__(128, 10) __global__ void q5_rowsplit_gemm_simt_split4_kernel(
     __syncthreads();
 
     if constexpr (std::is_same_v<Epilogue, Q5Split4StoreEpilogue>) {
-        if (chunk == 0 && lane < kTt) {
+        if (chunk == 0 && lane < t) {
             float sum = 0.0f;
 #pragma unroll
             for (int p = 0; p < 4; ++p) { sum += s_part[p][lane]; }

@@ -265,4 +265,38 @@ void q4_q5_gdn_input_independent_launch(const Tensor& x, const Weight& qk_weight
     }
 }
 
+
+void q4_q5_gdn_input_independent_prewarm() {
+    cudaFuncAttributes attr{};
+
+    // Geometry27 T=4 Q5 producer:
+    // TriggerPdl=true, JoinPdl=false.
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attr,
+        q5_rowsplit_gemm_simt_split4_kernel<
+            Q5RowSplitSimtSchedule,
+            4,
+            GdnInputGeometry27::kFullSlabs,
+            GdnInputGeometry27::kHidden,
+            true,
+            GdnInputGeometry27::kValueRows,
+            Q5Split4StoreEpilogue,
+            true,
+            false>));
+
+    // Geometry27 T=4 Q4 dependent consumer:
+    // Full=true, TriggerPdl=false, JoinPdl=true.
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attr,
+        q4_rowsplit_gemm_simt_kernel<
+            Q4GdnSimtR8C4Schedule,
+            true,
+            false,
+            0,
+            Q4SimtStoreEpilogue,
+            false,
+            true>));
+}
+
+
 } // namespace ninfer::ops::detail

@@ -33,4 +33,13 @@ void increment_i64_scalar_launch(Tensor& scalar, cudaStream_t stream) {
     CUDA_CHECK(cudaGetLastError());
 }
 
+
+void scalar_prewarm() {
+    cudaFuncAttributes attr{};
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attr,
+        increment_i32_scalar_kernel));
+}
+
+
 } // namespace ninfer::ops::detail

@@ -70,7 +70,7 @@ struct ModelConfig {
 
 inline constexpr ModelConfig kCfg{};
 inline constexpr float kAttnScale                     = kAttentionScale;
-inline constexpr std::uint32_t kPrefillChunkAlignment = 128;
+inline constexpr std::uint32_t kPrefillChunkAlignment = 16;
 
 struct MlpW {
     const MlpWeights* payload = nullptr;

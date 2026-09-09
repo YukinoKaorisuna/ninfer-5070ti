@@ -337,6 +337,8 @@ void launch_tc_partial_q4(const Tensor& q, CacheInput input, const Tensor& pos, 
     CUDA_CHECK(cudaGetLastError());
 }
 
+
+
 PagedKVBatchLayerView single_row_batch_view(const PagedKVLayerView& cache) {
     return {
         .k_pages       = cache.k_pages,
@@ -359,7 +361,7 @@ std::int32_t gqa_attention_split_capacity(std::int32_t q_heads, std::int32_t tok
                                           DType cache_dtype,
                                           GqaExecutionEnvelope envelope) {
     if (tokens < 1 || tokens > 6 || (cache_dtype != DType::BF16 && cache_dtype != DType::I8 &&
-         cache_dtype != DType::U8) ||
+         cache_dtype != DType::U8 && cache_dtype != DType::Q2KV) ||
         envelope.min_visible_keys == 0 || envelope.min_visible_keys > envelope.max_visible_keys) {
         throw std::invalid_argument("gqa_attention split capacity: invalid profile");
     }
@@ -397,6 +399,15 @@ void gqa_attention_small_t_launch_for(const Tensor& q, CacheInput input, const T
                 launch_tc_partial_q4<Geometry, (TOKENS), MultiBatch, Masked>(                      \
                     q, input, pos, scale, cache, invocation, logical_capacity,                     \
                     implementation_window, splits, partial_acc, partial_m, partial_l, stream);     \
+            } else if (cache.dtype == DType::Q2KV) {                                               \
+                if constexpr (CacheInput::writes_cache) {                                          \
+                    throw std::invalid_argument("Q2KV small-T append path is not enabled");        \
+                } else {                                                                           \
+                    gqa_attention_q2_cached_small_t_launch(                                      \
+                        q, pos, scale, cache, invocation, logical_capacity,                     \
+                        implementation_window, splits, partial_acc, partial_m, partial_l,       \
+                        stream);                                                                 \
+                }                                                                                  \
             } else {                                                                               \
                 launch_tc_partial_bf16<Geometry, (TOKENS), (WARPS), MultiBatch, Masked>(           \
                     q, input, pos, scale, cache, invocation, logical_capacity, splits,             \
@@ -480,7 +491,8 @@ void gqa_attention_small_t_launch_for(const Tensor& q, CacheInput input, const T
             launch_profile.template operator()<Int8, true, false>();
         }
     };
-    if (cache.dtype == DType::I8 || cache.dtype == DType::U8) {
+    if (cache.dtype == DType::I8 || cache.dtype == DType::U8 ||
+        cache.dtype == DType::Q2KV) {
         launch_for_dtype.template operator()<true>();
     } else {
         launch_for_dtype.template operator()<false>();
@@ -553,5 +565,46 @@ void gqa_attention_cached_small_t_launch(const Tensor& q, const Tensor& pos, flo
                                                     envelope, partial_acc, partial_m, partial_l,
                                                     out, stream);
 }
+
+
+void gqa_attention_cached_small_t_batch_launch(
+    const Tensor& q, const Tensor& pos,
+    const Tensor& valid_columns, const Tensor& table_rows,
+    float scale, PagedKVBatchLayerView cache,
+    GqaExecutionEnvelope envelope, Tensor& partial_acc,
+    Tensor& partial_m, Tensor& partial_l, Tensor& out,
+    cudaStream_t stream) {
+
+    const GqaCachedInput input{};
+
+    const GqaSmallTInvocation invocation{
+        .valid_columns =
+            valid_columns.data == nullptr ? nullptr : &valid_columns,
+        .table_rows   = &table_rows,
+        .full_width   = q.ne[2],
+        .column_begin = 0,
+        .width        = q.ne[2],
+        .batch_size   = q.ne[3],
+    };
+
+    if (q.ne[1] == Gqa27Geometry::QHeads) {
+        gqa_attention_small_t_launch_for<Gqa27Geometry>(
+            q, input, pos, scale, cache, invocation, envelope,
+            partial_acc, partial_m, partial_l, out, stream);
+        return;
+    }
+
+    if (cache.num_kv_heads == Gqa9Geometry::KVHeads) {
+        gqa_attention_small_t_launch_for<Gqa9Geometry>(
+            q, input, pos, scale, cache, invocation, envelope,
+            partial_acc, partial_m, partial_l, out, stream);
+        return;
+    }
+
+    gqa_attention_small_t_launch_for<Gqa35Geometry>(
+        q, input, pos, scale, cache, invocation, envelope,
+        partial_acc, partial_m, partial_l, out, stream);
+}
+
 
 } // namespace ninfer::ops::detail

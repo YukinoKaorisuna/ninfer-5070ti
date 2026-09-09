@@ -75,7 +75,8 @@ void launch_q4_simt_route(const Tensor& x, const Weight& weight, Tensor& q, Tens
     constexpr std::int32_t kHidden     = Geometry::kHidden;
     const bool full = (kParentRows % Schedule::kRowsPerCta) == 0 &&
                       ((kHidden / Q4RowSplitStorage::kGroupK) % Schedule::kGroupsPerStage) == 0 &&
-                      (x.ne[1] % Schedule::kColsPerTile) == 0;
+                      (x.ne[1] % Schedule::kColsPerTile) == 0 &&
+                      x.ne[1] != 4;
     if (full) {
         launch_q4_simt<Geometry, Schedule, true>(x, weight, q, key, stream);
     } else {
@@ -149,7 +150,7 @@ void launch_q5_split4(const Tensor& x, const Weight& weight, Tensor& gate, Tenso
                                         static_cast<const std::uint8_t*>(weight.scales),
                                         static_cast<__nv_bfloat16*>(gate.data),
                                         static_cast<__nv_bfloat16*>(value.data), kParentRows,
-                                        gate.ne[0], kHidden, Cols, weight.padded_shape[1],
+                                        gate.ne[0], kHidden, x.ne[1], weight.padded_shape[1],
                                         kFullSlabs);
     CUDA_CHECK(cudaGetLastError());
 }
@@ -159,11 +160,7 @@ void launch_q5_split4_exact(const Tensor& x, const Weight& weight, Tensor& gate,
                             cudaStream_t stream) {
     switch (x.ne[1]) {
     case 2:
-        launch_q5_split4<Geometry, 2>(x, weight, gate, value, stream);
-        return;
     case 3:
-        launch_q5_split4<Geometry, 3>(x, weight, gate, value, stream);
-        return;
     case 4:
         launch_q5_split4<Geometry, 4>(x, weight, gate, value, stream);
         return;
@@ -244,5 +241,34 @@ void q4_q5_attn_input_small_t_launch(const Tensor& x, const Weight& query_key_we
         throw std::invalid_argument("attention Q4/Q5 split-output: unsupported input width");
     }
 }
+
+
+void q4_q5_attn_input_small_t_prewarm() {
+    cudaFuncAttributes attr{};
+
+    // Qwen3.8 / Geometry27 Q4 attention-input path.
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attr,
+        q4_rowsplit_gemm_simt_kernel<
+            Q4AttnSimtR8C4Schedule,
+            false,
+            true,
+            AttnInputGeometry27::kSplitRow>));
+
+    // Qwen3.8 / Geometry27 Q5 attention-input path.
+    //
+    // T=2/3/4 now share this kTt=4 specialization, with runtime t
+    // controlling the number of active columns.
+    CUDA_CHECK(cudaFuncGetAttributes(
+        &attr,
+        q5_rowsplit_gemm_simt_split4_kernel<
+            Q5RowSplitSimtSchedule,
+            4,
+            AttnInputGeometry27::kFullSlabs,
+            AttnInputGeometry27::kHidden,
+            true,
+            AttnInputGeometry27::kSplitRow>));
+}
+
 
 } // namespace ninfer::ops::detail
