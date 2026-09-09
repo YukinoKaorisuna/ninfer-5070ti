@@ -181,7 +181,10 @@ public:
 
     void set_mtp_proposal_extent(std::uint32_t extent) noexcept { mtp_proposal_extent_ = extent; }
 
-    void set_linear_state_slots(std::int32_t current_slot, std::int32_t rewrite_checkpoint_slot);
+    void set_linear_state_slot(std::int32_t current_slot);
+    void set_rewrite_checkpoint_state_host(void* host) noexcept {
+        rewrite_checkpoint_state_host_ = host;
+    }
     void set_gdn_state_action(GdnStateAction action, const GdnReplayRecords* replay_records);
 
     [[nodiscard]] const Weight* proposal_head() const noexcept { return proposal_head_; }
@@ -305,7 +308,7 @@ private:
     std::int32_t active_sequence_width_                   = 0;
     std::int32_t rope_delta_                              = 0;
     std::int32_t linear_state_current_slot_               = 0;
-    std::int32_t linear_state_rewrite_checkpoint_slot_    = 0;
+    void* rewrite_checkpoint_state_host_                    = nullptr;
     GdnStateAction gdn_state_action_                      = GdnStateAction::UpdateInPlace;
     const GdnReplayRecords* replay_records_               = nullptr;
     std::int64_t prefill_rewrite_checkpoint_frontier_     = -1;

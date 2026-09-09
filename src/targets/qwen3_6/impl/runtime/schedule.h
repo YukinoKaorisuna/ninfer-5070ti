@@ -52,7 +52,7 @@ struct PrefillContext {
     const ops::SamplingConfig* sampling;
     Tensor* rewrite_checkpoint_hidden;
     std::int32_t current_state_slot                         = 0;
-    std::int32_t rewrite_checkpoint_state_slot              = 0;
+    void* rewrite_checkpoint_state_host                     = nullptr;
     std::uint32_t mtp_proposal_extent                       = 0;
     const qwen3_6::DFlashDecodeIngress* dflash_host_ingress = nullptr;
 };
@@ -128,7 +128,7 @@ struct TargetVerifyFrameView {
 
 void configure_text_card(TextContext& card, const ExecutionCore& execution,
                          const ops::SamplingConfig* sampling, std::int32_t current_state_slot,
-                         std::int32_t rewrite_checkpoint_state_slot,
+                         void* rewrite_checkpoint_state_host,
                          std::uint32_t mtp_proposal_extent);
 void target_verify_accept(ExecutionCore& execution, Tensor& continuation_hidden_store,
                           TextContext& card, TargetVerifyFrameView frame,

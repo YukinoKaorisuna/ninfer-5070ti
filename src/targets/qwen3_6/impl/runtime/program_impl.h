@@ -221,6 +221,11 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
     }
     const DeviceSpan backing = persistent.alloc_bytes(plan.persistent.bytes, 256);
     decoder = std::make_unique<qwen3_6::DecoderState>(backing, plan.persistent.decoder);
+
+    rewrite_checkpoint_state_host.emplace(
+        decoder->linear_attention.slot_bytes() *
+        static_cast<std::size_t>(max_concurrency));
+
     if (plan.persistent.replay_records) {
         replay_records.emplace(backing, *plan.persistent.replay_records);
     }
@@ -541,8 +546,16 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
             trim_sequence_kv(sequence, base, backend_kv_valid(sequence));
             resize_sequence_kv_entitlement(sequence, request_plan.text_kv_page_entitlement,
                                            request_plan.backend_kv_page_entitlement);
-            decoder->linear_attention.copy_slot(
-                LinearStateSlots::rewrite_checkpoint_state_slot(sequence.lane, max_concurrency),
+            if (!rewrite_checkpoint_state_host) {
+                throw std::logic_error("rewrite checkpoint has no host state storage");
+            }
+            const std::size_t checkpoint_stride =
+                decoder->linear_attention.slot_bytes();
+            const auto* checkpoint =
+                static_cast<const unsigned char*>(rewrite_checkpoint_state_host->data()) +
+                checkpoint_stride * static_cast<std::size_t>(sequence.lane);
+            decoder->linear_attention.copy_slot_from_host(
+                checkpoint,
                 LinearStateSlots::current_state_slot(sequence.lane, max_concurrency),
                 device.stream);
             if (base == prompt_tokens) { copy_tail(sequence, sequence.rewrite_checkpoint_hidden); }
@@ -1539,7 +1552,9 @@ runtime::PrefillStepResult ProgramImplCore::advance_prefill(SequenceState& seque
                 sampling_config.slice(1, static_cast<std::int32_t>(sequence.lane), 1).data),
             &sequence.rewrite_checkpoint_hidden,
             LinearStateSlots::current_state_slot(sequence.lane, max_concurrency),
-            LinearStateSlots::rewrite_checkpoint_state_slot(sequence.lane, max_concurrency),
+            static_cast<unsigned char*>(rewrite_checkpoint_state_host->data()) +
+                decoder->linear_attention.slot_bytes() *
+                    static_cast<std::size_t>(sequence.lane),
             staged.initial_mtp_extent,
             dflash_host_ingress};
 

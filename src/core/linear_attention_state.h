@@ -5,6 +5,7 @@
 
 #include <cuda_runtime_api.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -60,6 +61,13 @@ struct LinearAttentionStatePool {
     [[nodiscard]] LinearAttentionStateAllLayersView all_layers_view() const;
     [[nodiscard]] Tensor conv_slot(std::uint32_t layer, std::int32_t slot) const;
     [[nodiscard]] Tensor recurrent_slot(std::uint32_t layer, std::int32_t slot) const;
+
+    [[nodiscard]] std::size_t slot_bytes() const;
+
+    void copy_slot_to_host(std::int32_t src, void* host,
+                           cudaStream_t stream = nullptr) const;
+    void copy_slot_from_host(const void* host, std::int32_t dst,
+                             cudaStream_t stream = nullptr);
 
     void copy_slot(std::int32_t src, std::int32_t dst, cudaStream_t stream = nullptr);
     void zero_slot(std::int32_t slot, cudaStream_t stream = nullptr);

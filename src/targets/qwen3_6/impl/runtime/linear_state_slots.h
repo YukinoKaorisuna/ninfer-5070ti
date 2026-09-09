@@ -14,7 +14,7 @@ struct LinearStateSlots {
                 static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max() / 2)) {
             throw std::invalid_argument("Qwen3.6 Linear Attention concurrency is invalid");
         }
-        return static_cast<std::int32_t>(2U * max_concurrency);
+        return static_cast<std::int32_t>(max_concurrency);
     }
 
     [[nodiscard]] static std::int32_t current_state_slot(std::uint32_t lane,
@@ -25,11 +25,6 @@ struct LinearStateSlots {
         return static_cast<std::int32_t>(lane);
     }
 
-    [[nodiscard]] static std::int32_t rewrite_checkpoint_state_slot(std::uint32_t lane,
-                                                                    std::uint32_t max_concurrency) {
-        return static_cast<std::int32_t>(max_concurrency) +
-               current_state_slot(lane, max_concurrency);
-    }
 };
 
 } // namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS

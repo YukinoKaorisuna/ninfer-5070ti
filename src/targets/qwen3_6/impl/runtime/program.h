@@ -278,6 +278,7 @@ public:
     DecodeGraphFamily dflash_graphs;
 
     PinnedHostBuffer round_host;
+    std::optional<PinnedHostBuffer> rewrite_checkpoint_state_host;
     TokenId* host_tokens = nullptr;
     std::optional<PinnedHostBuffer> ordinary_host;
     qwen3_6::OrdinaryDecodeIngress* ordinary_host_ingress = nullptr;

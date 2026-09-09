@@ -193,6 +193,65 @@ Tensor LinearAttentionStatePool::recurrent_slot(std::uint32_t layer, std::int32_
         .view({spec.key_head_dim, spec.value_head_dim, spec.value_heads});
 }
 
+std::size_t LinearAttentionStatePool::slot_bytes() const {
+    std::size_t bytes = 0;
+    for (std::uint32_t layer = 0; layer < layer_count(); ++layer) {
+        bytes += conv_slot(layer, 0).bytes();
+    }
+    for (std::uint32_t layer = 0; layer < layer_count(); ++layer) {
+        bytes += recurrent_slot(layer, 0).bytes();
+    }
+    return bytes;
+}
+
+void LinearAttentionStatePool::copy_slot_to_host(std::int32_t src, void* host,
+                                                 cudaStream_t stream) const {
+    validate_layer_slot(*this, 0, src, "LinearAttentionStatePool host-copy source");
+    if (host == nullptr) {
+        throw std::invalid_argument("LinearAttentionStatePool host-copy destination is null");
+    }
+
+    auto* cursor = static_cast<unsigned char*>(host);
+
+    for (std::uint32_t layer = 0; layer < layer_count(); ++layer) {
+        const Tensor source = conv_slot(layer, src);
+        CUDA_CHECK(cudaMemcpyAsync(cursor, source.data, source.bytes(),
+                                   cudaMemcpyDeviceToHost, stream));
+        cursor += source.bytes();
+    }
+
+    for (std::uint32_t layer = 0; layer < layer_count(); ++layer) {
+        const Tensor source = recurrent_slot(layer, src);
+        CUDA_CHECK(cudaMemcpyAsync(cursor, source.data, source.bytes(),
+                                   cudaMemcpyDeviceToHost, stream));
+        cursor += source.bytes();
+    }
+}
+
+void LinearAttentionStatePool::copy_slot_from_host(const void* host, std::int32_t dst,
+                                                   cudaStream_t stream) {
+    validate_layer_slot(*this, 0, dst, "LinearAttentionStatePool host-copy destination");
+    if (host == nullptr) {
+        throw std::invalid_argument("LinearAttentionStatePool host-copy source is null");
+    }
+
+    const auto* cursor = static_cast<const unsigned char*>(host);
+
+    for (std::uint32_t layer = 0; layer < layer_count(); ++layer) {
+        const Tensor destination = conv_slot(layer, dst);
+        CUDA_CHECK(cudaMemcpyAsync(destination.data, cursor, destination.bytes(),
+                                   cudaMemcpyHostToDevice, stream));
+        cursor += destination.bytes();
+    }
+
+    for (std::uint32_t layer = 0; layer < layer_count(); ++layer) {
+        const Tensor destination = recurrent_slot(layer, dst);
+        CUDA_CHECK(cudaMemcpyAsync(destination.data, cursor, destination.bytes(),
+                                   cudaMemcpyHostToDevice, stream));
+        cursor += destination.bytes();
+    }
+}
+
 void LinearAttentionStatePool::copy_slot(std::int32_t src, std::int32_t dst, cudaStream_t stream) {
     validate_layer_slot(*this, 0, src, "LinearAttentionStatePool copy_slot source");
     validate_layer_slot(*this, 0, dst, "LinearAttentionStatePool copy_slot destination");

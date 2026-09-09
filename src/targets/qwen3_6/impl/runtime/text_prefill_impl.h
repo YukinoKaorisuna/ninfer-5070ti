@@ -37,10 +37,11 @@ DFlashFeatureSink make_dflash_prefill_sink(PrefillContext& state) {
 
 void configure_text_card(TextContext& card, const ExecutionCore& execution,
                          const ops::SamplingConfig* sampling, std::int32_t current_state_slot,
-                         std::int32_t rewrite_checkpoint_state_slot,
+                         void* rewrite_checkpoint_state_host,
                          std::uint32_t mtp_proposal_extent) {
     card.set_sampling(sampling);
-    card.set_linear_state_slots(current_state_slot, rewrite_checkpoint_state_slot);
+    card.set_linear_state_slot(current_state_slot);
+    card.set_rewrite_checkpoint_state_host(rewrite_checkpoint_state_host);
     card.set_gdn_state_action(GdnStateAction::UpdateInPlace, nullptr);
     card.set_mtp_proposal_extent(mtp_proposal_extent);
     if (execution.proposal_head == ProposalHead::Full) {
@@ -61,7 +62,7 @@ PrefillChunkResult prefill_text_chunk(
                      state.execution.prefill_hidden, state.execution.prefill_chunk,
                      state.text_kv_base, state.mtp_kv, &state.text_cache, state.mtp_cache);
     configure_text_card(card, state.execution, state.sampling, state.current_state_slot,
-                        state.rewrite_checkpoint_state_slot, state.mtp_proposal_extent);
+                        state.rewrite_checkpoint_state_host, state.mtp_proposal_extent);
     card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
     card.set_prefill_rewrite_checkpoint_frontier(
         rewrite_checkpoint_capture_frontier
@@ -89,7 +90,7 @@ prefill_multimodal_chunk(PrefillContext& state, const PreparedPromptData& prompt
                      state.execution.prefill_hidden, state.execution.prefill_chunk,
                      state.text_kv_base, state.mtp_kv, &state.text_cache, state.mtp_cache);
     configure_text_card(card, state.execution, state.sampling, state.current_state_slot,
-                        state.rewrite_checkpoint_state_slot, state.mtp_proposal_extent);
+                        state.rewrite_checkpoint_state_host, state.mtp_proposal_extent);
     card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
     card.set_prefill_rewrite_checkpoint_frontier(
         rewrite_checkpoint_capture_frontier
