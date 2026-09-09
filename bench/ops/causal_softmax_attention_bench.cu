@@ -39,7 +39,7 @@ constexpr double kRtx5090DramGBs    = 1792.0;
 
 enum class Entry : std::uint8_t { Append, Cached, Both };
 enum class GeometryChoice : std::uint8_t { H24Kv4, H16Kv2, All };
-enum class KvChoice : std::uint8_t { Bf16, Int8, All };
+enum class KvChoice : std::uint8_t { Bf16, Int8, Q4, All };
 enum class Execution : std::uint8_t { Eager, Graph, Both };
 enum class CacheMode : std::uint8_t { Cold, Warm, Both };
 enum class CacheState : std::uint8_t { Cold, Warm };
@@ -97,7 +97,7 @@ struct Result {
                  "usage: ninfer_causal_softmax_attention_bench "
                  "[--entry append|cached|both] "
                  "[--geometry d256-h24-kv4|d256-h16-kv2|all] "
-                 "[--kv-dtype bf16|int8|all] [--batch B,...] [--tokens W,...] "
+                 "[--kv-dtype bf16|int8|q4|all] [--batch B,...] [--tokens W,...] "
                  "[--context L,...] [--row-contexts L0,...] [--valid-columns V0,...] "
                  "[--table-rows R0,...] "
                  "[--execution eager|graph|both] [--cache cold|warm|both] "
@@ -170,10 +170,12 @@ Options parse_options(int argc, char** argv) {
                 options.kv = KvChoice::Bf16;
             else if (value == "int8")
                 options.kv = KvChoice::Int8;
+            else if (value == "q4")
+                options.kv = KvChoice::Q4;
             else if (value == "all")
                 options.kv = KvChoice::All;
             else
-                usage("--kv-dtype expects bf16, int8, or all");
+                usage("--kv-dtype expects bf16, int8, q4, or all");
         } else if (argument == "--tokens") {
             options.tokens = parse_list(next("--tokens requires a value"), 1, 262144, "--tokens");
         } else if (argument == "--batch") {
@@ -291,9 +293,17 @@ Options parse_options(int argc, char** argv) {
 
 std::int32_t align_context(std::int32_t visible) { return ((visible + 127) / 128) * 128; }
 
+bool kv_is_quantized(DType dtype) {
+    return dtype == DType::I8 || dtype == DType::U8;
+}
+
+std::int32_t cache_code_extent(DType dtype) {
+    return dtype == DType::U8 ? kHeadDim / 2 : kHeadDim;
+}
+
 std::size_t cache_plane_bytes(const Geometry& geometry, DType dtype, std::int32_t physical_pages) {
-    return static_cast<std::size_t>(kHeadDim) * geometry.kv_heads * kPagedKVPageSize *
-           physical_pages * dtype_size(dtype);
+    return static_cast<std::size_t>(cache_code_extent(dtype)) * geometry.kv_heads *
+           kPagedKVPageSize * physical_pages * dtype_size(dtype);
 }
 
 std::size_t scale_plane_bytes(const Geometry& geometry, std::int32_t physical_pages) {
@@ -304,16 +314,17 @@ std::size_t scale_plane_bytes(const Geometry& geometry, std::int32_t physical_pa
 PagedKVLayerView make_cache_view(DeviceBuffer& k, DeviceBuffer& v, DeviceBuffer& k_scale,
                                  DeviceBuffer& v_scale, DeviceBuffer& block_table,
                                  const Geometry& geometry, DType dtype, std::int32_t padded) {
-    const bool quantized              = dtype == DType::I8;
-    const std::int32_t logical_pages  = padded / kPagedKVPageSize;
-    const std::int32_t physical_pages = static_cast<std::int32_t>(
-        k.bytes / (static_cast<std::size_t>(kHeadDim) * geometry.kv_heads * kPagedKVPageSize *
-                   dtype_size(dtype)));
+    const bool quantized              = kv_is_quantized(dtype);
+    const std::int32_t code_extent     = cache_code_extent(dtype);
+    const std::int32_t logical_pages   = padded / kPagedKVPageSize;
+    const std::int32_t physical_pages  = static_cast<std::int32_t>(
+        k.bytes / (static_cast<std::size_t>(code_extent) * geometry.kv_heads *
+                   kPagedKVPageSize * dtype_size(dtype)));
     return {
         .k_pages =
-            Tensor(k.p, dtype, {kHeadDim, kPagedKVPageSize, geometry.kv_heads, physical_pages}),
+            Tensor(k.p, dtype, {code_extent, kPagedKVPageSize, geometry.kv_heads, physical_pages}),
         .v_pages =
-            Tensor(v.p, dtype, {kHeadDim, kPagedKVPageSize, geometry.kv_heads, physical_pages}),
+            Tensor(v.p, dtype, {code_extent, kPagedKVPageSize, geometry.kv_heads, physical_pages}),
         .k_scale_pages = quantized ? Tensor(k_scale.p, DType::FP16,
                                             {kHeadDim / kKvGroup, kPagedKVPageSize,
                                              geometry.kv_heads, physical_pages})
@@ -397,9 +408,11 @@ public:
           cache_k_(bench::make_zeros(cache_plane_bytes(geometry, dtype, physical_pages_))),
           cache_v_(bench::make_zeros(cache_plane_bytes(geometry, dtype, physical_pages_))),
           cache_k_scale_(bench::make_zeros(
-              dtype == DType::I8 ? scale_plane_bytes(geometry, physical_pages_) : std::size_t{1})),
+              kv_is_quantized(dtype) ? scale_plane_bytes(geometry, physical_pages_)
+                                     : std::size_t{1})),
           cache_v_scale_(bench::make_zeros(
-              dtype == DType::I8 ? scale_plane_bytes(geometry, physical_pages_) : std::size_t{1})),
+              kv_is_quantized(dtype) ? scale_plane_bytes(geometry, physical_pages_)
+                                     : std::size_t{1})),
           block_table_(static_cast<std::size_t>(logical_pages_) * batch_ * sizeof(std::int32_t)),
           output_(bench::make_zeros(static_cast<std::size_t>(kHeadDim) * geometry.query_heads *
                                     tokens * batch_ * 2)),
@@ -499,7 +512,12 @@ private:
 
 const char* entry_name(Entry entry) { return entry == Entry::Append ? "append" : "cached"; }
 
-const char* dtype_name(DType dtype) { return dtype == DType::BF16 ? "bf16" : "int8"; }
+const char* dtype_name(DType dtype) {
+    if (dtype == DType::BF16) { return "bf16"; }
+    if (dtype == DType::I8) { return "int8"; }
+    if (dtype == DType::U8) { return "q4"; }
+    return "unknown";
+}
 
 const char* execution_name(Execution execution) {
     return execution == Execution::Eager ? "eager" : "graph";
@@ -521,10 +539,12 @@ std::string profile_name(std::span<const std::int32_t> values) {
 }
 
 double cache_vector_bytes(DType dtype) {
-    return dtype == DType::BF16
-               ? static_cast<double>(kHeadDim * dtype_size(DType::BF16))
-               : static_cast<double>(kHeadDim * dtype_size(DType::I8) +
-                                     (kHeadDim / kKvGroup) * dtype_size(DType::FP16));
+    if (dtype == DType::BF16) {
+        return static_cast<double>(kHeadDim * dtype_size(DType::BF16));
+    }
+    return static_cast<double>(
+        cache_code_extent(dtype) * dtype_size(dtype) +
+        (kHeadDim / kKvGroup) * dtype_size(DType::FP16));
 }
 
 double causal_key_sum(std::int32_t tokens, std::int32_t context) {
@@ -660,7 +680,8 @@ std::vector<Geometry> selected_geometries(GeometryChoice choice) {
 std::vector<DType> selected_dtypes(KvChoice choice) {
     if (choice == KvChoice::Bf16) { return {DType::BF16}; }
     if (choice == KvChoice::Int8) { return {DType::I8}; }
-    return {DType::BF16, DType::I8};
+    if (choice == KvChoice::Q4) { return {DType::U8}; }
+    return {DType::BF16, DType::I8, DType::U8};
 }
 
 struct RowProfile {

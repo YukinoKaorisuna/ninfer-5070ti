@@ -83,6 +83,23 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     constexpr int PageIds         = 64;
     constexpr int ProducerThreads = RowTiles * 32;
     constexpr int VLoaderThreads  = Threads - ProducerThreads;
+
+    // T=4/Bc32 keeps V in native packed-Q4 form while it is prefetched
+    // asynchronously. Consumer warps unpack and dequant directly from
+    // packed Q4 into the BF16 PV tile.
+    constexpr bool AsyncPackedV =
+        TokenTile == 4 && Geometry::GroupSize == 6 && Bc == 32;
+
+    // Stage packed K asynchronously alongside V.
+    constexpr bool AsyncPackedK = AsyncPackedV;
+
+    // Async V alone needs 7/2 * Bc*D bytes. Async K uses a separate
+    // Bc*D/2 packed-K staging region, bringing the arena to 4 * Bc*D.
+    constexpr int ArenaBytes =
+        AsyncPackedK ? (4 * Bc * D)
+                     : (AsyncPackedV ? (7 * Bc * D / 2)
+                                     : (4 * Bc * D));
+
     constexpr float Log2E         = 1.4426950408889634074f;
     constexpr unsigned FullMask   = 0xffffffffu;
 
@@ -98,7 +115,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     // registers across the whole kernel. The main arena holds K i8, V i8, and
     // V bf16 during the key loop.
     __shared__ __align__(16) std::int8_t q_s[Br * D];
-    __shared__ __align__(16) std::int8_t static_r_s[DynamicArena ? 16 : 4 * Bc * D];
+    __shared__ __align__(16) std::int8_t static_r_s[DynamicArena ? 16 : ArenaBytes];
     extern __shared__ __align__(16) std::int8_t dynamic_r_s[];
     std::int8_t* r_s      = DynamicArena ? dynamic_r_s : static_r_s;
     std::int8_t* q_i8     = q_s;
@@ -106,8 +123,18 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     std::int8_t* k_i8     = r_s;
     __nv_bfloat16* q_b16  = reinterpret_cast<__nv_bfloat16*>(q_i8);
     __nv_bfloat16* k_b16  = reinterpret_cast<__nv_bfloat16*>(k_i8);
-    std::int8_t* v_i8     = r_s + Bc * D;
-    __nv_bfloat16* v_bf16 = reinterpret_cast<__nv_bfloat16*>(r_s + 2 * Bc * D);
+
+    std::int8_t* v_i8    = r_s + Bc * D;
+    std::uint8_t* v_q4_s =
+        reinterpret_cast<std::uint8_t*>(r_s + Bc * D);
+    __nv_bfloat16* v_bf16 = reinterpret_cast<__nv_bfloat16*>(
+        r_s + (AsyncPackedV ? (3 * Bc * D / 2) : (2 * Bc * D)));
+
+    // Separate packed-K staging area. For T=4 this begins at 28 KiB
+    // and occupies 4 KiB.
+    std::uint8_t* k_q4_s = reinterpret_cast<std::uint8_t*>(
+        r_s + (7 * Bc * D / 2));
+
     __shared__ __align__(16) __nv_bfloat16 p_s[Br * Bc];
     __shared__ float alpha_s[Br];
     __shared__ __align__(16) __half k_scale_s[Bc * Groups];
@@ -359,39 +386,107 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                       &k_i8[key_l * D +
                             gqa_small_t_tc_swz(key_l, dc * 8) * 2];
 
-                  std::int8_t* vdst =
-                      &v_i8[key_l * D + d];
+                  if constexpr (AsyncPackedK) {
+                      std::uint8_t* kdst_q4 =
+                          &k_q4_s[key_l * (D / 2) + (d >> 1)];
+                      ninfer::ops::cp_async<8>(
+                          kdst_q4, &cache_k_q4[off]);
+                  } else {
+                      const int2 kraw =
+                          load_vec<int2>(&cache_k_q4[off]);
 
-                  const int2 kraw =
-                      load_vec<int2>(&cache_k_q4[off]);
-                  const int2 vraw =
-                      load_vec<int2>(&cache_v_q4[off]);
-
-                  const std::uint8_t* kb =
-                      reinterpret_cast<const std::uint8_t*>(&kraw);
-                  const std::uint8_t* vb =
-                      reinterpret_cast<const std::uint8_t*>(&vraw);
+                      const std::uint8_t* kb =
+                          reinterpret_cast<const std::uint8_t*>(&kraw);
 
 #pragma unroll
-                  for (int i = 0; i < 8; ++i) {
-                      dst[2 * i]     = gqa_kv_unpack_q4_low(kb[i]);
-                      dst[2 * i + 1] = gqa_kv_unpack_q4_high(kb[i]);
+                      for (int i = 0; i < 8; ++i) {
+                          dst[2 * i]     = gqa_kv_unpack_q4_low(kb[i]);
+                          dst[2 * i + 1] = gqa_kv_unpack_q4_high(kb[i]);
+                      }
+                  }
 
-                      vdst[2 * i]     = gqa_kv_unpack_q4_low(vb[i]);
-                      vdst[2 * i + 1] = gqa_kv_unpack_q4_high(vb[i]);
+                  if constexpr (AsyncPackedV) {
+                      std::uint8_t* vdst_q4 =
+                          &v_q4_s[key_l * (D / 2) + (d >> 1)];
+                      ninfer::ops::cp_async<8>(
+                          vdst_q4, &cache_v_q4[off]);
+                  } else {
+                      std::int8_t* vdst =
+                          &v_i8[key_l * D + d];
+                      const int2 vraw =
+                          load_vec<int2>(&cache_v_q4[off]);
+                      const std::uint8_t* vb =
+                          reinterpret_cast<const std::uint8_t*>(&vraw);
+
+#pragma unroll
+                      for (int i = 0; i < 8; ++i) {
+                          vdst[2 * i]     = gqa_kv_unpack_q4_low(vb[i]);
+                          vdst[2 * i + 1] = gqa_kv_unpack_q4_high(vb[i]);
+                      }
                   }
 } else {
-                std::int8_t* dst = &k_i8[key_l * D + gqa_small_t_tc_swz(key_l, dc * 8) * 2];
-                store_vec(dst, make_int4(0, 0, 0, 0));
-                store_vec(&v_i8[key_l * D + d], make_int4(0, 0, 0, 0));
+                std::int8_t* dst =
+                    &k_i8[key_l * D +
+                          gqa_small_t_tc_swz(key_l, dc * 8) * 2];
+                if constexpr (AsyncPackedK) {
+                    store_vec(
+                        &k_q4_s[key_l * (D / 2) + (d >> 1)],
+                        make_int2(0, 0));
+                } else {
+                    store_vec(dst, make_int4(0, 0, 0, 0));
+                }
+
+                if constexpr (AsyncPackedV) {
+                    store_vec(
+                        &v_q4_s[key_l * (D / 2) + (d >> 1)],
+                        make_int2(0, 0));
+                } else {
+                    store_vec(
+                        &v_i8[key_l * D + d],
+                        make_int4(0, 0, 0, 0));
+                }
             }
         }
         ninfer::ops::cp_commit();
     };
 
+    auto unpack_k_tile = [&](int tile_k0) {
+#pragma unroll 1
+        for (int chunk = tid; chunk < Bc * (D / 16); chunk += Threads) {
+            const int key_l = chunk / (D / 16);
+            const int dc    = chunk - key_l * (D / 16);
+            const int d     = dc * 16;
+            const int key   = tile_k0 + key_l;
+
+            std::int8_t* dst =
+                &k_i8[key_l * D +
+                      gqa_small_t_tc_swz(key_l, dc * 8) * 2];
+
+            if (key >= split_start && key < split_end) {
+                const std::uint8_t* src =
+                    &k_q4_s[key_l * (D / 2) + (d >> 1)];
+
+                const int2 raw = load_vec<int2>(src);
+                const std::uint8_t* kb =
+                    reinterpret_cast<const std::uint8_t*>(&raw);
+
+#pragma unroll
+                for (int i = 0; i < 8; ++i) {
+                    dst[2 * i]     = gqa_kv_unpack_q4_low(kb[i]);
+                    dst[2 * i + 1] = gqa_kv_unpack_q4_high(kb[i]);
+                }
+            } else {
+                store_vec(dst, make_int4(0, 0, 0, 0));
+            }
+        }
+    };
+
     int physical_page = physical_pages_s[0];
     issue_kv_tile(first_tile, physical_page);
     ninfer::ops::cp_wait<0>();
+    if constexpr (AsyncPackedK) {
+        unpack_k_tile(first_tile);
+    }
     __syncthreads();
 
     for (int kb = 0; kb < key_blocks; ++kb) {
@@ -546,7 +641,17 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                     float vs      = 0.0f;
                     if ((lane & 7) == 0) { vs = __half2float(v_scale_s[key_l * Groups + grp]); }
                     vs = __shfl_sync(FullMask, vs, grp * 8);
-                    store_vec(dst, gqa_kv_dequant_i8x8_from(&v_i8[key_l * D + d], vs));
+                    if constexpr (AsyncPackedV) {
+                        store_vec(
+                            dst,
+                            gqa_kv_dequant_q4x8_from(
+                                &v_q4_s[key_l * (D / 2) + (d >> 1)], vs));
+                    } else {
+                        store_vec(
+                            dst,
+                            gqa_kv_dequant_i8x8_from(
+                                &v_i8[key_l * D + d], vs));
+                    }
                 } else {
                     store_vec(dst, make_int4(0, 0, 0, 0));
                 }
@@ -555,8 +660,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         __syncthreads();
 
         const bool has_next = kb + 1 < key_blocks;
+        const int next_k0 = k0 + Bc;
         if (has_next) {
-            const int next_k0 = k0 + Bc;
             if ((next_k0 & kPagedKVPageMask) == 0) {
                 physical_page = physical_pages_s[(next_k0 >> kPagedKVPageShift) - first_page];
             }
@@ -596,7 +701,12 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                          vf[0], vf[1]);
             }
         }
-        if (has_next) { ninfer::ops::cp_wait<0>(); }
+        if (has_next) {
+            ninfer::ops::cp_wait<0>();
+            if constexpr (AsyncPackedK) {
+                unpack_k_tile(next_k0);
+            }
+        }
         __syncthreads();
     }
 
