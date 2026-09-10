@@ -58,4 +58,17 @@ struct GdnReplayRecords {
     [[nodiscard]] GdnReplayRecordLayer layer(std::int32_t layer, std::int32_t rows) const;
 };
 
+// Non-owning packed host backing. Each model layer occupies one complete
+// one-layer ReplaySSM layout, so a whole layer can transfer with one memcpy.
+struct GdnReplayPackedHost {
+    void* data = nullptr;
+    std::size_t bytes = 0;
+    std::size_t layer_stride_bytes = 0;
+    std::int32_t layers = 0;
+    GdnReplayRecordLayout layer_layout;
+
+    [[nodiscard]] GdnReplayRecordLayer layer(std::int32_t layer,
+                                             std::int32_t rows) const;
+};
+
 } // namespace ninfer

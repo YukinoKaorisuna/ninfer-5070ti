@@ -229,8 +229,50 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
     if (plan.persistent.replay_records) {
         replay_records.emplace(backing, *plan.persistent.replay_records);
     }
-    if (replay_records.has_value() != (speculative_backend != SpeculativeBackend::None)) {
+
+    if (plan.persistent.replay_host_layout) {
+        if (plan.persistent.replay_host_bytes == 0) {
+            throw std::logic_error("ReplaySSM host layout has zero backing size");
+        }
+
+        replay_host.emplace(plan.persistent.replay_host_bytes);
+
+        const std::size_t host_layers =
+            static_cast<std::size_t>(TextConfig::gdn_layers());
+
+        if (plan.persistent.replay_host_bytes % host_layers != 0) {
+            throw std::logic_error(
+                "ReplaySSM packed host size is not layer aligned");
+        }
+
+        replay_host_records.emplace(GdnReplayPackedHost{
+            .data = replay_host->data(),
+            .bytes = replay_host->size(),
+            .layer_stride_bytes =
+                plan.persistent.replay_host_bytes / host_layers,
+            .layers = TextConfig::gdn_layers(),
+            .layer_layout = *plan.persistent.replay_host_layout,
+        });
+    }
+
+    if (replay_records.has_value() != (speculative_backend != SpeculativeBackend::None) ||
+        replay_host_records.has_value() !=
+            (speculative_backend != SpeculativeBackend::None)) {
         throw std::logic_error("ReplaySSM records do not match the sequence plan");
+    }
+
+    if (speculative_backend != SpeculativeBackend::None) {
+        for (std::size_t i = 0; i < replay_ready_events.size(); ++i) {
+            CUDA_CHECK(cudaEventCreateWithFlags(
+                &replay_ready_events[i], cudaEventDisableTiming));
+            CUDA_CHECK(cudaEventCreateWithFlags(
+                &replay_free_events[i], cudaEventDisableTiming));
+
+            // Initially both scratch slots are free.
+            CUDA_CHECK(cudaEventRecord(
+                replay_free_events[i], device.load_stream));
+        }
+        CUDA_CHECK(cudaStreamSynchronize(device.load_stream));
     }
     if (plan.persistent.dflash) { dflash.emplace(backing, *plan.persistent.dflash); }
     if (dflash.has_value() != plan.features.dflash()) {
@@ -314,7 +356,25 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
 }
 
 ProgramImplCore::~ProgramImplCore() noexcept {
-    if (device.stream != nullptr) { (void)cudaStreamSynchronize(device.stream); }
+    if (device.stream != nullptr) {
+        (void)cudaStreamSynchronize(device.stream);
+    }
+    if (device.load_stream != nullptr) {
+        (void)cudaStreamSynchronize(device.load_stream);
+    }
+
+    for (cudaEvent_t& event : replay_ready_events) {
+        if (event != nullptr) {
+            (void)cudaEventDestroy(event);
+            event = nullptr;
+        }
+    }
+    for (cudaEvent_t& event : replay_free_events) {
+        if (event != nullptr) {
+            (void)cudaEventDestroy(event);
+            event = nullptr;
+        }
+    }
 }
 
 bool ProgramImplCore::can_admit_lane(std::uint32_t lane, const RequestPlan& plan) const noexcept {
@@ -734,9 +794,103 @@ void ProgramImplCore::resolve_pending_batch(std::span<const std::uint32_t> lanes
 
     const auto tail_started = Clock::now();
     try {
-        ops::gdn_replay_fold(*replay_records, decoder->linear_attention.all_layers_view(),
-                             std::span<const ops::GdnReplayFoldRow>(fold_rows.data(), lanes.size()),
-                             device.stream);
+        if (!replay_host_records) {
+            throw std::logic_error(
+                "speculative pending batch has no host ReplaySSM records");
+        }
+
+        // Target verification streams ReplaySSM records to pinned host
+        // memory on load_stream. The final one or two scratch slots may not
+        // be reused again during verification, so their completion is not
+        // otherwise observed by the compute stream. Host replay must be
+        // complete before folding it back into recurrent state.
+        CUDA_CHECK(cudaStreamSynchronize(device.load_stream));
+
+        const auto fold_states =
+            decoder->linear_attention.all_layers_view();
+        const auto fold_span =
+            std::span<const ops::GdnReplayFoldRow>(
+                fold_rows.data(), lanes.size());
+
+        // Double-buffer ReplaySSM host->device staging across the two
+        // device scratch layers. The same event pairs used by verify-side
+        // D2H are safe to reuse here because load_stream was synchronized
+        // immediately above.
+        //
+        //   free[slot]  : previous user of scratch slot has completed
+        //   ready[slot] : H2D staging into scratch slot has completed
+        //
+        // load_stream may therefore stage layer n+1 while device.stream
+        // folds layer n.
+        for (std::int32_t gidx = 0;
+             gidx < replay_host_records->layers;
+             ++gidx) {
+            const std::size_t replay_slot =
+                static_cast<std::size_t>(gidx & 1);
+
+            const GdnReplayRecordLayer host =
+                replay_host_records->layer(
+                    gidx, static_cast<std::int32_t>(lanes.size()));
+
+            const GdnReplayRecordLayer scratch =
+                replay_records->layer(
+                    static_cast<std::int32_t>(replay_slot),
+                    static_cast<std::int32_t>(lanes.size()));
+
+            // Do not overwrite a scratch slot until the compute stream has
+            // finished folding its previous contents.
+            CUDA_CHECK(cudaStreamWaitEvent(
+                device.load_stream,
+                replay_free_events[replay_slot], 0));
+
+            CUDA_CHECK(cudaMemcpyAsync(
+                scratch.conv.data, host.conv.data, host.conv.bytes(),
+                cudaMemcpyHostToDevice, device.load_stream));
+            CUDA_CHECK(cudaMemcpyAsync(
+                scratch.key.data, host.key.data, host.key.bytes(),
+                cudaMemcpyHostToDevice, device.load_stream));
+            CUDA_CHECK(cudaMemcpyAsync(
+                scratch.value.data, host.value.data, host.value.bytes(),
+                cudaMemcpyHostToDevice, device.load_stream));
+            CUDA_CHECK(cudaMemcpyAsync(
+                scratch.gate.data, host.gate.data, host.gate.bytes(),
+                cudaMemcpyHostToDevice, device.load_stream));
+
+            CUDA_CHECK(cudaEventRecord(
+                replay_ready_events[replay_slot],
+                device.load_stream));
+
+            // Fold only after this slot's H2D staging is complete.
+            CUDA_CHECK(cudaStreamWaitEvent(
+                device.stream,
+                replay_ready_events[replay_slot], 0));
+
+            // gdn_replay_fold_layer intentionally consumes a one-layer
+            // record object. Expose the selected scratch slot as a
+            // non-owning one-layer view.
+            const GdnReplayRecordLayer fold_layer =
+                replay_records->layer(
+                    static_cast<std::int32_t>(replay_slot),
+                    replay_records->spec.record_capacity);
+
+            GdnReplayRecords fold_records;
+            fold_records.conv  = fold_layer.conv;
+            fold_records.key   = fold_layer.key;
+            fold_records.value = fold_layer.value;
+            fold_records.gate  = fold_layer.gate;
+            fold_records.spec  = replay_records->spec;
+            fold_records.spec.layers = 1;
+
+            ops::gdn_replay_fold_layer(
+                fold_records, fold_states, gidx,
+                fold_span, device.stream);
+
+            // Scratch slot becomes reusable only after the fold kernel has
+            // consumed it.
+            CUDA_CHECK(cudaEventRecord(
+                replay_free_events[replay_slot],
+                device.stream));
+        }
 
         if (needs_hidden_correction) {
             const auto batch = static_cast<std::int32_t>(lanes.size());
@@ -1244,6 +1398,10 @@ void ProgramImplCore::prepare_graphs() {
                                        work,
                                        decoder->linear_attention,
                                        replay_records ? &*replay_records : nullptr,
+                                       replay_host_records ? &*replay_host_records : nullptr,
+                                       device.load_stream,
+                                       &replay_ready_events,
+                                       &replay_free_events,
                                        io,
                                        prefill_hidden,
                                        prefill_chunk,
@@ -1509,7 +1667,10 @@ void ProgramImplCore::enqueue_dflash_context_append(std::span<const std::uint32_
                                features, positions, device_counts, device.stream);
 
     schedule::DFlashAppendContext state{{device, model, work, decoder->linear_attention,
-                                         replay_records ? &*replay_records : nullptr, io,
+                                         replay_records ? &*replay_records : nullptr, replay_host_records ? &*replay_host_records : nullptr,
+                                       device.load_stream,
+                                       &replay_ready_events,
+                                       &replay_free_events, io,
                                          prefill_hidden, prefill_chunk, proposal_head},
                                         *dflash};
     mark_workspace_usage(workspace_plan.dflash_context);
@@ -1540,7 +1701,10 @@ runtime::PrefillStepResult ProgramImplCore::advance_prefill(SequenceState& seque
     try {
         schedule::PrefillContext schedule_state{
             {device, model, work, decoder->linear_attention,
-             replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
+             replay_records ? &*replay_records : nullptr, replay_host_records ? &*replay_host_records : nullptr,
+                                       device.load_stream,
+                                       &replay_ready_events,
+                                       &replay_free_events, io, prefill_hidden, prefill_chunk,
              proposal_head},
             text_kv_view(sequence),
             mtp_kv_view(sequence),
@@ -1800,7 +1964,10 @@ ProgramImplCore::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
 
         schedule::OrdinaryBatchContext schedule_state{
             {device, model, work, decoder->linear_attention,
-             replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
+             replay_records ? &*replay_records : nullptr, replay_host_records ? &*replay_host_records : nullptr,
+                                       device.load_stream,
+                                       &replay_ready_events,
+                                       &replay_free_events, io, prefill_hidden, prefill_chunk,
              proposal_head},
             decoder->text_kv,
             *io.ordinary,
@@ -1931,7 +2098,10 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
         }
 
         schedule::MtpBatchContext schedule_state{{device, model, work, decoder->linear_attention,
-                                                  replay_records ? &*replay_records : nullptr, io,
+                                                  replay_records ? &*replay_records : nullptr, replay_host_records ? &*replay_host_records : nullptr,
+                                       device.load_stream,
+                                       &replay_ready_events,
+                                       &replay_free_events, io,
                                                   prefill_hidden, prefill_chunk, proposal_head},
                                                  decoder->text_kv,
                                                  *decoder->mtp_cache(),
@@ -2093,7 +2263,10 @@ ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
 
         schedule::DFlashBatchContext schedule_state{{device, model, work, decoder->linear_attention,
                                                      replay_records ? &*replay_records : nullptr,
-                                                     io, prefill_hidden, prefill_chunk,
+                                                     replay_host_records ? &*replay_host_records : nullptr,
+                                       device.load_stream,
+                                       &replay_ready_events,
+                                       &replay_free_events, io, prefill_hidden, prefill_chunk,
                                                      proposal_head},
                                                     decoder->text_kv,
                                                     *dflash,

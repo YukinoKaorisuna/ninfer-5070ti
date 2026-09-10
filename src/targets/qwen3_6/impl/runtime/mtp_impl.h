@@ -137,7 +137,11 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
                                  .licensed_counts = licensed_counts,
                                  .accepted_drafts = accepted,
                                  .selected_hidden = selected_hidden,
-                                 .replay_records  = state.execution.replay_records,
+                                 .replay_records      = state.execution.replay_records,
+                                 .replay_host_records = state.execution.replay_host_records,
+                                 .replay_copy_stream = state.execution.replay_copy_stream,
+                                 .replay_ready_events = state.execution.replay_ready_events,
+                                 .replay_free_events = state.execution.replay_free_events,
                                  .sampling        = frame.sampling,
                              },
                              envelopes.target_verify);

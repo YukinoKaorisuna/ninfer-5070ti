@@ -118,11 +118,35 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
     // resolving the explicit KV/runtime capacity. Without this, lazy module
     // loading can consume the final few MiB only after startup is complete.
     if (target_key == Qwen3_6_27B::qwen3_8_target_key) {
+        const auto mem_diag = [](const char* label) {
+            std::size_t free_bytes = 0;
+            std::size_t total_bytes = 0;
+            CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
+            std::fprintf(stderr,
+                         "[PREWARM-MEM] %-32s %12zu B  %9.4f MiB free\n",
+                         label,
+                         free_bytes,
+                         static_cast<double>(free_bytes) / (1024.0 * 1024.0));
+        };
+
+        device.synchronize();
+        mem_diag("before prewarm");
+
         ops::detail::q4_q5_attn_input_small_t_prewarm();
+        device.synchronize();
+        mem_diag("after q4q5 attention");
+
         ops::detail::q4_q5_gdn_input_independent_prewarm();
+        device.synchronize();
+        mem_diag("after q4q5 gdn");
+
         ops::detail::speculative_round_prewarm();
+        device.synchronize();
+        mem_diag("after speculative");
+
         ops::detail::scalar_prewarm();
         device.synchronize();
+        mem_diag("after scalar");
     }
 
     runtime::KvCapacityResolution capacity_resolution =

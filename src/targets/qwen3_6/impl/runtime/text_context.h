@@ -185,7 +185,13 @@ public:
     void set_rewrite_checkpoint_state_host(void* host) noexcept {
         rewrite_checkpoint_state_host_ = host;
     }
-    void set_gdn_state_action(GdnStateAction action, const GdnReplayRecords* replay_records);
+    void set_gdn_state_action(
+        GdnStateAction action,
+        const GdnReplayRecords* replay_records,
+        const GdnReplayPackedHost* replay_host_records = nullptr,
+        cudaStream_t replay_copy_stream = nullptr,
+        const std::array<cudaEvent_t, 2>* replay_ready_events = nullptr,
+        const std::array<cudaEvent_t, 2>* replay_free_events = nullptr);
 
     [[nodiscard]] const Weight* proposal_head() const noexcept { return proposal_head_; }
 
@@ -311,6 +317,10 @@ private:
     void* rewrite_checkpoint_state_host_                    = nullptr;
     GdnStateAction gdn_state_action_                      = GdnStateAction::UpdateInPlace;
     const GdnReplayRecords* replay_records_               = nullptr;
+    const GdnReplayPackedHost* replay_host_records_       = nullptr;
+    cudaStream_t replay_copy_stream_                       = nullptr;
+    const std::array<cudaEvent_t, 2>* replay_ready_events_ = nullptr;
+    const std::array<cudaEvent_t, 2>* replay_free_events_  = nullptr;
     std::int64_t prefill_rewrite_checkpoint_frontier_     = -1;
     Tensor* rewrite_checkpoint_hidden_output_             = nullptr;
     std::uint32_t mtp_proposal_extent_                    = 0;

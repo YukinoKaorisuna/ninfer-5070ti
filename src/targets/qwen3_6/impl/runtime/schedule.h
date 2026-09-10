@@ -35,6 +35,10 @@ struct ExecutionCore {
     WorkspaceArena& work;
     LinearAttentionStatePool& linear_attention;
     const GdnReplayRecords* replay_records;
+    const GdnReplayPackedHost* replay_host_records;
+    cudaStream_t replay_copy_stream;
+    const std::array<cudaEvent_t, 2>* replay_ready_events;
+    const std::array<cudaEvent_t, 2>* replay_free_events;
     qwen3_6::RoundState& io;
     Tensor& prefill_hidden;
     std::uint32_t prefill_chunk;
@@ -121,8 +125,12 @@ struct TargetVerifyFrameView {
     Tensor licensed_counts;
     Tensor accepted_drafts;
     Tensor selected_hidden;
-    const GdnReplayRecords* replay_records = nullptr;
-    const ops::SamplingConfig* sampling    = nullptr;
+    const GdnReplayRecords* replay_records         = nullptr;
+    const GdnReplayPackedHost* replay_host_records  = nullptr;
+    cudaStream_t replay_copy_stream                  = nullptr;
+    const std::array<cudaEvent_t, 2>* replay_ready_events = nullptr;
+    const std::array<cudaEvent_t, 2>* replay_free_events  = nullptr;
+    const ops::SamplingConfig* sampling         = nullptr;
     DFlashFeatureSink* feature_sink        = nullptr;
 };
 

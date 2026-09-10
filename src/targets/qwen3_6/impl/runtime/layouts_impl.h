@@ -23,6 +23,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <cstdio>
 
 namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS {
 namespace {
@@ -135,19 +136,69 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                              .conv_dtype     = DType::BF16,
                          },
                  });
+    const auto persistent_diag = [&](const char* stage) {
+        const std::size_t bytes = builder.finish(kArenaAlign, stage);
+        std::fprintf(stderr,
+                     "[PERSIST-DIAG] %-28s %12zu B  %9.4f MiB\n",
+                     stage, bytes,
+                     static_cast<double>(bytes) / (1024.0 * 1024.0));
+    };
+
+    persistent_diag("after decoder");
+
     if (plan.speculative_backend != SpeculativeBackend::None) {
-        out.replay_records = plan_gdn_replay_records(
-            builder, GdnReplayRecordSpec{
-                         .layers          = TextConfig::gdn_layers(),
-                         .record_capacity = static_cast<std::int32_t>(plan.max_concurrency),
-                         .width           = static_cast<std::int32_t>(plan.draft_window + 1U),
-                         .conv_channels   = TextConfig::convolution_dim,
-                         .qk_heads        = TextConfig::gdn_key_heads,
-                         .value_heads     = TextConfig::gdn_value_heads,
-                         .key_dim         = TextConfig::gdn_key_head_dim,
-                         .value_dim       = TextConfig::gdn_value_head_dim,
-                     });
+        const GdnReplayRecordSpec full_replay_spec{
+            .layers          = TextConfig::gdn_layers(),
+            .record_capacity = static_cast<std::int32_t>(plan.max_concurrency),
+            .width           = static_cast<std::int32_t>(plan.draft_window + 1U),
+            .conv_channels   = TextConfig::convolution_dim,
+            .qk_heads        = TextConfig::gdn_key_heads,
+            .value_heads     = TextConfig::gdn_value_heads,
+            .key_dim         = TextConfig::gdn_key_head_dim,
+            .value_dim       = TextConfig::gdn_value_head_dim,
+        };
+
+        // Both device scratch and packed host slots use the exact same
+        // one-layer layout.
+        GdnReplayRecordSpec scratch_spec = full_replay_spec;
+        scratch_spec.layers = 2;
+
+        GdnReplayRecordSpec host_slot_spec = scratch_spec;
+        host_slot_spec.layers = 1;
+
+        LayoutBuilder replay_host_builder;
+        out.replay_host_layout =
+            plan_gdn_replay_records(replay_host_builder, host_slot_spec);
+
+        const std::size_t replay_host_layer_stride =
+            replay_host_builder.finish(kArenaAlign, "ReplaySSM packed host layer");
+
+        out.replay_host_bytes =
+            replay_host_layer_stride *
+            static_cast<std::size_t>(TextConfig::gdn_layers());
+
+        // Device-resident ReplaySSM remains one streaming layer.
+        out.replay_records =
+            plan_gdn_replay_records(builder, scratch_spec);
+
+        std::fprintf(stderr,
+                     "[REPLAY-LAYOUT] scratch bytes=%zu "
+                     "conv=(%zu,%zu) key=(%zu,%zu) "
+                     "value=(%zu,%zu) gate=(%zu,%zu)\\n",
+                     out.replay_records->gate.region.offset +
+                         out.replay_records->gate.region.bytes -
+                         out.replay_records->conv.region.offset,
+                     out.replay_records->conv.region.offset,
+                     out.replay_records->conv.region.bytes,
+                     out.replay_records->key.region.offset,
+                     out.replay_records->key.region.bytes,
+                     out.replay_records->value.region.offset,
+                     out.replay_records->value.region.bytes,
+                     out.replay_records->gate.region.offset,
+                     out.replay_records->gate.region.bytes);
     }
+    persistent_diag("after replay");
+
     if constexpr (Variant::supports_dflash) {
         if (plan.features.dflash()) {
             DFlashPersistentLayout& dflash = out.dflash.emplace();
@@ -192,6 +243,8 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
         }
     }
 
+    persistent_diag("before round");
+
     out.round = qwen3_6::begin_round_state_layout(
         builder, qwen3_6::RoundStateSpec{.hidden         = TextConfig::hidden,
                                          .output_rows    = TextConfig::output_rows,
@@ -199,9 +252,15 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                                          .draft_window   = plan.draft_window,
                                          .enable_mtp     = plan.features.mtp(),
                                          .enable_dflash  = plan.features.dflash()});
+    persistent_diag("after round begin");
+
     out.prefill_hidden = add_tensor(
         builder, DType::BF16, {TextConfig::hidden, effective_prefill_chunk}, "step prefill hidden");
+    persistent_diag("after prefill hidden");
+
     qwen3_6::complete_round_state_layout(builder, out.round);
+    persistent_diag("after round complete");
+
     const auto i32 = [&](std::size_t n, const char* label) {
         return add_tensor(builder, DType::I32, {static_cast<std::int32_t>(n)}, label);
     };
@@ -209,17 +268,25 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
         add_tensor(builder, DType::I32,
                    {TextConfig::token_domain, static_cast<std::int32_t>(plan.max_concurrency)},
                    "sampling token counts");
+    persistent_diag("after token counts");
+
     const auto config_words = static_cast<std::int32_t>(
         (sizeof(ops::SamplingConfig) + sizeof(std::int32_t) - 1) / sizeof(std::int32_t));
     out.sampling_config = add_tensor(
         builder, DType::I32, {config_words, static_cast<std::int32_t>(plan.max_concurrency)},
         "sampling config");
+    persistent_diag("after sampling config");
+
     out.tail_hidden = add_tensor(
         builder, DType::BF16, {TextConfig::hidden, static_cast<std::int32_t>(plan.max_concurrency)},
         "tail hidden");
+    persistent_diag("after tail hidden");
+
     out.rewrite_checkpoint_hidden = add_tensor(
         builder, DType::BF16, {TextConfig::hidden, static_cast<std::int32_t>(plan.max_concurrency)},
         "rewrite checkpoint hidden");
+    persistent_diag("after checkpoint hidden");
+
     out.bytes = builder.finish(kArenaAlign, "persistent layout");
     out.kv_payload_bytes =
         out.decoder.kv_payload_bytes() + (out.dflash ? out.dflash->kv_payload_bytes() : 0);
@@ -256,15 +323,54 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                      std::int32_t batch_size, std::int32_t min_width,
                                      std::int32_t max_width, ops::GqaExecutionEnvelope envelope) {
         auto stage = layout.scope();
+
         (void)workspace_recipe::text_attention_projection<TextConfig>(layout, last);
-        scratch(layout, Variant::attention_projection_workspace_capacity_bytes(plan.weights_profile,
-                                                                               phase, first, last));
+        if (phase == qwen3_6::TextPhase::Prefill) {
+            std::fprintf(stderr,
+                "[ATTN-DIAG] projection tensors   %12zu B  %8.4f MiB\n",
+                layout.peak_bytes(1), layout.peak_bytes(1) / 1048576.0);
+        }
+
+        const std::size_t projection_scratch =
+            Variant::attention_projection_workspace_capacity_bytes(
+                plan.weights_profile, phase, first, last);
+        scratch(layout, projection_scratch);
+        if (phase == qwen3_6::TextPhase::Prefill) {
+            std::fprintf(stderr,
+                "[ATTN-DIAG] projection scratch   %12zu B  %8.4f MiB  raw=%zu\n",
+                layout.peak_bytes(1), layout.peak_bytes(1) / 1048576.0,
+                projection_scratch);
+        }
+
         (void)workspace_recipe::text_attention_results<TextConfig>(layout, last);
-        scratch(layout, ops::gqa_attention_workspace_capacity_bytes(
-                            TextConfig::query_heads, plan.kv_dtype, envelope, batch_size, min_width,
-                            max_width));
-        scratch(layout, Variant::attention_output_projection_workspace_capacity_bytes(
-                            plan.weights_profile, phase, first, last));
+        if (phase == qwen3_6::TextPhase::Prefill) {
+            std::fprintf(stderr,
+                "[ATTN-DIAG] attention results    %12zu B  %8.4f MiB\n",
+                layout.peak_bytes(1), layout.peak_bytes(1) / 1048576.0);
+        }
+
+        const std::size_t gqa_scratch =
+            ops::gqa_attention_workspace_capacity_bytes(
+                TextConfig::query_heads, plan.kv_dtype, envelope,
+                batch_size, min_width, max_width);
+        scratch(layout, gqa_scratch);
+        if (phase == qwen3_6::TextPhase::Prefill) {
+            std::fprintf(stderr,
+                "[ATTN-DIAG] GQA scratch           %12zu B  %8.4f MiB  raw=%zu\n",
+                layout.peak_bytes(1), layout.peak_bytes(1) / 1048576.0,
+                gqa_scratch);
+        }
+
+        const std::size_t output_scratch =
+            Variant::attention_output_projection_workspace_capacity_bytes(
+                plan.weights_profile, phase, first, last);
+        scratch(layout, output_scratch);
+        if (phase == qwen3_6::TextPhase::Prefill) {
+            std::fprintf(stderr,
+                "[ATTN-DIAG] output proj scratch   %12zu B  %8.4f MiB  raw=%zu\n",
+                layout.peak_bytes(1), layout.peak_bytes(1) / 1048576.0,
+                output_scratch);
+        }
     };
     const auto gdn_stage = [&](WorkspaceLayoutBuilder& layout, std::int32_t first,
                                std::int32_t last, qwen3_6::TextPhase phase, GdnWorkspacePath path,
@@ -371,9 +477,33 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
     WorkspacePlan out;
     WorkspaceLayoutBuilder text_prefill;
     text_common_root(text_prefill, chunk);
-    target_body(text_prefill, 1, chunk, qwen3_6::TextPhase::Prefill, GdnWorkspacePath::Prefill, 1,
-                1, chunk, text_envelope);
-    scratch(text_prefill, ops::sampling_workspace_capacity_bytes(TextConfig::token_domain, 1, 1));
+    std::fprintf(stderr,
+        "[PREFILL-STAGE] roots             %12zu B  %8.4f MiB\n",
+        finish(text_prefill), finish(text_prefill) / 1048576.0);
+
+    attention_stage(text_prefill, 1, chunk, qwen3_6::TextPhase::Prefill,
+                    1, 1, chunk, text_envelope);
+    std::fprintf(stderr,
+        "[PREFILL-STAGE] after attention   %12zu B  %8.4f MiB\n",
+        finish(text_prefill), finish(text_prefill) / 1048576.0);
+
+    gdn_stage(text_prefill, 1, chunk, qwen3_6::TextPhase::Prefill,
+              GdnWorkspacePath::Prefill, 1, 1, chunk);
+    std::fprintf(stderr,
+        "[PREFILL-STAGE] after GDN         %12zu B  %8.4f MiB\n",
+        finish(text_prefill), finish(text_prefill) / 1048576.0);
+
+    post_mixer_stage(text_prefill, 1, chunk, qwen3_6::TextPhase::Prefill);
+    std::fprintf(stderr,
+        "[PREFILL-STAGE] after postmixer   %12zu B  %8.4f MiB\n",
+        finish(text_prefill), finish(text_prefill) / 1048576.0);
+
+    scratch(text_prefill,
+            ops::sampling_workspace_capacity_bytes(TextConfig::token_domain, 1, 1));
+    std::fprintf(stderr,
+        "[PREFILL-STAGE] after sampling    %12zu B  %8.4f MiB\n",
+        finish(text_prefill), finish(text_prefill) / 1048576.0);
+
     out.text_prefill = finish(text_prefill);
 
     for (std::int32_t batch = 1; batch <= static_cast<std::int32_t>(plan.max_concurrency);
@@ -531,6 +661,22 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
         out.vision_encode          = schedule::VisionContext::workspace_capacity_bytes(
             merged, std::min(merged, kFrontendSegmentLimit));
     }
+
+    std::fprintf(stderr,
+        "[WORKSPACE-DIAG] text_prefill    %12zu B  %8.4f MiB\n"
+        "[WORKSPACE-DIAG] ordinary_round  %12zu B  %8.4f MiB\n"
+        "[WORKSPACE-DIAG] mtp_prefill     %12zu B  %8.4f MiB\n"
+        "[WORKSPACE-DIAG] mtp_round       %12zu B  %8.4f MiB\n"
+        "[WORKSPACE-DIAG] dflash_context  %12zu B  %8.4f MiB\n"
+        "[WORKSPACE-DIAG] dflash_round    %12zu B  %8.4f MiB\n"
+        "[WORKSPACE-DIAG] vision_encode   %12zu B  %8.4f MiB\n",
+        out.text_prefill,   out.text_prefill   / 1048576.0,
+        out.ordinary_round, out.ordinary_round / 1048576.0,
+        out.mtp_prefill,    out.mtp_prefill    / 1048576.0,
+        out.mtp_round,      out.mtp_round      / 1048576.0,
+        out.dflash_context, out.dflash_context / 1048576.0,
+        out.dflash_round,   out.dflash_round   / 1048576.0,
+        out.vision_encode,  out.vision_encode  / 1048576.0);
 
     out.capacity = std::max({out.text_prefill, out.ordinary_round, out.mtp_prefill, out.mtp_round,
                              out.dflash_context, out.dflash_round, out.vision_encode});

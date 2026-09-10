@@ -37,4 +37,17 @@ struct GdnReplayFoldRow {
 void gdn_replay_fold(const GdnReplayRecords& records, LinearAttentionStateAllLayersView states,
                      std::span<const GdnReplayFoldRow> rows, cudaStream_t stream);
 
+/**
+ * Replays a single-layer ReplaySSM record into one selected GDN state layer.
+ *
+ * records.spec.layers must be exactly 1. state_layer selects the destination
+ * layer in states. Record row and commit semantics are identical to
+ * gdn_replay_fold().
+ */
+void gdn_replay_fold_layer(const GdnReplayRecords& records,
+                           LinearAttentionStateAllLayersView states,
+                           std::int32_t state_layer,
+                           std::span<const GdnReplayFoldRow> rows,
+                           cudaStream_t stream);
+
 } // namespace ninfer::ops

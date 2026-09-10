@@ -241,56 +241,85 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             if (position < split_start || position >= split_end) { continue; }
             int physical_page       = lane == 0 ? paged_kv_physical_page(block_table, position) : 0;
             const int page_offset   = position & kPagedKVPageMask;
-                          const int d0            = grp * kGqaKvQuantGroup + 2 * lane;
-              const int d1            = d0 + 1;
-              const std::int64_t src0 = gqa_kv_new_index<Geometry>(kv_head, d0, token);
-              const std::int64_t src1 = gqa_kv_new_index<Geometry>(kv_head, d1, token);
+                          const int d0 = grp * kGqaKvQuantGroup + 4 * lane;
 
-              const float kv0 = __bfloat162float(input.k[src0]);
-              const float kv1 = __bfloat162float(input.k[src1]);
-              const float vv0 = __bfloat162float(input.v[src0]);
-              const float vv1 = __bfloat162float(input.v[src1]);
+            float kv0 = 0.0f;
+            float kv1 = 0.0f;
+            float kv2 = 0.0f;
+            float kv3 = 0.0f;
+            float vv0 = 0.0f;
+            float vv1 = 0.0f;
+            float vv2 = 0.0f;
+            float vv3 = 0.0f;
 
-              float kamax = fmaxf(fabsf(kv0), fabsf(kv1));
-              float vamax = fmaxf(fabsf(vv0), fabsf(vv1));
+            if (lane < 16) {
+                const std::int64_t src0 =
+                    gqa_kv_new_index<Geometry>(kv_head, d0 + 0, token);
+                const std::int64_t src1 =
+                    gqa_kv_new_index<Geometry>(kv_head, d0 + 1, token);
+                const std::int64_t src2 =
+                    gqa_kv_new_index<Geometry>(kv_head, d0 + 2, token);
+                const std::int64_t src3 =
+                    gqa_kv_new_index<Geometry>(kv_head, d0 + 3, token);
 
-              kamax = warp_max(kamax, FullMask);
-              vamax = warp_max(vamax, FullMask);
+                kv0 = __bfloat162float(input.k[src0]);
+                kv1 = __bfloat162float(input.k[src1]);
+                kv2 = __bfloat162float(input.k[src2]);
+                kv3 = __bfloat162float(input.k[src3]);
 
-              const __half ksh =
-                  __float2half_rn(kamax > 0.0f ? kamax / 7.0f : 0.0f);
-              const __half vsh =
-                  __float2half_rn(vamax > 0.0f ? vamax / 7.0f : 0.0f);
+                vv0 = __bfloat162float(input.v[src0]);
+                vv1 = __bfloat162float(input.v[src1]);
+                vv2 = __bfloat162float(input.v[src2]);
+                vv3 = __bfloat162float(input.v[src3]);
+            }
 
-              const float ks = __half2float(ksh);
-              const float vs = __half2float(vsh);
+            float kamax =
+                fmaxf(fmaxf(fabsf(kv0), fabsf(kv1)),
+                      fmaxf(fabsf(kv2), fabsf(kv3)));
+            float vamax =
+                fmaxf(fmaxf(fabsf(vv0), fabsf(vv1)),
+                      fmaxf(fabsf(vv2), fabsf(vv3)));
 
-              const float k_inv = ks > 0.0f ? 1.0f / ks : 0.0f;
-              const float v_inv = vs > 0.0f ? 1.0f / vs : 0.0f;
+            kamax = warp_max(kamax, FullMask);
+            vamax = warp_max(vamax, FullMask);
 
-              physical_page = __shfl_sync(FullMask, physical_page, 0);
+            // Q2 stores the reconstructed outer level itself.
+            const __half ksh = __float2half_rn(kamax);
+            const __half vsh = __float2half_rn(vamax);
 
-              const std::int64_t code_off =
-                  gqa_kv_q4_code_index<Geometry>(
-                      physical_page, kv_head, d0, page_offset);
+            const float ks = __half2float(ksh);
+            const float vs = __half2float(vsh);
 
-              cache_k_q2[code_off] =
-                  gqa_kv_pack_q4(
-                      gqa_kv_quant_q4_code(kv0, k_inv),
-                      gqa_kv_quant_q4_code(kv1, k_inv));
+            physical_page = __shfl_sync(FullMask, physical_page, 0);
 
-              cache_v_q2[code_off] =
-                  gqa_kv_pack_q4(
-                      gqa_kv_quant_q4_code(vv0, v_inv),
-                      gqa_kv_quant_q4_code(vv1, v_inv));
+            if (lane < 16) {
+                const std::int64_t code_off =
+                    gqa_kv_q2_code_index<Geometry>(
+                        physical_page, kv_head, d0, page_offset);
+
+                cache_k_q2[code_off] =
+                    gqa_kv_pack_q2(
+                        gqa_kv_quant_q2_code(kv0, ks),
+                        gqa_kv_quant_q2_code(kv1, ks),
+                        gqa_kv_quant_q2_code(kv2, ks),
+                        gqa_kv_quant_q2_code(kv3, ks));
+
+                cache_v_q2[code_off] =
+                    gqa_kv_pack_q2(
+                        gqa_kv_quant_q2_code(vv0, vs),
+                        gqa_kv_quant_q2_code(vv1, vs),
+                        gqa_kv_quant_q2_code(vv2, vs),
+                        gqa_kv_quant_q2_code(vv3, vs));
+            }
 
             if (lane == 0) {
                 const std::int64_t so =
-                    gqa_kv_quant_scale_index<Geometry>(physical_page, kv_head, grp, page_offset);
+                    gqa_kv_quant_scale_index<Geometry>(
+                        physical_page, kv_head, grp, page_offset);
+
                 cache_k_scale[so] = ksh;
                 cache_v_scale[so] = vsh;
-            }
-        }
+            }        }
         __syncthreads();
     }
 

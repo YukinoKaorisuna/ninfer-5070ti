@@ -36,7 +36,17 @@ struct DFlashPersistentLayout {
 
 struct PersistentLayout {
     qwen3_6::DecoderStateLayout decoder;
+
+    // GPU ReplaySSM scratch. For speculative execution this is intentionally
+    // one GDN layer; full-model replay records will later live in pinned host
+    // storage and stream through this scratch.
     std::optional<GdnReplayRecordLayout> replay_records;
+
+    // Geometry and contiguous byte size of the original full-model ReplaySSM
+    // allocation. This does not consume device-persistent storage.
+    std::optional<GdnReplayRecordLayout> replay_host_layout;
+    std::size_t replay_host_bytes = 0;
+
     std::optional<DFlashPersistentLayout> dflash;
     qwen3_6::RoundStateLayout round;
     TensorLayout prefill_hidden;

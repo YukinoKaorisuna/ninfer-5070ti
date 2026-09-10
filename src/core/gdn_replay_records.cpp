@@ -139,4 +139,31 @@ GdnReplayRecordLayer GdnReplayRecords::layer(std::int32_t layer_index, std::int3
     };
 }
 
+GdnReplayRecordLayer GdnReplayPackedHost::layer(std::int32_t layer_index,
+                                               std::int32_t rows) const {
+    if (data == nullptr || layer_stride_bytes == 0 || layers <= 0) {
+        throw std::logic_error("packed GDN replay host storage is not initialized");
+    }
+    if (layer_index < 0 || layer_index >= layers) {
+        throw std::out_of_range("packed GDN replay host layer index out of range");
+    }
+    if (layer_layout.spec.layers != 1) {
+        throw std::logic_error("packed GDN replay host layout must contain one layer");
+    }
+
+    const std::size_t offset =
+        static_cast<std::size_t>(layer_index) * layer_stride_bytes;
+
+    if (offset > bytes || layer_stride_bytes > bytes - offset) {
+        throw std::out_of_range("packed GDN replay host layer exceeds backing");
+    }
+
+    GdnReplayRecords records(
+        DeviceSpan{static_cast<unsigned char*>(data) + offset,
+                   layer_stride_bytes},
+        layer_layout);
+
+    return records.layer(0, rows);
+}
+
 } // namespace ninfer

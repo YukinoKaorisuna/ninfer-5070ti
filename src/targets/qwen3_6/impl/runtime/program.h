@@ -261,7 +261,17 @@ public:
     DeviceArena workspace_storage;
     WorkspaceArena work;
     std::unique_ptr<qwen3_6::DecoderState> decoder;
+
+    // One-layer device ReplaySSM streaming scratch.
     std::optional<GdnReplayRecords> replay_records;
+
+    // Full-model ReplaySSM transition records live in pinned host memory.
+    std::optional<PinnedHostBuffer> replay_host;
+    std::optional<GdnReplayPackedHost> replay_host_records;
+
+    std::array<cudaEvent_t, 2> replay_ready_events{nullptr, nullptr};
+    std::array<cudaEvent_t, 2> replay_free_events{nullptr, nullptr};
+
     std::optional<DFlashPersistentState> dflash;
     qwen3_6::RoundState io;
     Tensor prefill_hidden;

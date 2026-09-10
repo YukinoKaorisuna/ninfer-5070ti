@@ -2,6 +2,7 @@
 
 #include <limits>
 #include <stdexcept>
+#include <cstdio>
 
 namespace ninfer::targets::qwen3_6 {
 namespace {
@@ -64,16 +65,29 @@ PagedKVCacheLayout plan_cache(LayoutBuilder& builder, std::uint32_t layers, std:
 
 DecoderStateLayout plan_decoder_state(LayoutBuilder& builder, const DecoderStateSpec& spec) {
     DecoderStateLayout layout;
+    const auto decoder_diag = [&](const char* stage) {
+        const std::size_t bytes = builder.finish(256, stage);
+        std::fprintf(stderr,
+                     "[DECODER-DIAG] %-24s %12zu B  %9.4f MiB\n",
+                     stage, bytes,
+                     static_cast<double>(bytes) / (1024.0 * 1024.0));
+    };
+
     layout.text_kv = plan_cache(builder, spec.full_attention_layers, spec.capacity, spec.kv_heads,
                                 spec.attention_head_dim, spec.kv_dtype, spec.kv_quant_group,
                                 spec.kv_table_rows, spec.text_physical_page_groups);
+    decoder_diag("after text KV");
+
     if (spec.enable_mtp) {
         layout.mtp_kv = plan_cache(builder, spec.mtp_layers, spec.capacity, spec.kv_heads,
                                    spec.attention_head_dim, spec.mtp_kv_dtype,
                                    spec.mtp_kv_quant_group, spec.kv_table_rows,
                                    spec.mtp_physical_page_groups);
+        decoder_diag("after MTP KV");
     }
+    decoder_diag("before linear state");
     layout.linear_attention = plan_linear_attention_state_pool(builder, spec.linear_attention);
+    decoder_diag("after linear state");
     return layout;
 }
 

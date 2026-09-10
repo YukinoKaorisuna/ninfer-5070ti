@@ -254,4 +254,92 @@ void launch_replay_fold(const GdnReplayRecords& records, LinearAttentionStateAll
     throw std::invalid_argument("GDN replay fold launcher received an unregistered geometry");
 }
 
+template <class Geometry>
+void launch_replay_fold_layer_fixed(const GdnReplayRecords& records,
+                                    LinearAttentionStateAllLayersView states,
+                                    std::int32_t state_layer,
+                                    const GdnReplayFoldKernelRows& rows,
+                                    std::int32_t active_rows,
+                                    cudaStream_t stream) {
+    auto* recurrent_base =
+        reinterpret_cast<float*>(
+            reinterpret_cast<std::byte*>(states.recurrent_layer0.data) +
+            static_cast<std::int64_t>(state_layer) *
+                states.recurrent_layer_stride_bytes);
+
+    auto* conv_base =
+        reinterpret_cast<__nv_bfloat16*>(
+            reinterpret_cast<std::byte*>(states.conv_layer0.data) +
+            static_cast<std::int64_t>(state_layer) *
+                states.conv_layer_stride_bytes);
+
+    const FoldAccess<Geometry> access{
+        static_cast<const __nv_bfloat16*>(records.key.data),
+        static_cast<const __nv_bfloat16*>(records.value.data),
+        reinterpret_cast<const uint2*>(records.gate.data),
+        static_cast<const __nv_bfloat16*>(records.conv.data),
+        recurrent_base,
+        conv_base,
+
+        // coord.layer is always zero for this launch, so these strides are
+        // never consumed for another layer. Retaining the real strides keeps
+        // FoldAccess semantics unchanged.
+        states.recurrent_layer_stride_bytes /
+            static_cast<std::int64_t>(sizeof(float)),
+        states.conv_layer_stride_bytes /
+            static_cast<std::int64_t>(sizeof(__nv_bfloat16)),
+
+        records.spec.record_capacity,
+        records.spec.width,
+        rows,
+    };
+
+    // Eight state tiles comprise one recurrent layer.
+    const dim3 grid(static_cast<unsigned>(Geometry::kValueHeads),
+                    static_cast<unsigned>(active_rows),
+                    static_cast<unsigned>(kStateDim / kBlockDv));
+    const dim3 block(kWarpSize, kNumWarps, 1);
+
+    recurrent_fold_kernel<Geometry><<<grid, block, 0, stream>>>(access);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_replay_fold_layer(const GdnReplayRecords& records,
+                              LinearAttentionStateAllLayersView states,
+                              std::int32_t state_layer,
+                              const GdnReplayFoldKernelRows& rows,
+                              std::int32_t active_rows,
+                              cudaStream_t stream) {
+    // One-layer record storage still uses the model's registered head/channel
+    // geometry. Geometry::kLayers is irrelevant because this launcher
+    // explicitly launches only one layer's eight state tiles.
+    if (records.spec.qk_heads == FoldGeometry48x48::kQkHeads &&
+        records.spec.value_heads == FoldGeometry48x48::kValueHeads &&
+        records.spec.conv_channels == FoldGeometry48x48::kConvChannels) {
+        launch_replay_fold_layer_fixed<FoldGeometry48x48>(
+            records, states, state_layer, rows, active_rows, stream);
+        return;
+    }
+
+    if (records.spec.qk_heads == FoldGeometry30x32::kQkHeads &&
+        records.spec.value_heads == FoldGeometry30x32::kValueHeads &&
+        records.spec.conv_channels == FoldGeometry30x32::kConvChannels) {
+        launch_replay_fold_layer_fixed<FoldGeometry30x32>(
+            records, states, state_layer, rows, active_rows, stream);
+        return;
+    }
+
+    if (records.spec.qk_heads == FoldGeometry24x32::kQkHeads &&
+        records.spec.value_heads == FoldGeometry24x32::kValueHeads &&
+        records.spec.conv_channels == FoldGeometry24x32::kConvChannels) {
+        launch_replay_fold_layer_fixed<FoldGeometry24x32>(
+            records, states, state_layer, rows, active_rows, stream);
+        return;
+    }
+
+    throw std::invalid_argument(
+        "GDN replay layer fold launcher received an unregistered geometry");
+}
+
+
 } // namespace ninfer::ops::detail::gated_delta_net
