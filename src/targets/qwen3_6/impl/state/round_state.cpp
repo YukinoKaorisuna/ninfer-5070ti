@@ -72,7 +72,12 @@ RoundStateLayout begin_round_state_layout(LayoutBuilder& builder, const RoundSta
     layout.pos        = add_tensor(builder, DType::I32, {1}, "step position");
     layout.rope_pos   = add_tensor(builder, DType::I32, {1}, "step rope position");
     layout.rope_delta = add_tensor(builder, DType::I32, {1}, "step rope delta");
-    layout.logits     = add_tensor(builder, DType::BF16, {spec.output_rows, 1}, "step logits");
+    // Single-lane MTP can reuse the first target-verification logits column
+    // for scalar/bridge logits. complete_round_state_layout() installs that
+    // alias once the MTP target-logits region has been allocated.
+    if (!(spec.enable_mtp && spec.batch_capacity == 1)) {
+        layout.logits = add_tensor(builder, DType::BF16, {spec.output_rows, 1}, "step logits");
+    }
     layout.text_kv_table_row    = add_tensor(builder, DType::I32, {1}, "step Text KV table row");
     layout.backend_kv_table_row = add_tensor(builder, DType::I32, {1}, "step backend KV table row");
     return layout;
@@ -147,13 +152,33 @@ void complete_round_state_layout(LayoutBuilder& builder, RoundStateLayout& layou
         decode.target_logits =
             add_tensor(builder, DType::BF16, {layout.spec.output_rows, columns, batch},
                        "MTP decode target logits");
+
+        // For the single-lane MTP configuration, scalar/bridge logits and
+        // target-verification logits are never live concurrently. Reuse the
+        // first target-logits column as the shared [output_rows, 1] step-logits
+        // tensor instead of reserving another full vocabulary column.
+        if (batch == 1) {
+            layout.logits          = decode.target_logits;
+            layout.logits.shape    = {layout.spec.output_rows, 1, 1, 1};
+            layout.logits.region.bytes =
+                static_cast<std::size_t>(layout.spec.output_rows) * sizeof(std::uint16_t);
+        }
         decode.target_hidden = add_tensor(
             builder, DType::BF16, {layout.spec.hidden, columns, batch}, "MTP decode target hidden");
         decode.target_continuation_hidden =
             add_tensor(builder, DType::BF16, {layout.spec.hidden, batch},
                        "MTP decode target continuation hidden");
-        decode.proposal_logits = add_tensor(builder, DType::BF16, {layout.spec.output_rows, batch},
-                                            "MTP decode proposal logits");
+        // Single-lane MTP proposal logits have the same [output_rows, 1]
+        // geometry as the shared step-logits tensor. These values are not
+        // live concurrently during an MTP decode transaction, so reuse the
+        // existing persistent region instead of allocating another vocab column.
+        if (batch == 1) {
+            decode.proposal_logits = layout.logits;
+        } else {
+            decode.proposal_logits =
+                add_tensor(builder, DType::BF16, {layout.spec.output_rows, batch},
+                           "MTP decode proposal logits");
+        }
         decode.alignment_ids =
             add_tensor(builder, DType::I32, {columns, batch}, "MTP decode alignment ids");
         decode.alignment_hidden =
