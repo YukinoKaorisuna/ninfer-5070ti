@@ -311,4 +311,25 @@ void gdn_replay_fold(const GdnReplayRecords& records, LinearAttentionStateAllLay
                                                 static_cast<std::int32_t>(rows.size()), stream);
 }
 
+
+void gdn_replay_fold_layer(const GdnReplayRecords& records,
+                           LinearAttentionStateAllLayersView states,
+                           std::int32_t state_layer,
+                           std::span<const GdnReplayFoldRow> rows,
+                           cudaStream_t stream) {
+
+    // Hot speculative-decode path:
+    // record/state geometry and storage layout are invariant after engine
+    // construction. Avoid repeating the expensive tensor/range validation
+    // for every layer of every speculative round.
+    //
+    // Retain row validation/packing because commit_columns is dynamic.
+    const detail::gated_delta_net::GdnReplayFoldKernelRows packed =
+        validate_fold_rows(records, states, rows);
+
+    detail::gated_delta_net::launch_replay_fold_layer(
+        records, states, state_layer, packed,
+        static_cast<std::int32_t>(rows.size()), stream);
+}
+
 } // namespace ninfer::ops

@@ -797,6 +797,50 @@ struct Q3SwiGluSmallTEpilogue {
 };
 
 
+
+void q3_linear_swiglu_t2_mma_launch(
+    const Tensor& x,
+    const Weight& w,
+    Tensor& out,
+    cudaStream_t stream) {
+
+    if (x.ne[1] != 2) {
+        throw std::invalid_argument(
+            "Q3 T2 MMA requires exactly 2 tokens");
+    }
+
+    constexpr int kTileCols = 8;
+    constexpr int kActiveCols = 2;
+
+    constexpr int kBlocks =
+        kIntermediate
+        / Q3SwiGluSmallTRows::kOutputRowsPerCta;
+
+    const Q3SwiGluSmallTEpilogue epilogue{
+        static_cast<__nv_bfloat16*>(out.data)
+    };
+
+    q3_small_t_mma_kernel<
+        Q3SwiGluSmallTGeometry,
+        kTileCols,
+        kActiveCols,
+        Q3SwiGluSmallTEpilogue,
+        Q3SwiGluSmallTRows>
+        <<<kBlocks,
+           Q3SmallTMmaSchedule::kThreads,
+           0,
+           stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(w.qdata),
+            static_cast<const std::uint8_t*>(w.scales),
+            static_cast<__nv_bfloat16*>(out.data),
+            epilogue,
+            Q3SwiGluSmallTRows{});
+
+    CUDA_CHECK(cudaGetLastError());
+}
+
+
 void q3_linear_swiglu_t4_mma_launch(
     const Tensor& x,
     const Weight& w,
@@ -1724,7 +1768,7 @@ void q3_linear_swiglu_dispatch(
     }
 
     if (tokens == 2) {
-        q3_linear_swiglu_small_t_pair_launch<2>(
+        q3_linear_swiglu_t2_mma_launch(
             x, w, out, stream);
         return;
     }

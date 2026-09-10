@@ -115,7 +115,7 @@ template <
     int ActiveCols,
     class Epilogue,
     class RowPolicy>
-__launch_bounds__(256, 6)
+__launch_bounds__(256, 4)
 __global__ void q3_small_t_mma_kernel(
     const __nv_bfloat16* __restrict__ x,
     const std::uint8_t* __restrict__ codes,
