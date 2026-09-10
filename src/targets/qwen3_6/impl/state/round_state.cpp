@@ -73,7 +73,7 @@ RoundStateLayout begin_round_state_layout(LayoutBuilder& builder, const RoundSta
     // Single-lane MTP can reuse the first target-verification logits column
     // for scalar/bridge logits. complete_round_state_layout() installs that
     // alias once the MTP target-logits region has been allocated.
-    if (!(spec.enable_mtp && spec.batch_capacity == 1)) {
+    if (!(spec.backend == SpeculativeBackend::Mtp && spec.batch_capacity == 1)) {
         layout.logits = add_tensor(builder, DType::BF16, {spec.output_rows, 1}, "step logits");
     }
     layout.text_kv_table_row    = add_tensor(builder, DType::I32, {1}, "step Text KV table row");
