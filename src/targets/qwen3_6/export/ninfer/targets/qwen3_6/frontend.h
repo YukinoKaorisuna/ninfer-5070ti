@@ -98,10 +98,15 @@ public:
 
     [[nodiscard]] runtime::OutputDecision preview(std::span<const TokenId> tokens,
                                                   std::uint32_t budget_remaining,
-                                                  FinishReason limit_reason);
+                                                  FinishReason limit_reason,
+                                                  bool count_reasoning = true);
     [[nodiscard]] runtime::OutputDecision preview_terminal(FinishReason reason);
     [[nodiscard]] PublishedOutput commit_preview() noexcept;
     [[nodiscard]] std::uint32_t reasoning_tokens() const noexcept;
+    [[nodiscard]] bool in_reasoning() const noexcept;
+    [[nodiscard]] std::optional<std::uint32_t> reasoning_budget() const noexcept;
+    [[nodiscard]] bool reasoning_budget_reached() const noexcept;
+    [[nodiscard]] std::span<const TokenId> reasoning_close_tokens() const noexcept;
 
 private:
     class Impl;

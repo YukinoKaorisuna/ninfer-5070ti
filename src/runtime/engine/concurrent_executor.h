@@ -291,6 +291,7 @@ private:
         std::vector<TokenId> generated;
         std::string content;
         std::string reasoning;
+        std::size_t reasoning_close_index = 0;
         std::optional<std::uint32_t> lane;
         std::atomic<bool> cancelled{false};
         bool decode_ready = false;
@@ -583,8 +584,35 @@ private:
             if (!request->budget) {
                 throw std::logic_error("decode-ready request has no generation budget");
             }
+            runtime::RoundBudget round_budget = request->budget->round_budget();
+
+            if (request->output.in_reasoning()) {
+                const auto reasoning_budget = request->output.reasoning_budget();
+                if (reasoning_budget) {
+                    const std::uint32_t used = request->output.reasoning_tokens();
+
+                    if (used < *reasoning_budget) {
+                        round_budget.generated_tokens_remaining =
+                            std::min(round_budget.generated_tokens_remaining,
+                                     *reasoning_budget - used);
+                    } else {
+                        const auto close_tokens = request->output.reasoning_close_tokens();
+                        if (request->reasoning_close_index >= close_tokens.size()) {
+                            throw std::logic_error(
+                                "reasoning close marker was exhausted while still reasoning");
+                        }
+
+                        round_budget.generated_tokens_remaining =
+                            std::min<std::uint32_t>(
+                                round_budget.generated_tokens_remaining, 1U);
+                        round_budget.forced_token =
+                            close_tokens[request->reasoning_close_index];
+                    }
+                }
+            }
+
             membership.lanes[membership.size]   = lane;
-            membership.budgets[membership.size] = request->budget->round_budget();
+            membership.budgets[membership.size] = round_budget;
             ++membership.size;
         }
         return membership;
@@ -1018,8 +1046,12 @@ private:
                 finish_reasons[row] = FinishReason::Cancelled;
                 continue;
             }
+            const bool forced_reasoning_close =
+                membership.budgets[row].forced_token >= 0;
+
             const OutputDecision decision = request->output.preview(
-                row_tokens, request->budget->remaining(), request->budget->limit_reason());
+                row_tokens, request->budget->remaining(), request->budget->limit_reason(),
+                !forced_reasoning_close);
             if (decision.accepted_tokens == 0 || decision.accepted_tokens > count ||
                 (!decision.finished() && decision.accepted_tokens != count)) {
                 throw std::logic_error("output policy returned an invalid licensed prefix");
@@ -1046,6 +1078,12 @@ private:
                 consume_service_work(request, accepted[row]);
             }
             auto published = request->output.commit_preview();
+
+            if (!cancelled[row] && membership.budgets[row].forced_token >= 0 &&
+                accepted[row] == 1) {
+                ++request->reasoning_close_index;
+            }
+
             if (!request->first_token && accepted[row] != 0) {
                 request->first_token = Clock::now();
             }

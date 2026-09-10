@@ -83,6 +83,7 @@ struct PrefillStepResult {
 
 struct RoundBudget {
     std::uint32_t generated_tokens_remaining = 0;
+    TokenId forced_token                     = -1; // -1 => normal sampling
 };
 
 // Target-produced affine reservation curve for one Main KV physical-capacity axis. The byte

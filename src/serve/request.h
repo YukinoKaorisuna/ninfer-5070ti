@@ -178,6 +178,7 @@ struct GenerationRequest {
     std::optional<bool> enable_thinking; // non-standard extension; falls back to server default
     std::optional<RequestedReasoningEffort> reasoning_effort;
     std::string reasoning_effort_param = "reasoning_effort";
+    std::optional<std::uint32_t> reasoning_budget;
     std::optional<bool> preserve_thinking;
     bool preserve_thinking_semantic_change = false;
     SamplingParams sampling;

@@ -160,6 +160,11 @@ ResolvedPromptSemantics resolve_prompt_semantics(const GenerationRequest& reques
 ninfer::PromptInput to_prompt_input(const GenerationRequest& request,
                                     const ResolvedPromptSemantics& semantics,
                                     const MediaAcquirer& acquire_media) {
+    if (request.reasoning_budget && !semantics.enable_thinking) {
+        invalid_prompt_option("reasoning_budget cannot be combined with disabled thinking",
+                              "reasoning_budget", "conflicting_template_option");
+    }
+
     ninfer::PromptInput input;
     input.messages.reserve(request.messages.size());
     for (const ChatTurn& turn : request.messages) {
@@ -208,6 +213,7 @@ ninfer::PromptInput to_prompt_input(const GenerationRequest& request,
     input.options.add_generation_prompt = true;
     input.options.enable_thinking       = semantics.enable_thinking;
     input.options.reasoning_effort      = semantics.reasoning_effort;
+    input.options.reasoning_budget      = request.reasoning_budget;
     input.options.preserve_thinking     = semantics.preserve_thinking;
     input.options.add_vision_id         = false;
     input.options.tool_jsons            = effective_tool_jsons(request);

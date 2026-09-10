@@ -640,15 +640,33 @@ public:
 class OutputSession::Impl {
 public:
     Impl(std::shared_ptr<const fi::Tokenizer> tokenizer_, StopPolicy policy_, OutputOptions output,
-         bool starts_in_reasoning)
+         bool starts_in_reasoning, std::optional<std::uint32_t> reasoning_budget_)
         : tokenizer(std::move(tokenizer_)), policy(std::move(policy_)),
-          preserve_special(output.raw || output.preserve_special_tokens) {
+          preserve_special(output.raw || output.preserve_special_tokens),
+          reasoning_budget(reasoning_budget_) {
         state.in_reasoning = starts_in_reasoning && !output.raw;
+
+        if (reasoning_budget) {
+            const std::vector<int> encoded = tokenizer->encode("</think>");
+            if (encoded.empty()) {
+                throw std::logic_error("reasoning close marker encoded to no tokens");
+            }
+
+            reasoning_close_tokens.reserve(encoded.size());
+            for (const int id : encoded) {
+                if (id < 0 || !tokenizer->is_valid_token(id)) {
+                    throw std::logic_error("reasoning close marker contains an invalid token");
+                }
+                reasoning_close_tokens.push_back(static_cast<TokenId>(id));
+            }
+        }
     }
 
     std::shared_ptr<const fi::Tokenizer> tokenizer;
     StopPolicy policy;
     bool preserve_special = false;
+    std::optional<std::uint32_t> reasoning_budget;
+    std::vector<TokenId> reasoning_close_tokens;
     DecoderState state;
     DecoderState preview_state;
     PublishedOutput preview_output;
@@ -733,7 +751,8 @@ OutputSession::OutputSession(std::unique_ptr<Impl> impl) noexcept : impl_(std::m
 
 runtime::OutputDecision OutputSession::preview(std::span<const TokenId> tokens,
                                                std::uint32_t budget_remaining,
-                                               FinishReason limit_reason) {
+                                               FinishReason limit_reason,
+                                               bool count_reasoning) {
     if (impl_ == nullptr) { throw std::logic_error("output session is empty"); }
     if (impl_->state.terminal) { throw std::logic_error("output session is already terminal"); }
     if (impl_->preview_ready) { throw std::logic_error("output session already has a preview"); }
@@ -764,7 +783,9 @@ runtime::OutputDecision OutputSession::preview(std::span<const TokenId> tokens,
                                     std::to_string(token));
         }
 
-        if (impl_->preview_state.in_reasoning) { ++impl_->preview_state.reasoning_tokens; }
+        if (count_reasoning && impl_->preview_state.in_reasoning) {
+            ++impl_->preview_state.reasoning_tokens;
+        }
 
         const bool stop_token =
             std::find(impl_->policy.token_ids.begin(), impl_->policy.token_ids.end(), token) !=
@@ -833,6 +854,25 @@ PublishedOutput OutputSession::commit_preview() noexcept {
 
 std::uint32_t OutputSession::reasoning_tokens() const noexcept {
     return impl_ != nullptr ? impl_->state.reasoning_tokens : 0;
+}
+
+bool OutputSession::in_reasoning() const noexcept {
+    return impl_ != nullptr && impl_->state.in_reasoning;
+}
+
+std::optional<std::uint32_t> OutputSession::reasoning_budget() const noexcept {
+    return impl_ != nullptr ? impl_->reasoning_budget : std::nullopt;
+}
+
+bool OutputSession::reasoning_budget_reached() const noexcept {
+    return impl_ != nullptr && impl_->reasoning_budget.has_value() &&
+           impl_->state.in_reasoning &&
+           impl_->state.reasoning_tokens >= *impl_->reasoning_budget;
+}
+
+std::span<const TokenId> OutputSession::reasoning_close_tokens() const noexcept {
+    if (impl_ == nullptr) { return {}; }
+    return impl_->reasoning_close_tokens;
 }
 
 Frontend::Frontend(std::shared_ptr<const Impl> impl) noexcept : impl_(std::move(impl)) {}
@@ -931,6 +971,7 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
     (void)checked_token_count(result.token_ids.size());
     result.identity.reusable   = true;
     result.starts_in_reasoning = options.add_generation_prompt && options.enable_thinking;
+    result.reasoning_budget    = options.reasoning_budget;
     result.prepare.seconds     = std::chrono::duration<double>(Clock::now() - start).count();
     return PreparedPrompt(std::move(prepared));
 }
@@ -1014,7 +1055,8 @@ OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
     StopPolicy policy = merge_stop_policy(*impl_->tokenizer, caller_stop);
     if (output.raw) { policy.publish_stop_token = true; }
     return OutputSession(std::make_unique<OutputSession::Impl>(
-        impl_->tokenizer, std::move(policy), output, prompt.data_->starts_in_reasoning));
+        impl_->tokenizer, std::move(policy), output, prompt.data_->starts_in_reasoning,
+        prompt.data_->reasoning_budget));
 }
 
 const StopPolicy& Frontend::default_stop_policy() const noexcept { return impl_->defaults; }

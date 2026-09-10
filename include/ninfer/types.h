@@ -257,6 +257,7 @@ struct PromptOptions {
     bool add_generation_prompt = true;
     bool enable_thinking       = true;
     std::optional<ReasoningEffort> reasoning_effort;
+    std::optional<std::uint32_t> reasoning_budget;
     bool preserve_thinking = false;
     bool add_vision_id     = false;
     std::vector<std::string> tool_jsons;

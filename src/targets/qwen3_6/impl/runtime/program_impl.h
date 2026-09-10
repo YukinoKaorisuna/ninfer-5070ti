@@ -1959,6 +1959,9 @@ ProgramImplCore::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
             ordinary_host_ingress->text_kv_table_rows[row] = sequence.kv->text.bound_row();
             ordinary_host_ingress->lanes[row]    = static_cast<std::int32_t>(sequence.lane);
             ordinary_host_ingress->sampling[row] = request.sampling_host;
+            if (budgets[row].forced_token >= 0) {
+                ordinary_host_ingress->sampling[row].token_counts = nullptr;
+            }
             materialize_sequence_kv(sequence, frontier + 1, 0);
         }
 
@@ -1986,7 +1989,22 @@ ProgramImplCore::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
             RequestControl& request    = requests[lanes[row]];
             const std::uint32_t base_E = sequence.execution_frontier;
             const std::uint32_t base_S = sequence.ledger_frontier;
-            const TokenId token        = ordinary_host_egress->sampled_tokens[row];
+
+            if (budgets[row].forced_token >= 0) {
+                ordinary_host_egress->sampled_tokens[row] = budgets[row].forced_token;
+
+                if (request.sampling_host.token_counts != nullptr) {
+                    Tensor counts =
+                        token_counts
+                            .slice(1, static_cast<std::int32_t>(sequence.lane), 1)
+                            .view({TextConfig::token_domain});
+                    Tensor forced_count =
+                        counts.slice(0, budgets[row].forced_token, 1).view({1});
+                    ops::increment_i32_scalar(forced_count, device.stream);
+                }
+            }
+
+            const TokenId token = ordinary_host_egress->sampled_tokens[row];
             validate_licensed_tokens(std::span<const TokenId>(&token, 1));
             sequence.text_kv_valid     = base_E + 1;
             sequence.tail_hidden_valid = true;
@@ -2093,6 +2111,9 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             mtp_host_ingress->lanes[row]              = static_cast<std::int32_t>(sequence.lane);
             mtp_host_ingress->rope_deltas[row]        = sequence.rope_delta;
             mtp_host_ingress->sampling[row]           = request.sampling_host;
+            if (budgets[row].forced_token >= 0) {
+                mtp_host_ingress->sampling[row].token_counts = nullptr;
+            }
             materialize_sequence_kv(sequence, frontier + extent + 1,
                                     std::min(capacity, frontier + extent + draft_window));
         }
@@ -2119,8 +2140,110 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence       = sequences[lanes[row]];
             RequestControl& request       = requests[lanes[row]];
-            const std::uint32_t base_E    = sequence.execution_frontier;
-            const std::uint32_t base_S    = sequence.ledger_frontier;
+            const std::uint32_t base_E = sequence.execution_frontier;
+            const std::uint32_t base_S = sequence.ledger_frontier;
+
+            if (budgets[row].forced_token >= 0) {
+                // A forced structural token is only valid on a target-only
+                // MTP round. generated_tokens_remaining=1 guarantees extent=0.
+                //
+                // The target traversal has already produced the continuation
+                // hidden for the current anchor, but the MTP alignment which
+                // ran in that transaction was based on the originally sampled
+                // next token. Replace the licensed token and then explicitly
+                // bridge the forced token through MTP so the backend KV agrees
+                // with the token which will actually be committed.
+                mtp_host_egress->licensed_tokens[row * width] =
+                    budgets[row].forced_token;
+                mtp_host_egress->licensed_counts[row] = 1;
+                mtp_host_egress->accepted_drafts[row] = 0;
+                mtp_host_egress->next_extents[row] = 0;
+
+                if (request.sampling_host.token_counts != nullptr) {
+                    Tensor counts =
+                        token_counts
+                            .slice(1, static_cast<std::int32_t>(sequence.lane), 1)
+                            .view({TextConfig::token_domain});
+                    Tensor forced_count =
+                        counts.slice(0, budgets[row].forced_token, 1).view({1});
+                    ops::increment_i32_scalar(forced_count, device.stream);
+                }
+
+                if (mtp_host_ingress->current_extents[row] != 0) {
+                    throw std::logic_error(
+                        "forced MTP token requires a target-only round");
+                }
+
+                Tensor bridge_token = io.mtp->target_input_ids.slice(0, 0, 1);
+                const TokenId forced_token = budgets[row].forced_token;
+                CUDA_CHECK(cudaMemcpyAsync(
+                    bridge_token.data, &forced_token, sizeof(forced_token),
+                    cudaMemcpyHostToDevice, device.stream));
+
+                // target_continuation_hidden contains the target-model hidden
+                // selected for the licensed continuation. With extent=0 this
+                // is exactly hidden[base_E], i.e. the previous hidden required
+                // to bridge token[base_E + 1].
+                Tensor previous_hidden =
+                    io.mtp_decode->target_continuation_hidden.slice(
+                        1, static_cast<std::int32_t>(row), 1);
+
+                const std::int32_t rope =
+                    checked_i32(base_E, "forced MTP bridge RoPE position") +
+                    sequence.rope_delta;
+                const std::array<std::int32_t, 3> bridge_rope{
+                    rope, rope, rope};
+
+                schedule::PrefillContext bridge_state{
+                    {device,
+                     model,
+                     work,
+                     decoder->linear_attention,
+                     replay_records ? &*replay_records : nullptr,
+                     replay_host_records ? &*replay_host_records : nullptr,
+                     device.load_stream,
+                     &replay_ready_events,
+                     &replay_free_events,
+                     io,
+                     prefill_hidden,
+                     prefill_chunk,
+                     proposal_head},
+                    text_kv_view(sequence),
+                    mtp_kv_view(sequence),
+                    decoder->text_kv,
+                    decoder->mtp_cache(),
+                    dflash ? &*dflash : nullptr,
+                    base_E + 1U,
+                    static_cast<const ops::SamplingConfig*>(
+                        sampling_config
+                            .slice(1, static_cast<std::int32_t>(sequence.lane), 1)
+                            .data),
+                    &sequence.rewrite_checkpoint_hidden,
+                    LinearStateSlots::current_state_slot(
+                        sequence.lane, max_concurrency),
+                    static_cast<unsigned char*>(
+                        rewrite_checkpoint_state_host->data()) +
+                        decoder->linear_attention.slot_bytes() *
+                            static_cast<std::size_t>(sequence.lane),
+                    0,
+                    dflash_host_ingress};
+
+                schedule::mtp_bridge_and_propose(
+                    bridge_state,
+                    bridge_token,
+                    previous_hidden,
+                    checked_i32(base_E, "forced MTP bridge position"),
+                    bridge_rope,
+                    false);
+
+                // decode_mtp_batch normally has one synchronization before
+                // examining host egress. The bridge was submitted after that
+                // synchronization, so complete it before publishing the
+                // candidate to the executor.
+                device.synchronize();
+                work.reset();
+            }
+
             const std::int32_t count_i    = mtp_host_egress->licensed_counts[row];
             const std::int32_t accepted_i = mtp_host_egress->accepted_drafts[row];
             const std::int32_t next_i     = mtp_host_egress->next_extents[row];
@@ -2346,7 +2469,16 @@ ProgramImplCore::decode_batch(std::span<const std::uint32_t> lanes,
     if (speculative_backend == SpeculativeBackend::None) {
         return decode_ordinary_batch(lanes, budgets);
     }
-    if (speculative_backend == SpeculativeBackend::Mtp) { return decode_mtp_batch(lanes, budgets); }
+    if (speculative_backend == SpeculativeBackend::Mtp) {
+        return decode_mtp_batch(lanes, budgets);
+    }
+
+    for (const runtime::RoundBudget& budget : budgets) {
+        if (budget.forced_token >= 0) {
+            throw std::logic_error(
+                "forced reasoning close is not yet supported by the DFlash backend");
+        }
+    }
     return decode_dflash_batch(lanes, budgets);
 }
 

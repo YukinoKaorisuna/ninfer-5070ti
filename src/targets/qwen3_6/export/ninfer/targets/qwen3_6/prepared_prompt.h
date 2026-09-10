@@ -103,6 +103,7 @@ struct PreparedPromptData {
     std::vector<VisionItem> vision_items;
     PromptIdentity identity;
     bool starts_in_reasoning = false;
+    std::optional<std::uint32_t> reasoning_budget;
     PrepareStats prepare;
 
     [[nodiscard]] std::span<const std::int32_t> position_axis(int axis) const;
