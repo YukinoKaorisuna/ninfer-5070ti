@@ -39,7 +39,8 @@ void launch_paged(const Tensor& k, const Tensor& v, const Tensor& positions, con
     CUDA_CHECK(cudaGetLastError());
 }
 
-void launch_cyclic(const Tensor& k, const Tensor& v, const Tensor& positions, const Tensor& counts,
+template <int Capacity>
+void launch_cyclic_profile(const Tensor& k, const Tensor& v, const Tensor& positions, const Tensor& counts,
                    const Tensor& lanes, CyclicKVCacheLayerView cache,
                    const KVCacheAppendPrefixPlan& plan, cudaStream_t stream) {
     validate_plan(k, plan);
@@ -54,10 +55,28 @@ void launch_cyclic(const Tensor& k, const Tensor& v, const Tensor& positions, co
     const int padded    = static_cast<int>(cache.padded_capacity);
 
     const dim3 grid(1 + (plan.max_count - 1) / 4, k.ne[3], 1);
-    kv_cache_append_prefix_cyclic_kernel<<<grid, kBlock, 0, stream>>>(
+    kv_cache_append_prefix_cyclic_kernel<Capacity><<<grid, kBlock, 0, stream>>>(
         input_k, input_v, pos, count, lane, cache_k, cache_v, plan.min_count, plan.max_count,
         plan.tokens, padded);
     CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_cyclic(const Tensor& k, const Tensor& v, const Tensor& positions, const Tensor& counts,
+                   const Tensor& lanes, CyclicKVCacheLayerView cache,
+                   const KVCacheAppendPrefixPlan& plan, cudaStream_t stream) {
+    switch (cache.capacity) {
+    case 2048:
+        launch_cyclic_profile<2048>(
+            k, v, positions, counts, lanes, cache, plan, stream);
+        return;
+    case 4096:
+        launch_cyclic_profile<4096>(
+            k, v, positions, counts, lanes, cache, plan, stream);
+        return;
+    default:
+        throw std::invalid_argument(
+            "kv_cache_append_prefix: unsupported cyclic capacity");
+    }
 }
 
 } // namespace
