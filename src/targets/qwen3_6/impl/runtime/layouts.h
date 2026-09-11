@@ -21,13 +21,16 @@ namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS {
 using TensorLayout = TensorRegion;
 
 struct DFlashPersistentLayout {
+    CyclicKVCacheLayout local;
+    CyclicKVCacheLayout rewrite_checkpoint_local;
     std::optional<qwen3_6::PagedKVCacheLayout> full;
     TensorLayout prefill_features;
     TensorLayout prefill_positions;
     TensorLayout pending_features;
 
     [[nodiscard]] std::size_t kv_payload_bytes() const noexcept {
-        return full ? full->payload_bytes() : 0;
+        return local.payload_bytes() + rewrite_checkpoint_local.payload_bytes() +
+               (full ? full->payload_bytes() : 0);
     }
 };
 

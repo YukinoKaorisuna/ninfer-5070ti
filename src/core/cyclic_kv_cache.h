@@ -41,7 +41,8 @@ struct CyclicKVCacheLayout {
 
 [[nodiscard]] CyclicKVCacheLayout
 plan_cyclic_kv_cache(LayoutBuilder& builder, std::uint32_t layers, std::uint32_t capacity,
-                     std::int32_t num_kv_heads, std::int32_t head_dim, std::int32_t lane_capacity);
+                     std::int32_t num_kv_heads, std::int32_t head_dim, std::int32_t lane_capacity,
+                     DType value_dtype = DType::BF16);
 
 class CyclicKVCache {
 public:

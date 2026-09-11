@@ -206,46 +206,59 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
     if constexpr (Variant::supports_dflash) {
         if (plan.features.masked_draft()) {
             DFlashPersistentLayout& dflash = out.dflash.emplace();
+
+            // Preserve the legacy DFlash BF16-K/BF16-V cyclic cache.
+            // DFlash2's 2048 sliding-attention kernel requires BF16-K/FP16-V.
+            const DType local_value_dtype =
+                plan.speculative_backend == SpeculativeBackend::DFlash2 ? DType::FP16
+                                                                        : DType::BF16;
+
+            dflash.local = plan_cyclic_kv_cache(
+                builder, DFlashConfig::local_layers, DFlashConfig::local_capacity,
+                DFlashConfig::kv_heads, DFlashConfig::head_dim,
+                static_cast<std::int32_t>(plan.max_concurrency), local_value_dtype);
+
+            dflash.rewrite_checkpoint_local = plan_cyclic_kv_cache(
+                builder, DFlashConfig::local_layers, DFlashConfig::local_capacity,
+                DFlashConfig::kv_heads, DFlashConfig::head_dim,
+                static_cast<std::int32_t>(plan.max_concurrency), local_value_dtype);
+
             if constexpr (DFlashConfig::full_layers != 0) {
-                const PagedKVStorageLayout full_storage =
-                    paged_kv_storage_layout(KvCacheStorage::BFloat16, DFlashConfig::head_dim);
-                KVPageGeometry full_geometry{
-                    .page_tokens        = kPagedKVPageSize,
-                    .device_plane_order = PagedKVPlaneOrder::HeadMajor,
+                PagedKVPoolSpec full_pool{
+                    .page_group_count      = physical_pages,
+                    .logical_page_capacity = logical_pages,
+                    .table_rows            = static_cast<std::int32_t>(plan.max_concurrency),
+                    .plane_order           = PagedKVPlaneOrder::HeadMajor,
                     .planes =
                         {
-                            {full_storage.key.data_dtype, full_storage.key.data_leading_extent,
-                             DFlashConfig::kv_heads, 256},
-                            {full_storage.value.data_dtype, full_storage.value.data_leading_extent,
-                             DFlashConfig::kv_heads, 256},
+                            {DType::BF16, DFlashConfig::head_dim, DFlashConfig::kv_heads, 256},
+                            {DType::BF16, DFlashConfig::head_dim, DFlashConfig::kv_heads, 256},
                         },
                 };
+
                 dflash.full = qwen3_6::PagedKVCacheLayout{
-                    .pages = plan_device_kv_page_pool(
-                        builder, DeviceKVPagePoolSpec{.page_group_count = physical_pages,
-                                                      .geometry = std::move(full_geometry)}),
-                    .execution_tables = plan_kv_execution_tables(
-                        builder,
-                        KVExecutionTableSpec{
-                            .logical_page_capacity = logical_pages,
-                            .table_rows = static_cast<std::int32_t>(plan.max_concurrency),
-                        }),
-                    .layers        = DFlashConfig::full_layers,
-                    .max_context   = plan.capacity,
-                    .kv_heads      = DFlashConfig::kv_heads,
-                    .layer_storage = full_storage,
+                    .pool        = plan_paged_kv_pool(builder, full_pool),
+                    .layers      = DFlashConfig::full_layers,
+                    .max_context = plan.capacity,
+                    .kv_heads    = DFlashConfig::kv_heads,
+                    .head_dim    = DFlashConfig::head_dim,
+                    .dtype       = DType::BF16,
+                    .quant_group = 0,
                 };
             }
+
             dflash.prefill_features = add_tensor(
                 builder, DType::BF16, {DFlashConfig::feature_rows, effective_prefill_chunk},
                 "DFlash prefill target features");
-            dflash.prefill_positions = add_tensor(builder, DType::I32, {effective_prefill_chunk},
-                                                  "DFlash prefill target positions");
-            dflash.pending_features  = add_tensor(builder, DType::BF16,
-                                                  {DFlashConfig::feature_rows,
-                                                   static_cast<std::int32_t>(plan.draft_window + 1U),
-                                                   static_cast<std::int32_t>(plan.max_concurrency)},
-                                                  "DFlash pending target features");
+            dflash.prefill_positions =
+                add_tensor(builder, DType::I32, {effective_prefill_chunk},
+                           "DFlash prefill target positions");
+            dflash.pending_features =
+                add_tensor(builder, DType::BF16,
+                           {DFlashConfig::feature_rows,
+                            static_cast<std::int32_t>(plan.draft_window + 1U),
+                            static_cast<std::int32_t>(plan.max_concurrency)},
+                           "DFlash pending target features");
         }
     }
 

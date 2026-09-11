@@ -7,7 +7,6 @@
 #include <cuda_runtime_api.h>
 
 #include <cstdint>
-
 #include <optional>
 
 namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS {

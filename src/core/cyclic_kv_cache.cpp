@@ -25,11 +25,15 @@ std::uint32_t align_up_u32(std::uint32_t value, std::uint32_t alignment) {
 
 CyclicKVCacheLayout plan_cyclic_kv_cache(LayoutBuilder& builder, std::uint32_t layers,
                                          std::uint32_t capacity, std::int32_t num_kv_heads,
-                                         std::int32_t head_dim, std::int32_t lane_capacity) {
+                                         std::int32_t head_dim, std::int32_t lane_capacity,
+                                         DType value_dtype) {
     if (layers == 0 || capacity == 0 ||
         capacity > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) ||
         num_kv_heads <= 0 || head_dim <= 0 || lane_capacity <= 0) {
         throw std::invalid_argument("Cyclic KV geometry is invalid");
+    }
+    if (value_dtype != DType::BF16 && value_dtype != DType::FP16) {
+        throw std::invalid_argument("Cyclic KV V dtype must be BF16 or FP16");
     }
 
     CyclicKVCacheLayout layout;
@@ -46,7 +50,7 @@ CyclicKVCacheLayout plan_cyclic_kv_cache(LayoutBuilder& builder, std::uint32_t l
         layout.k.push_back(builder.add_tensor(DType::BF16,
                                               {head_dim, padded, num_kv_heads, lane_capacity},
                                               kArenaAlign, prefix + " K"));
-        layout.v.push_back(builder.add_tensor(DType::BF16,
+        layout.v.push_back(builder.add_tensor(value_dtype,
                                               {head_dim, padded, num_kv_heads, lane_capacity},
                                               kArenaAlign, prefix + " V"));
     }
@@ -71,10 +75,15 @@ CyclicKVCache::CyclicKVCache(DeviceSpan backing, const CyclicKVCacheLayout& layo
     }
     const std::array<std::int32_t, 4> expected_shape{
         head_dim_, static_cast<std::int32_t>(padded_capacity_), num_kv_heads_, lane_capacity_};
+    const DType value_dtype = layout.v.front().dtype;
+    if (value_dtype != DType::BF16 && value_dtype != DType::FP16) {
+        throw std::invalid_argument("Cyclic KV V dtype is unsupported");
+    }
+
     k_.reserve(layout.k.size());
     v_.reserve(layout.v.size());
     for (std::size_t layer = 0; layer < layout.k.size(); ++layer) {
-        if (layout.k[layer].dtype != DType::BF16 || layout.v[layer].dtype != DType::BF16 ||
+        if (layout.k[layer].dtype != DType::BF16 || layout.v[layer].dtype != value_dtype ||
             layout.k[layer].shape != expected_shape || layout.v[layer].shape != expected_shape) {
             throw std::invalid_argument("Cyclic KV layer layout is inconsistent");
         }
