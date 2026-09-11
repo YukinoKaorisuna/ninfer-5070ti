@@ -72,6 +72,8 @@ add_library(ninfer_ops STATIC
   ops/launcher/gelu.cu
   ops/launcher/bidirectional_gqa_attention.cu
   ops/launcher/swa.cu
+  ops/softmax_attention/sliding_window/sliding_window_attention.cpp
+  ops/softmax_attention/sliding_window/launch.cu
   ops/launcher/gqa_attention_decode.cu
   ops/launcher/gqa_attention_decode_q2.cu
   ops/launcher/gqa_attention_prefill.cu
