@@ -66,7 +66,8 @@ enum class SpeculativeBackend : std::uint8_t {
 
 struct SpeculativeOptions {
     SpeculativeBackend backend = SpeculativeBackend::None;
-    // Startup-fixed K: MTP 1..5; DFlash and DFlash2 1..15 (query width K+1).
+    // Startup-fixed K: MTP 1..5; DFlash 1..15; legacy-runtime DFlash2 exactly 7.
+    // Query width is K+1.
     std::uint32_t draft_tokens = 0;
     ProposalHead proposal_head = ProposalHead::Full;
 };
