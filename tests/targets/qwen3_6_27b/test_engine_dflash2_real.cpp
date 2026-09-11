@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
         // K=15 retains the oversized-context/ring-wrap qualification below.
         // Legacy K=7 does not execute those cases, so avoid reserving unused
         // KV capacity on 16 GiB cards, especially with full-device graph replay.
-        const std::uint32_t test_context = k == 15 ? 2304U : 1024U;
+        const std::uint32_t test_context = k >= 7 ? 2304U : 1024U;
         options.max_context     = test_context;
         options.kv_capacity     =
             ninfer::KvCapacityPolicy::explicit_capacity(test_context * batch);
@@ -246,7 +246,7 @@ int main(int argc, char** argv) {
                         "Vision DFlash2 capture/restore changed the result");
             }
         }
-        if (k == 15) {
+        if (k >= 7) {
             // One oversized prefill replaces the ring, then decode appends across its wrap point.
             auto long_prompt = std::vector<ninfer::TokenId>(2100, 198);
             long_prompt.insert(long_prompt.end(), prompt.begin(), prompt.end());
