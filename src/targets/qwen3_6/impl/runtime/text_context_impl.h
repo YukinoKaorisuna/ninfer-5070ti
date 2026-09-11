@@ -1,3 +1,4 @@
+#include "ninfer/ops/linear_w8_k_slice.h"
 #include "targets/qwen3_6/impl/runtime/instance.h"
 #include "targets/qwen3_6/impl/runtime/text_context.h"
 #include "targets/qwen3_6/impl/runtime/workspace_recipe.h"
@@ -141,50 +142,153 @@ private:
 } // namespace
 
 void DFlashFeatureSink::begin(const Tensor& value) {
-    const bool prefill = features != nullptr && positions != nullptr && batch_features == nullptr;
-    const bool batch   = batch_features != nullptr && batch_lanes != nullptr &&
-                       batch_valid_columns != nullptr && batch_width > 0 && batch_size > 0;
+    const bool prefill =
+        features != nullptr &&
+        positions != nullptr &&
+        feature_projection != nullptr &&
+        batch_features == nullptr;
+
+    const bool batch =
+        batch_features != nullptr &&
+        batch_lanes != nullptr &&
+        batch_valid_columns != nullptr &&
+        batch_width > 0 &&
+        batch_size > 0;
+
     if ((!prefill && !batch) || layers.empty()) {
-        throw std::logic_error("DFlash feature sink is incomplete");
+        throw std::logic_error(
+            "DFlash feature sink is incomplete");
     }
+
     captured_mask = 0;
-    active_tokens = batch ? batch_width * batch_size : value.ne[1];
+
+    active_tokens =
+        batch
+            ? batch_width * batch_size
+            : value.ne[1];
+
     if (value.ne[1] != active_tokens) {
-        throw std::logic_error("DFlash batch feature source has an invalid width");
+        throw std::logic_error(
+            "DFlash batch feature source has an invalid width");
+    }
+
+    if (prefill &&
+        (features->dtype != DType::FP32 ||
+         features->ne[0] != value.ne[0] ||
+         active_tokens > features->ne[1])) {
+        throw std::logic_error(
+            "DFlash projected prefill accumulator has an invalid shape");
     }
 }
 
-void DFlashFeatureSink::capture_layer(int layer, const Tensor& value, cudaStream_t stream) {
-    const auto it = std::find(layers.begin(), layers.end(), layer);
-    if (it == layers.end()) { return; }
-    const std::size_t index = static_cast<std::size_t>(it - layers.begin());
-    Tensor* destination     = batch_features != nullptr ? batch_features : features;
-    if (layers.size() > 32 || active_tokens <= 0 || value.dtype != DType::BF16 ||
-        destination == nullptr ||
-        value.ne[0] * static_cast<std::int32_t>(layers.size()) != destination->ne[0] ||
-        value.ne[1] != active_tokens) {
-        throw std::logic_error("DFlash feature capture shape is invalid");
-    }
-    if (batch_features != nullptr) {
-        Tensor source = value.view({value.ne[0], batch_width, batch_size});
-        Tensor target =
-            batch_features->slice(0, static_cast<std::int32_t>(index) * value.ne[0], value.ne[0]);
-        ops::scatter_bf16_batch(source, *batch_lanes, *batch_valid_columns, target, stream);
-        captured_mask |= 1U << index;
+void DFlashFeatureSink::capture_layer(
+    int layer,
+    const Tensor& value,
+    cudaStream_t stream) {
+
+    const auto it =
+        std::find(
+            layers.begin(),
+            layers.end(),
+            layer);
+
+    if (it == layers.end()) {
         return;
     }
-    if (active_tokens > features->ne[1]) {
-        throw std::logic_error("DFlash prefill feature capture exceeds its buffer");
+
+    const std::size_t index =
+        static_cast<std::size_t>(
+            it - layers.begin());
+
+    if (layers.size() > 32 ||
+        active_tokens <= 0 ||
+        value.dtype != DType::BF16 ||
+        value.ne[1] != active_tokens) {
+        throw std::logic_error(
+            "DFlash feature capture shape is invalid");
     }
-    const std::size_t element_bytes = dtype_size(DType::BF16);
-    const std::size_t width_bytes   = static_cast<std::size_t>(value.ne[0]) * element_bytes;
-    const std::size_t source_pitch  = static_cast<std::size_t>(value.nb[1]);
-    const std::size_t target_pitch  = static_cast<std::size_t>(features->nb[1]);
-    auto* target                    = static_cast<std::byte*>(features->data) + index * width_bytes;
-    CUDA_CHECK(cudaMemcpy2DAsync(target, target_pitch, value.data, source_pitch, width_bytes,
-                                 static_cast<std::size_t>(active_tokens), cudaMemcpyDeviceToDevice,
-                                 stream));
-    captured_mask |= 1U << index;
+
+    /*
+     * Preserve the existing batch/decode path exactly:
+     * concatenate target features into pending_features.
+     */
+    if (batch_features != nullptr) {
+        if (value.ne[0] *
+                static_cast<std::int32_t>(
+                    layers.size()) !=
+            batch_features->ne[0]) {
+            throw std::logic_error(
+                "DFlash batch feature capture shape is invalid");
+        }
+
+        Tensor source =
+            value.view(
+                {
+                    value.ne[0],
+                    batch_width,
+                    batch_size
+                });
+
+        Tensor target =
+            batch_features->slice(
+                0,
+                static_cast<std::int32_t>(
+                    index) *
+                    value.ne[0],
+                value.ne[0]);
+
+        ops::scatter_bf16_batch(
+            source,
+            *batch_lanes,
+            *batch_valid_columns,
+            target,
+            stream);
+
+        captured_mask |=
+            1U << index;
+
+        return;
+    }
+
+    /*
+     * Prefill path:
+     *
+     * Do not materialize [feature_rows,T].
+     *
+     * The parent W8 feature-projection weight is logically:
+     *
+     *   [hidden, feature_layers * hidden]
+     *
+     * and every layer boundary is W8G32 group aligned.
+     */
+    if (features == nullptr ||
+        feature_projection == nullptr ||
+        features->dtype != DType::FP32 ||
+        features->ne[0] != value.ne[0] ||
+        active_tokens > features->ne[1]) {
+        throw std::logic_error(
+            "DFlash projected prefill capture is invalid");
+    }
+
+    Tensor accumulator =
+        features->slice(
+            1,
+            0,
+            active_tokens);
+
+    ops::linear_w8_k_slice_accumulate(
+        value,
+        *feature_projection,
+        static_cast<std::int32_t>(
+            index) *
+            value.ne[0],
+        value.ne[0],
+        accumulator,
+        index == 0,
+        stream);
+
+    captured_mask |=
+        1U << index;
 }
 
 void DFlashFeatureSink::capture_positions(const Tensor& source, cudaStream_t stream) {

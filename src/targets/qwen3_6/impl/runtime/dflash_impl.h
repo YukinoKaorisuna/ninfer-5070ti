@@ -1,3 +1,4 @@
+#include "ninfer/ops/linear_w8_k_slice.h"
 #include "targets/qwen3_6/impl/runtime/instance.h"
 #include "targets/qwen3_6/impl/runtime/schedule.h"
 #include "targets/qwen3_6/impl/runtime/workspace_recipe.h"
@@ -60,10 +61,11 @@ DFlashFeatureSink prefill_feature_sink_impl(PrefillContext& state,
         require_dflash_state(state);
         using Config = typename V::DFlashConfig;
         return DFlashFeatureSink{
-            .features        = &dflash_state(state).prefill_features,
-            .positions       = &dflash_state(state).prefill_positions,
-            .layers          = std::span<const int>(Config::target_feature_layers),
-            .consume_prefill = std::move(consume_prefill),
+            .feature_projection = &state.execution.model.dflash->feature_projection,
+            .features           = &dflash_state(state).prefill_projected,
+            .positions          = &dflash_state(state).prefill_positions,
+            .layers             = std::span<const int>(Config::target_feature_layers),
+            .consume_prefill    = std::move(consume_prefill),
         };
     }
 }
@@ -87,7 +89,7 @@ DFlashFeatureSink batch_feature_sink_impl(DFlashBatchContext& state, const Tenso
     }
 }
 
-template <class V, class Context>
+template <bool Projected, class V, class Context>
 void append_context_impl(Context& state, const Tensor& features, const Tensor& positions,
                          const Tensor& commit_counts, const Tensor& lanes, const Tensor& table_rows,
                          ops::KVCacheAppendPrefixExecutionEnvelope envelope) {
@@ -98,13 +100,35 @@ void append_context_impl(Context& state, const Tensor& features, const Tensor& p
         const std::int32_t width   = features.ne[1];
         const std::int32_t batch   = features.ne[2];
         const std::int32_t columns = width * batch;
-        if (width <= 0 || batch <= 0 || features.dtype != DType::BF16 ||
-            features.ne[0] != Config::feature_rows || features.ne[3] != 1 ||
-            positions.dtype != DType::I32 || positions.ne[0] != width || positions.ne[1] != batch ||
-            commit_counts.dtype != DType::I32 || commit_counts.ne[0] != batch ||
-            lanes.dtype != DType::I32 || lanes.ne[0] != batch || table_rows.dtype != DType::I32 ||
+
+        constexpr DType feature_dtype =
+            Projected
+                ? DType::FP32
+                : DType::BF16;
+
+        constexpr std::int32_t feature_rows =
+            Projected
+                ? Config::hidden
+                : Config::feature_rows;
+
+        if (width <= 0 ||
+            batch <= 0 ||
+            features.dtype != feature_dtype ||
+            features.ne[0] != feature_rows ||
+            features.ne[3] != 1 ||
+            positions.dtype != DType::I32 ||
+            positions.ne[0] != width ||
+            positions.ne[1] != batch ||
+            commit_counts.dtype != DType::I32 ||
+            commit_counts.ne[0] != batch ||
+            lanes.dtype != DType::I32 ||
+            lanes.ne[0] != batch ||
+            table_rows.dtype != DType::I32 ||
             table_rows.ne[0] != batch) {
-            throw std::invalid_argument("DFlash context append inputs are invalid");
+            throw std::invalid_argument(
+                Projected
+                    ? "DFlash projected context append inputs are invalid"
+                    : "DFlash context append inputs are invalid");
         }
         const bool replace_local_window = batch == 1 && width > Config::local_capacity;
         if (replace_local_window && (envelope.min_count != static_cast<std::uint32_t>(width) ||
@@ -138,9 +162,26 @@ void append_context_impl(Context& state, const Tensor& features, const Tensor& p
             workspace_recipe::dflash_context<Config>(state.execution.work, projected_width * batch);
         Tensor projected = roots.projected;
         Tensor context   = roots.normalized;
-        ops::linear(input.view({Config::feature_rows, projected_width * batch}),
-                    state.execution.model.dflash->feature_projection, projected,
-                    state.execution.device.stream);
+        if constexpr (Projected) {
+            ops::linear_w8_fp32_materialize(
+                input.view(
+                    {
+                        Config::hidden,
+                        projected_width * batch
+                    }),
+                projected,
+                state.execution.device.stream);
+        } else {
+            ops::linear(
+                input.view(
+                    {
+                        Config::feature_rows,
+                        projected_width * batch
+                    }),
+                state.execution.model.dflash->feature_projection,
+                projected,
+                state.execution.device.stream);
+        }
         ops::rmsnorm(projected, state.execution.model.dflash->context_norm, Config::rms_epsilon,
                      false, context, state.execution.device.stream);
 
@@ -506,8 +547,9 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
         ops::prepare_ragged_prefix(dflash_state(state).pending_features, lanes, context_starts,
                                    frontiers, compact_features, append_positions, append_counts,
                                    state.execution.device.stream);
-        append_context_impl<Variant>(state, compact_features, append_positions, append_counts,
-                                     lanes, dflash_rows, envelopes.append);
+        append_context_impl<false, Variant>(
+            state, compact_features, append_positions, append_counts,
+            lanes, dflash_rows, envelopes.append);
 
         propose_batch_impl<Variant>(state, frame, batch_size, k, envelopes);
         ops::speculative_prepare_verify_inputs(anchors, drafts, frontiers, extents, verify_ids,
@@ -569,16 +611,16 @@ void dflash_append_context(DFlashAppendContext& state, const Tensor& features,
                            const Tensor& positions, const Tensor& commit_counts,
                            const Tensor& lanes, const Tensor& table_rows,
                            ops::KVCacheAppendPrefixExecutionEnvelope envelope) {
-    append_context_impl<Variant>(state, features, positions, commit_counts, lanes, table_rows,
-                                 envelope);
+    append_context_impl<false, Variant>(
+        state, features, positions, commit_counts, lanes, table_rows, envelope);
 }
 
 void dflash_append_context(PrefillContext& state, const Tensor& features, const Tensor& positions,
                            const Tensor& commit_counts, const Tensor& lanes,
                            const Tensor& table_rows,
                            ops::KVCacheAppendPrefixExecutionEnvelope envelope) {
-    append_context_impl<Variant>(state, features, positions, commit_counts, lanes, table_rows,
-                                 envelope);
+    append_context_impl<true, Variant>(
+        state, features, positions, commit_counts, lanes, table_rows, envelope);
 }
 
 void capture_dflash_decode_batch(DFlashBatchContext& state, std::int32_t batch_size,

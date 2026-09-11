@@ -15,7 +15,7 @@ struct DFlashPersistentState {
     CyclicKVCache local;
     CyclicKVCache rewrite_checkpoint_local;
     std::optional<qwen3_6::PagedKVCache> full;
-    Tensor prefill_features;
+    Tensor prefill_projected;
     Tensor prefill_positions;
     Tensor pending_features;
 

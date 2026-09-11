@@ -256,9 +256,9 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                 };
             }
 
-            dflash.prefill_features = add_tensor(
-                builder, DType::BF16, {DFlashConfig::feature_rows, effective_prefill_chunk},
-                "DFlash prefill target features");
+            dflash.prefill_projected = add_tensor(
+                builder, DType::FP32, {DFlashConfig::hidden, effective_prefill_chunk},
+                "DFlash prefill projected accumulator");
             dflash.prefill_positions =
                 add_tensor(builder, DType::I32, {effective_prefill_chunk},
                            "DFlash prefill target positions");

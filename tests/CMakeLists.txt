@@ -343,3 +343,29 @@ endforeach()
 ninfer_add_test(ninfer_qwen3_8_27b_dflash2_real_test
   SOURCES targets/qwen3_6_27b/test_engine_dflash2_real.cpp
   LIBRARIES ninfer_engine)
+
+
+# Experimental DFlash2 W8 partial-K qualification.
+add_executable(ninfer_linear_w8_k_slice_test
+  ops/test_linear_w8_k_slice.cu
+  ops/linear/linear_test_common.cpp
+)
+
+target_link_libraries(ninfer_linear_w8_k_slice_test
+  PRIVATE
+    ninfer_ops
+    ninfer_core
+)
+
+target_include_directories(ninfer_linear_w8_k_slice_test
+  PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/tests
+)
+
+add_test(
+  NAME ninfer_linear_w8_k_slice_test
+  COMMAND ninfer_linear_w8_k_slice_test
+)

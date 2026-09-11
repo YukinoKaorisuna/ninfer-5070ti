@@ -24,7 +24,7 @@ struct DFlashPersistentLayout {
     CyclicKVCacheLayout local;
     CyclicKVCacheLayout rewrite_checkpoint_local;
     std::optional<qwen3_6::PagedKVCacheLayout> full;
-    TensorLayout prefill_features;
+    TensorLayout prefill_projected;
     TensorLayout prefill_positions;
     TensorLayout pending_features;
 

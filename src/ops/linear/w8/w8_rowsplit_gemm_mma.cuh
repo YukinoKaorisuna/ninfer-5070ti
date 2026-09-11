@@ -222,7 +222,7 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void w8_rowsplit_gem
         }
     };
 
-    const int nkt = padded_k / BK;
+    const int nkt = (k + BK - 1) / BK;
     stage_x(0, 0);
     stage_w(0);
     ninfer::ops::cp_commit();
@@ -464,6 +464,80 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void w8_rowsplit_gem
                             *destination               = __float2bfloat16_rn(
                                 __bfloat162float(*destination) +
                                 __bfloat162float(projected_shared[local_col * BM + local_row + i]));
+                        }
+                    }
+                }
+            }
+        }
+    } else if constexpr (
+        Epilogue == W8Epilogue::StoreFp32 ||
+        Epilogue == W8Epilogue::AddFp32) {
+#pragma unroll
+        for (int mi = 0; mi < MT; ++mi) {
+            const int r0 =
+                m0 + wm * WM + mi * 16 + gid;
+
+            const int r1 =
+                r0 + 8;
+
+#pragma unroll
+            for (int ni = 0; ni < NT; ++ni) {
+                const int c0 =
+                    n0 + wn * WN + ni * 8 + 2 * lid;
+
+                const int c1 =
+                    c0 + 1;
+
+                const float* a =
+                    acc[mi][ni];
+
+                if constexpr (Full) {
+                    if constexpr (
+                        Epilogue == W8Epilogue::StoreFp32) {
+                        *output_tile.at(r0, c0) = a[0];
+                        *output_tile.at(r0, c1) = a[1];
+                        *output_tile.at(r1, c0) = a[2];
+                        *output_tile.at(r1, c1) = a[3];
+                    } else {
+                        *output_tile.at(r0, c0) += a[0];
+                        *output_tile.at(r0, c1) += a[1];
+                        *output_tile.at(r1, c0) += a[2];
+                        *output_tile.at(r1, c1) += a[3];
+                    }
+                } else {
+                    if (output_tile.valid(r0, m) && c0 < n) {
+                        if constexpr (
+                            Epilogue == W8Epilogue::StoreFp32) {
+                            *output_tile.at(r0, c0) = a[0];
+                        } else {
+                            *output_tile.at(r0, c0) += a[0];
+                        }
+                    }
+
+                    if (output_tile.valid(r0, m) && c1 < n) {
+                        if constexpr (
+                            Epilogue == W8Epilogue::StoreFp32) {
+                            *output_tile.at(r0, c1) = a[1];
+                        } else {
+                            *output_tile.at(r0, c1) += a[1];
+                        }
+                    }
+
+                    if (output_tile.valid(r1, m) && c0 < n) {
+                        if constexpr (
+                            Epilogue == W8Epilogue::StoreFp32) {
+                            *output_tile.at(r1, c0) = a[2];
+                        } else {
+                            *output_tile.at(r1, c0) += a[2];
+                        }
+                    }
+
+                    if (output_tile.valid(r1, m) && c1 < n) {
+                        if constexpr (
+                            Epilogue == W8Epilogue::StoreFp32) {
+                            *output_tile.at(r1, c1) = a[3];
+                        } else {
+                            *output_tile.at(r1, c1) += a[3];
                         }
                     }
                 }

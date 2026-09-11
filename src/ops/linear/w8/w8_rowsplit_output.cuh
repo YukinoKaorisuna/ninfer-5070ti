@@ -10,6 +10,8 @@ enum class W8Epilogue {
     Store,
     Residual,
     SwiGluSplitHalf,
+    StoreFp32,
+    AddFp32
 };
 
 struct W8OutputTile {
@@ -29,6 +31,29 @@ struct W8OutputTile {
 // Split-output callers must align CTA row tiles to every segment boundary so one tile never
 // straddles two final allocations.
 
+
+struct W8Fp32OutputTile {
+    float* data;
+    std::int32_t leading_dim;
+    std::int32_t parent_row_begin;
+
+    __device__ __forceinline__
+    float* at(std::int32_t parent_row,
+              std::int32_t col) const {
+        return data +
+               static_cast<std::int64_t>(col) *
+                   leading_dim +
+               parent_row -
+               parent_row_begin;
+    }
+
+    __device__ __forceinline__
+    bool valid(std::int32_t parent_row,
+               std::int32_t total_rows) const {
+        return parent_row < total_rows;
+    }
+};
+
 struct W8ContiguousOutput {
     __nv_bfloat16* data;
     std::int32_t leading_dim;
@@ -39,6 +64,20 @@ struct W8ContiguousOutput {
     }
 
     __device__ __forceinline__ W8OutputTile tile(std::int32_t /*parent_row_begin*/) const {
+        return {data, leading_dim, 0};
+    }
+};
+
+struct W8ContiguousFp32Output {
+    float* data;
+    std::int32_t leading_dim;
+
+    __device__ __forceinline__ std::int32_t row_begin(std::int32_t block,
+                                                      std::int32_t tile_rows) const {
+        return block * tile_rows;
+    }
+
+    __device__ __forceinline__ W8Fp32OutputTile tile(std::int32_t /*parent_row_begin*/) const {
         return {data, leading_dim, 0};
     }
 };

@@ -8,7 +8,7 @@ DFlashPersistentState::DFlashPersistentState(DeviceSpan backing,
                                              const DFlashPersistentLayout& layout)
     : local(backing, layout.local),
       rewrite_checkpoint_local(backing, layout.rewrite_checkpoint_local),
-      prefill_features(layout.prefill_features.bind(backing)),
+      prefill_projected(layout.prefill_projected.bind(backing)),
       prefill_positions(layout.prefill_positions.bind(backing)),
       pending_features(layout.pending_features.bind(backing)) {
     if (layout.full) { full.emplace(backing, *layout.full); }

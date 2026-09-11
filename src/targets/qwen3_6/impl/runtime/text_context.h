@@ -129,6 +129,7 @@ struct DFlashFeatureSink {
     static constexpr bool enabled = true;
     using PrefillConsumer         = std::function<void(const Tensor&, const Tensor&, bool)>;
 
+    const Weight* feature_projection = nullptr;
     Tensor* features                  = nullptr;
     Tensor* positions                 = nullptr;
     Tensor* batch_features            = nullptr;
