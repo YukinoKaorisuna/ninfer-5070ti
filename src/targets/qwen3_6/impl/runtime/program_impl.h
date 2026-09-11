@@ -652,14 +652,17 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
         sequence.prefix_identity.assign(prompt);
 
         if (is_masked_draft_backend(speculative_backend)) {
-            if (!dflash || !io.dflash_decode || !sequence.kv->backend) {
+            if (!dflash || !io.dflash_decode || !sequence.kv ||
+                (backend_kv_cache() && !sequence.kv->backend)) {
                 throw std::logic_error("DFlash prefill state is incomplete");
             }
-            *dflash_host_ingress                         = {};
-            dflash_host_ingress->active_lanes[0] = static_cast<std::int32_t>(sequence.lane);
-            const StateImageSelectors selectors = state_selectors(sequence);
-            dflash_host_ingress->state_source_slots[0] = selectors.source;
-            dflash_host_ingress->state_destination_slots[0] = selectors.destination;
+            *dflash_host_ingress = {};
+            const std::int32_t state_slot =
+                LinearStateSlots::current_state_slot(sequence.lane, max_concurrency);
+            dflash_host_ingress->active_lanes[0]             =
+                static_cast<std::int32_t>(sequence.lane);
+            dflash_host_ingress->state_source_slots[0]      = state_slot;
+            dflash_host_ingress->state_destination_slots[0] = state_slot;
             dflash_host_ingress->dflash_kv_table_rows[0] =
                 sequence.kv->backend ? sequence.kv->backend->bound_row() : 0;
             CUDA_CHECK(cudaMemcpyAsync(io.dflash_decode->ingress.data, dflash_host_ingress,
@@ -927,7 +930,7 @@ void ProgramImplCore::resolve_pending_batch(std::span<const std::uint32_t> lanes
                 selector_tensor                = frame.current_extents.slice(0, 0, batch);
                 hidden                         = frame.target_hidden.slice(2, 0, batch);
                 selected     = frame.target_continuation_hidden.slice(1, 0, batch);
-                destinations = frame.state_destination_slots.slice(0, 0, batch);
+                destinations = frame.lanes.slice(0, 0, batch);
             } else if (is_masked_draft_backend(speculative_backend) && io.dflash_decode) {
                 qwen3_6::DFlashDecodeState& frame = *io.dflash_decode;
                 selector_tensor                   = frame.proposal_extents.slice(0, 0, batch);
@@ -1359,20 +1362,32 @@ void ProgramImplCore::prepare_graphs() {
             *dflash_host_ingress       = {};
             *dflash_host_egress        = {};
             const std::uint32_t extent = std::min(draft_window, capacity - frontier - 1U);
+            const std::uint32_t width  = draft_window + 1U;
             for (std::uint32_t row = 0; row < batch_size; ++row) {
                 dflash_host_ingress->anchors[row] = 0;
                 dflash_host_ingress->execution_frontiers[row] =
                     checked_i32(frontier, "graph representative DFlash frontier");
                 dflash_host_ingress->context_frontiers[row] =
                     checked_i32(frontier, "graph representative DFlash context frontier");
-                dflash_host_ingress->proposal_valid_columns[row] = static_cast<std::int32_t>(width);
+                dflash_host_ingress->proposal_valid_columns[row] =
+                    static_cast<std::int32_t>(width);
                 dflash_host_ingress->proposal_extents[row] = static_cast<std::int32_t>(extent);
                 dflash_host_ingress->target_valid_columns[row] =
                     static_cast<std::int32_t>(extent + 1U);
+                for (std::uint32_t column = 0; column < width; ++column) {
+                    const std::uint32_t position = frontier + std::min(column, extent);
+                    dflash_host_ingress->target_rope_positions[row * width + column] =
+                        checked_i32(position, "graph representative DFlash target RoPE");
+                }
                 dflash_host_ingress->text_kv_table_rows[row]   = static_cast<std::int32_t>(row);
                 dflash_host_ingress->dflash_kv_table_rows[row] = static_cast<std::int32_t>(row);
                 dflash_host_ingress->lanes[row]                = static_cast<std::int32_t>(row);
-                dflash_host_ingress->sampling[row]             = {};
+                dflash_host_ingress->active_lanes[row]         = static_cast<std::int32_t>(row);
+                const std::int32_t state_slot =
+                    LinearStateSlots::current_state_slot(row, max_concurrency);
+                dflash_host_ingress->state_source_slots[row]      = state_slot;
+                dflash_host_ingress->state_destination_slots[row] = state_slot;
+                dflash_host_ingress->sampling[row] = {};
             }
         }
         if (io.mtp_decode) {
@@ -1672,9 +1687,10 @@ void ProgramImplCore::enqueue_dflash_context_append(std::span<const std::uint32_
         dflash_host_ingress->dflash_kv_table_rows[row] =
             sequence.kv->backend ? sequence.kv->backend->bound_row() : 0;
         dflash_host_ingress->active_lanes[row] = static_cast<std::int32_t>(lane);
-        const StateImageSelectors selectors = state_selectors(sequence);
-        dflash_host_ingress->state_source_slots[row] = selectors.source;
-        dflash_host_ingress->state_destination_slots[row] = selectors.destination;
+        const std::int32_t state_slot =
+            LinearStateSlots::current_state_slot(lane, max_concurrency);
+        dflash_host_ingress->state_source_slots[row]      = state_slot;
+        dflash_host_ingress->state_destination_slots[row] = state_slot;
         materialize_sequence_kv(sequence, std::max(sequence.text_kv_valid, end),
                                 backend_kv_cache() ? end : 0U);
         minimum_count = std::min(minimum_count, counts[row]);
@@ -2424,9 +2440,10 @@ ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             sequence.kv->backend ? sequence.kv->backend->bound_row() : 0;
             dflash_host_ingress->active_lanes[row] =
                 static_cast<std::int32_t>(sequence.lane);
-            const StateImageSelectors selectors = state_selectors(sequence);
-            dflash_host_ingress->state_source_slots[row] = selectors.source;
-            dflash_host_ingress->state_destination_slots[row] = selectors.destination;
+            const std::int32_t state_slot =
+                LinearStateSlots::current_state_slot(sequence.lane, max_concurrency);
+            dflash_host_ingress->state_source_slots[row]      = state_slot;
+            dflash_host_ingress->state_destination_slots[row] = state_slot;
             dflash_host_ingress->sampling[row] = request.sampling_host;
             materialize_sequence_kv(sequence, frontier + extent + 1U,
                                     backend_kv_cache() ? frontier : 0U);

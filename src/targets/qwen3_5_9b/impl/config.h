@@ -69,8 +69,12 @@ struct VisionConfig : qwen3_6::VisionBackboneConfig {
 };
 
 struct DFlashConfig {
-    static constexpr bool supported     = false;
-    static constexpr int local_layers   = 0;
+    static constexpr bool supported             = false;
+    static constexpr SpeculativeBackend backend = SpeculativeBackend::None;
+    static constexpr bool coherent_selector     = false;
+    static constexpr int full_layers            = 0;
+    static constexpr int query_heads            = 0;
+    static constexpr int local_layers           = 0;
     static constexpr int local_capacity = 0;
     static constexpr int kv_heads       = 0;
     static constexpr int head_dim       = 0;

@@ -19,6 +19,7 @@
 #include "ninfer/ops/gqa_attention.h"
 #include "ninfer/ops/bidirectional_gqa_attention.h"
 #include "ninfer/ops/swa.h"
+#include "ninfer/ops/sliding_window_attention.h"
 
 #include <algorithm>
 #include <initializer_list>
@@ -682,8 +683,6 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                         }
                     }
                     matrix(layout, DType::BF16, 256, mask_columns);
-                    scratch(layout, ops::candidate_selector_path_workspace_capacity_bytes(
-                                        drafts, drafts, batch, batch));
                     return finish(layout);
                 }
                 {
@@ -729,7 +728,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                 const std::size_t accept =
                     DFlashConfig::coherent_selector
                         ? ops::speculative_accept_sparse_drafts_workspace_capacity_bytes(
-                              TextConfig::token_domain, {false}, drafts, drafts, batch, batch)
+                              TextConfig::token_domain, {false}, batch, batch)
                         : ops::speculative_accept_greedy_drafts_workspace_capacity_bytes(
                               TextConfig::token_domain, drafts, drafts, batch, batch);
                 const std::size_t proposal = dflash_proposal_capacity(verify, batch);
@@ -828,7 +827,7 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
         }
         break;
     }
-    if (device.compute_capability() != 120) {
+    if (device.sm() != 120) {
         throw std::invalid_argument("Qwen3.6 family runtime requires compute capability 12.0");
     }
 }

@@ -25,6 +25,7 @@
 #include "ninfer/ops/scalar.h"
 #include "ninfer/ops/speculative_round.h"
 #include "ninfer/ops/swa.h"
+#include "ninfer/ops/sliding_window_attention.h"
 
 #include <cuda_runtime.h>
 
@@ -279,12 +280,16 @@ void propose_dflash2_batch(DFlashBatchContext& state, qwen3_6::DFlashDecodeState
                 ops::rmsnorm_rope(positions, layer.query_norm, layer.key_norm, query, key, stream);
                 Tensor attention =
                     work.alloc(DType::BF16, {Config::head_dim, Config::query_heads, width, batch});
+                const ops::SlidingWindowAttentionExecutionEnvelope local_envelope{
+                    .min_context = envelopes.local.min_context,
+                    .max_context = envelopes.local.max_context,
+                };
                 ops::sliding_window_attention(
                     query, key, value, positions, valid_columns, state_slots,
                     {Config::head_dim, Config::query_heads, Config::kv_heads},
                     Config::local_capacity, Config::attention_scale,
                     state.dflash.local_layer(static_cast<std::uint32_t>(layer_index)),
-                    envelopes.local, work, attention, stream);
+                    local_envelope, work, attention, stream);
                 finish_dynamic_branch(
                     state.execution, attention.view({Config::query_size, width, batch}),
                     layer.attention_output, layer.attention_conv, branch.finish_delta, residual);
@@ -322,7 +327,7 @@ void propose_dflash2_batch(DFlashBatchContext& state, qwen3_6::DFlashDecodeState
                                      projected.view({256, k, batch}), anchors,
                                      weights.candidate_selector.predecessor_codebook,
                                      weights.candidate_selector.successor_codebook, frontiers,
-                                     frame.sampling, drafts, proposal_q, work, stream);
+                                     frame.sampling, drafts, proposal_q, stream);
         work.reset();
     }
 }
