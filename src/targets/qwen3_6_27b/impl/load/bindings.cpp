@@ -459,10 +459,17 @@ DFlash2Plan bind_dflash2(artifact::Binder& binder, artifact::TensorPlacement pla
     out.candidate_selector.hidden_projection =
         bind_weight(binder, "dflash2/candidate_selector/hidden_projection", NumericFormat::BF16,
                     {256, 5120}, placement);
-    out.candidate_selector.predecessor_codebook = bind_tensor(
-        "dflash2/candidate_selector/predecessor_codebook", NumericFormat::BF16, {248320, 256});
-    out.candidate_selector.successor_codebook = bind_tensor(
-        "dflash2/candidate_selector/successor_codebook", NumericFormat::BF16, {248320, 256});
+    const artifact::TensorPlacement codebook_placement =
+        placement == artifact::TensorPlacement::Device
+            ? artifact::TensorPlacement::HostMapped
+            : placement;
+
+    out.candidate_selector.predecessor_codebook = artifact::bind_tensor(
+        binder, "dflash2/candidate_selector/predecessor_codebook", NumericFormat::BF16,
+        {248320, 256}, codebook_placement);
+    out.candidate_selector.successor_codebook = artifact::bind_tensor(
+        binder, "dflash2/candidate_selector/successor_codebook", NumericFormat::BF16,
+        {248320, 256}, codebook_placement);
     return out;
 }
 

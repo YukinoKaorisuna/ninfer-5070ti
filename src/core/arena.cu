@@ -271,4 +271,68 @@ void* PinnedHostBuffer::data() const noexcept { return data_; }
 
 std::size_t PinnedHostBuffer::size() const noexcept { return size_; }
 
+MappedHostBuffer::MappedHostBuffer(std::size_t size_bytes) {
+    if (size_bytes == 0) {
+        throw std::invalid_argument("MappedHostBuffer size must be nonzero");
+    }
+
+    void* host = nullptr;
+    const cudaError_t alloc_error =
+        cudaHostAlloc(&host, size_bytes, cudaHostAllocMapped);
+
+    if (alloc_error != cudaSuccess) {
+        throw std::runtime_error(
+            cuda_error_message("cudaHostAllocMapped failed", alloc_error));
+    }
+
+    void* device = nullptr;
+    const cudaError_t mapping_error =
+        cudaHostGetDevicePointer(&device, host, 0);
+
+    if (mapping_error != cudaSuccess) {
+        free_pinned(host);
+        throw std::runtime_error(
+            cuda_error_message("cudaHostGetDevicePointer failed", mapping_error));
+    }
+
+    data_        = host;
+    device_data_ = device;
+    size_        = size_bytes;
+}
+
+MappedHostBuffer::~MappedHostBuffer() {
+    free_pinned(data_);
+    device_data_ = nullptr;
+    size_        = 0;
+}
+
+MappedHostBuffer::MappedHostBuffer(MappedHostBuffer&& other) noexcept
+    : data_(other.data_), device_data_(other.device_data_), size_(other.size_) {
+    other.data_        = nullptr;
+    other.device_data_ = nullptr;
+    other.size_        = 0;
+}
+
+MappedHostBuffer& MappedHostBuffer::operator=(MappedHostBuffer&& other) noexcept {
+    if (this == &other) { return *this; }
+
+    free_pinned(data_);
+
+    data_        = other.data_;
+    device_data_ = other.device_data_;
+    size_        = other.size_;
+
+    other.data_        = nullptr;
+    other.device_data_ = nullptr;
+    other.size_        = 0;
+
+    return *this;
+}
+
+void* MappedHostBuffer::data() const noexcept { return data_; }
+
+void* MappedHostBuffer::device_data() const noexcept { return device_data_; }
+
+std::size_t MappedHostBuffer::size() const noexcept { return size_; }
+
 } // namespace ninfer

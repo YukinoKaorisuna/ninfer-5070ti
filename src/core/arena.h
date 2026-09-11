@@ -106,6 +106,28 @@ private:
     std::size_t size_ = 0;
 };
 
+// Owning page-locked host allocation that is directly addressable by CUDA
+// kernels through the mapped device pointer.
+class MappedHostBuffer {
+public:
+    explicit MappedHostBuffer(std::size_t size_bytes);
+    ~MappedHostBuffer();
+
+    MappedHostBuffer(const MappedHostBuffer&)            = delete;
+    MappedHostBuffer& operator=(const MappedHostBuffer&) = delete;
+    MappedHostBuffer(MappedHostBuffer&& other) noexcept;
+    MappedHostBuffer& operator=(MappedHostBuffer&& other) noexcept;
+
+    void* data() const noexcept;
+    void* device_data() const noexcept;
+    std::size_t size() const noexcept;
+
+private:
+    void* data_        = nullptr;
+    void* device_data_ = nullptr;
+    std::size_t size_  = 0;
+};
+
 using WorkspaceArena = DeviceArena;
 
 } // namespace ninfer

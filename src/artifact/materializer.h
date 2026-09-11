@@ -53,6 +53,7 @@ private:
     struct ObjectStorage {
         void* device = nullptr;
         std::vector<std::byte> resource;
+        std::unique_ptr<MappedHostBuffer> mapped;
     };
 
     std::unique_ptr<DeviceArena> device_arena_;

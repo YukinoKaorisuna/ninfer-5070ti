@@ -155,10 +155,16 @@ ObjectHandle bind_tensor(Binder& binder, std::string_view name, NumericFormat fo
     const ObjectHandle handle =
         binder.require_tensor(name, format, storage_layout_for(format),
                               std::span<const std::uint64_t>(shape.begin(), shape.size()));
-    if (placement == TensorPlacement::Device) {
+    switch (placement) {
+    case TensorPlacement::Device:
         binder.materialize_on_device(handle);
-    } else {
+        break;
+    case TensorPlacement::HostMapped:
+        binder.materialize_mapped_host(handle);
+        break;
+    case TensorPlacement::ValidateOnly:
         binder.validate_only(handle);
+        break;
     }
     return handle;
 }

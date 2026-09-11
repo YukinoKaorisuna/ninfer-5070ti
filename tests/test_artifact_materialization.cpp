@@ -27,6 +27,13 @@ constexpr std::array<std::byte, 4> kTensor = {
     std::byte{2},
     std::byte{2},
 };
+constexpr std::array<std::byte, 4> kMappedTensor = {
+    std::byte{5},
+    std::byte{5},
+    std::byte{5},
+    std::byte{5},
+};
+
 constexpr std::array<std::byte, 8> kSecondTensor = {
     std::byte{3}, std::byte{3}, std::byte{3}, std::byte{3},
     std::byte{3}, std::byte{3}, std::byte{3}, std::byte{3},
@@ -66,6 +73,13 @@ ninfer::test::artifact_fixture::TemporaryArtifact write_fixture() {
                              {"layout", "row-scale-v1"},
                              {"offset", 8448},
                              {"bytes", kFp8TensorBytes}},
+                             {{"name", "weights/mapped"},
+                              {"kind", "tensor"},
+                              {"shape", {2}},
+                              {"format", "BF16"},
+                              {"layout", "contiguous-le-v1"},
+                              {"offset", 16384},
+                              {"bytes", 4}},
                         })},
         },
         "materialization");
@@ -104,8 +118,19 @@ int main() {
             "weights/fp8", ninfer::artifact::NumericFormat::FP8_E4M3FN_ROW_BF16S,
             ninfer::artifact::StorageLayout::RowScaleV1, fp8_shape);
         validation_binder.validate_only(validated_fp8);
+
+        const auto validated_mapped =
+            validation_binder.require_tensor(
+                "weights/mapped",
+                ninfer::artifact::NumericFormat::BF16,
+                ninfer::artifact::StorageLayout::ContiguousLeV1,
+                validated_shape);
+        validation_binder.validate_only(
+            validated_mapped);
         const auto validation_plan = validation_binder.finish();
-        require(validation_plan.object_count == 4 && validation_plan.host_objects.size() == 1 &&
+        require(validation_plan.object_count == 5 &&
+                    validation_plan.host_objects.size() == 1 &&
+                    validation_plan.host_mapped_objects.empty() &&
                     validation_plan.device_objects.size() == 1 &&
                     validation_plan.device_capacity_bytes == kSecondTensor.size(),
                 "validate-only tensor was included in the materialization plan");
@@ -146,9 +171,23 @@ int main() {
             ninfer::artifact::StorageLayout::RowScaleV1, fp8_shape);
         binder.materialize_on_device(fp8);
 
+        const auto mapped =
+            binder.require_tensor(
+                "weights/mapped",
+                ninfer::artifact::NumericFormat::BF16,
+                ninfer::artifact::StorageLayout::ContiguousLeV1,
+                tensor_shape);
+
+        binder.materialize_mapped_host(
+            mapped);
+
         const ninfer::artifact::MaterializationPlan plan = binder.finish();
-        require(plan.object_count == 4 && plan.host_objects.size() == 1 &&
-                    plan.device_objects.size() == 3 && plan.device_capacity_bytes == 772,
+        require(plan.object_count == 5 &&
+                    plan.host_objects.size() == 1 &&
+                    plan.host_mapped_objects.size() == 1 &&
+                    plan.host_mapped_objects[0].bytes == kMappedTensor.size() &&
+                    plan.device_objects.size() == 3 &&
+                    plan.device_capacity_bytes == 772,
                 "binder produced the wrong materialization plan");
 
         ninfer::DeviceContext device(0);
@@ -181,17 +220,44 @@ int main() {
                     fp8_weight.payload_bytes == kFp8TensorBytes,
                 "materialized FP8 Weight metadata is incomplete");
 
+        std::array<std::byte, kMappedTensor.size()> mapped_copied{};
+
+        CUDA_CHECK(
+            cudaMemcpy(
+                mapped_copied.data(),
+                materialized.device_data(mapped),
+                mapped_copied.size(),
+                cudaMemcpyDeviceToHost));
+
+        require(
+            mapped_copied == kMappedTensor,
+            "mapped tensor payload differs from the artifact");
+
+        cudaPointerAttributes mapped_attributes{};
+
+        CUDA_CHECK(
+            cudaPointerGetAttributes(
+                &mapped_attributes,
+                materialized.device_data(mapped)));
+
+        require(
+            mapped_attributes.type == cudaMemoryTypeHost,
+            "mapped tensor is not CUDA mapped-host memory");
+
         const auto retained = materialized.resource_bytes(resource);
         require(std::equal(retained.begin(), retained.end(), kResource.begin(), kResource.end()),
                 "retained resource payload differs from the artifact");
 
         const auto& stats = materialized.stats();
-        require(stats.tensor_count == 3 && stats.resource_count == 1 &&
-                    stats.h2d_bytes == kTensor.size() + kSecondTensor.size() + kFp8TensorBytes &&
+        require(stats.tensor_count == 4 &&
+                    stats.resource_count == 1 &&
+                    stats.h2d_bytes ==
+                        kTensor.size() + kSecondTensor.size() + kFp8TensorBytes &&
                     stats.retained_resource_bytes == kResource.size() &&
-                    stats.file_bytes == kResource.size() +
-                                            ninfer::artifact::Reader::direct_io_alignment +
-                                            kTailReadBytes,
+                    stats.file_bytes ==
+                        kResource.size() +
+                        kMappedTensor.size() +
+                        2 * ninfer::artifact::Reader::direct_io_alignment,
                 "materialization statistics are incomplete");
         require(materialized.device_arena().capacity() == plan.device_capacity_bytes &&
                     materialized.device_arena().used() == plan.device_capacity_bytes,
