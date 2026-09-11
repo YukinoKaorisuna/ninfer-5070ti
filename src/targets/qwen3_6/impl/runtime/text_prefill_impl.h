@@ -27,8 +27,20 @@ DFlashFeatureSink make_dflash_prefill_sink(PrefillContext& state) {
             const auto exact = static_cast<std::uint32_t>(features.ne[1]);
             dflash_append_context(state, features, positions, count, lane, row, {exact, exact});
             if (rewrite_checkpoint) {
-                state.dflash->save_rewrite_checkpoint(state.dflash_host_ingress->lanes[0],
-                                                      state.execution.device.stream);
+                const std::int32_t checkpoint_lane =
+                    state.dflash_host_ingress->lanes[0];
+
+                if (state.dflash_rewrite_checkpoint_host == nullptr ||
+                    state.dflash_rewrite_checkpoint_stride == 0) {
+                    throw std::logic_error(
+                        "DFlash rewrite checkpoint has no pinned host storage");
+                }
+
+                state.dflash->save_rewrite_checkpoint(
+                    checkpoint_lane,
+                    state.dflash_rewrite_checkpoint_host,
+                    state.dflash_rewrite_checkpoint_stride,
+                    state.execution.device.stream);
             }
         });
 }

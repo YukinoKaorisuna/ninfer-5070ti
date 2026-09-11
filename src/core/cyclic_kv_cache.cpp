@@ -131,4 +131,141 @@ void CyclicKVCache::copy_lane_from(const CyclicKVCache& source, std::int32_t lan
     }
 }
 
+std::size_t CyclicKVCache::lane_bytes() const noexcept {
+    std::size_t total = 0;
+
+    for (std::size_t layer = 0; layer < k_.size(); ++layer) {
+        // lane_capacity_ is guaranteed positive by construction and the
+        // highest tensor dimension is the lane dimension, so each lane is
+        // one contiguous region.
+        total += k_[layer].bytes() /
+                 static_cast<std::size_t>(lane_capacity_);
+
+        total += v_[layer].bytes() /
+                 static_cast<std::size_t>(lane_capacity_);
+    }
+
+    return total;
+}
+
+void CyclicKVCache::copy_lane_to_host(
+    std::int32_t lane,
+    void* host,
+    std::size_t host_bytes,
+    cudaStream_t stream) const {
+
+    if (lane < 0 || lane >= lane_capacity_) {
+        throw std::out_of_range(
+            "Cyclic KV lane is out of range");
+    }
+
+    const std::size_t required = lane_bytes();
+
+    if (host == nullptr || host_bytes < required) {
+        throw std::invalid_argument(
+            "Cyclic KV host snapshot storage is too small");
+    }
+
+    auto* destination =
+        static_cast<unsigned char*>(host);
+
+    std::size_t offset = 0;
+
+    for (std::size_t layer = 0;
+         layer < k_.size();
+         ++layer) {
+
+        const Tensor source_k =
+            k_[layer].slice(3, lane, 1);
+
+        const Tensor source_v =
+            v_[layer].slice(3, lane, 1);
+
+        CUDA_CHECK(
+            cudaMemcpyAsync(
+                destination + offset,
+                source_k.data,
+                source_k.bytes(),
+                cudaMemcpyDeviceToHost,
+                stream));
+
+        offset += source_k.bytes();
+
+        CUDA_CHECK(
+            cudaMemcpyAsync(
+                destination + offset,
+                source_v.data,
+                source_v.bytes(),
+                cudaMemcpyDeviceToHost,
+                stream));
+
+        offset += source_v.bytes();
+    }
+
+    if (offset != required) {
+        throw std::logic_error(
+            "Cyclic KV host snapshot size is inconsistent");
+    }
+}
+
+void CyclicKVCache::copy_lane_from_host(
+    const void* host,
+    std::size_t host_bytes,
+    std::int32_t lane,
+    cudaStream_t stream) {
+
+    if (lane < 0 || lane >= lane_capacity_) {
+        throw std::out_of_range(
+            "Cyclic KV lane is out of range");
+    }
+
+    const std::size_t required = lane_bytes();
+
+    if (host == nullptr || host_bytes < required) {
+        throw std::invalid_argument(
+            "Cyclic KV host snapshot storage is too small");
+    }
+
+    const auto* source =
+        static_cast<const unsigned char*>(host);
+
+    std::size_t offset = 0;
+
+    for (std::size_t layer = 0;
+         layer < k_.size();
+         ++layer) {
+
+        Tensor destination_k =
+            k_[layer].slice(3, lane, 1);
+
+        Tensor destination_v =
+            v_[layer].slice(3, lane, 1);
+
+        CUDA_CHECK(
+            cudaMemcpyAsync(
+                destination_k.data,
+                source + offset,
+                destination_k.bytes(),
+                cudaMemcpyHostToDevice,
+                stream));
+
+        offset += destination_k.bytes();
+
+        CUDA_CHECK(
+            cudaMemcpyAsync(
+                destination_v.data,
+                source + offset,
+                destination_v.bytes(),
+                cudaMemcpyHostToDevice,
+                stream));
+
+        offset += destination_v.bytes();
+    }
+
+    if (offset != required) {
+        throw std::logic_error(
+            "Cyclic KV host restore size is inconsistent");
+    }
+}
+
 } // namespace ninfer

@@ -289,6 +289,8 @@ public:
 
     PinnedHostBuffer round_host;
     std::optional<PinnedHostBuffer> rewrite_checkpoint_state_host;
+    std::optional<PinnedHostBuffer> dflash_rewrite_checkpoint_host;
+    std::size_t dflash_rewrite_checkpoint_stride = 0;
     TokenId* host_tokens = nullptr;
     std::optional<PinnedHostBuffer> ordinary_host;
     qwen3_6::OrdinaryDecodeIngress* ordinary_host_ingress = nullptr;

@@ -227,11 +227,6 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                 DFlashConfig::kv_heads, DFlashConfig::head_dim,
                 static_cast<std::int32_t>(plan.max_concurrency), local_value_dtype);
 
-            dflash.rewrite_checkpoint_local = plan_cyclic_kv_cache(
-                builder, DFlashConfig::local_layers, DFlashConfig::local_capacity,
-                DFlashConfig::kv_heads, DFlashConfig::head_dim,
-                static_cast<std::int32_t>(plan.max_concurrency), local_value_dtype);
-
             if constexpr (DFlashConfig::full_layers != 0) {
                 PagedKVPoolSpec full_pool{
                     .page_group_count      = physical_pages,

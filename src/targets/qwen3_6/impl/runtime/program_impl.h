@@ -279,7 +279,20 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
         }
         CUDA_CHECK(cudaStreamSynchronize(device.load_stream));
     }
-    if (plan.persistent.dflash) { dflash.emplace(backing, *plan.persistent.dflash); }
+    if (plan.persistent.dflash) { dflash.emplace(backing, *plan.persistent.dflash);
+
+        dflash_rewrite_checkpoint_stride =
+            dflash->rewrite_checkpoint_lane_bytes();
+
+        if (dflash_rewrite_checkpoint_stride == 0) {
+            throw std::logic_error(
+                "DFlash rewrite checkpoint lane size is zero");
+        }
+
+        dflash_rewrite_checkpoint_host.emplace(
+            dflash_rewrite_checkpoint_stride *
+            static_cast<std::size_t>(max_concurrency));
+ }
     if (dflash.has_value() != plan.features.masked_draft()) {
         throw std::logic_error("DFlash state does not match the frozen sequence plan");
     }
@@ -606,8 +619,32 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
                     sequence.dflash_context_frontier < base) {
                     throw std::logic_error("planned DFlash rewrite checkpoint is unavailable");
                 }
-                dflash->restore_rewrite_checkpoint(static_cast<std::int32_t>(sequence.lane),
-                                                   device.stream);
+                if (!dflash_rewrite_checkpoint_host ||
+                    dflash_rewrite_checkpoint_stride == 0) {
+                    throw std::logic_error(
+                        "DFlash rewrite checkpoint has no pinned host storage");
+                }
+
+                const auto checkpoint_lane =
+                    static_cast<std::int32_t>(
+                        sequence.lane);
+
+                const auto* checkpoint_base =
+                    static_cast<const unsigned char*>(
+                        dflash_rewrite_checkpoint_host->data());
+
+                const void* checkpoint =
+                    checkpoint_base +
+                    dflash_rewrite_checkpoint_stride *
+                        static_cast<std::size_t>(
+                            checkpoint_lane);
+
+                dflash->restore_rewrite_checkpoint(
+                    checkpoint,
+                    dflash_rewrite_checkpoint_stride,
+                    checkpoint_lane,
+                    device.stream);
+
                 sequence.dflash_context_frontier = base;
             }
             trim_sequence_kv(sequence, base, backend_kv_valid(sequence));
@@ -1608,7 +1645,6 @@ void ProgramImplCore::prepare_graphs() {
             }
         };
         zero_cyclic_cache(dflash->local);
-        zero_cyclic_cache(dflash->rewrite_checkpoint_local);
         CUDA_CHECK(cudaMemsetAsync(dflash->prefill_projected.data, 0,
                                    dflash->prefill_projected.bytes(), device.stream));
         CUDA_CHECK(cudaMemsetAsync(dflash->prefill_positions.data, 0,
@@ -1794,6 +1830,13 @@ runtime::PrefillStepResult ProgramImplCore::advance_prefill(SequenceState& seque
             static_cast<unsigned char*>(rewrite_checkpoint_state_host->data()) +
                 decoder->linear_attention.slot_bytes() *
                     static_cast<std::size_t>(sequence.lane),
+            dflash_rewrite_checkpoint_host
+                ? static_cast<unsigned char*>(
+                      dflash_rewrite_checkpoint_host->data())
+                      + dflash_rewrite_checkpoint_stride *
+                            static_cast<std::size_t>(sequence.lane)
+                : nullptr,
+            dflash_rewrite_checkpoint_stride,
             staged.initial_mtp_extent,
             dflash_host_ingress};
 
@@ -2301,6 +2344,13 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                         rewrite_checkpoint_state_host->data()) +
                         decoder->linear_attention.slot_bytes() *
                             static_cast<std::size_t>(sequence.lane),
+                    dflash_rewrite_checkpoint_host
+                        ? static_cast<unsigned char*>(
+                              dflash_rewrite_checkpoint_host->data())
+                              + dflash_rewrite_checkpoint_stride *
+                                    static_cast<std::size_t>(sequence.lane)
+                        : nullptr,
+                    dflash_rewrite_checkpoint_stride,
                     0,
                     dflash_host_ingress};
 

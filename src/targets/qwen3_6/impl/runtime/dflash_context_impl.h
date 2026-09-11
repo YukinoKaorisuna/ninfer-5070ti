@@ -7,32 +7,25 @@ namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS {
 DFlashPersistentState::DFlashPersistentState(DeviceSpan backing,
                                              const DFlashPersistentLayout& layout)
     : local(backing, layout.local),
-      rewrite_checkpoint_local(backing, layout.rewrite_checkpoint_local),
       prefill_projected(layout.prefill_projected.bind(backing)),
       prefill_positions(layout.prefill_positions.bind(backing)),
       pending_features(layout.pending_features.bind(backing)) {
     if (layout.full) { full.emplace(backing, *layout.full); }
 
     if (local.layer_count() != DFlashConfig::local_layers ||
-        rewrite_checkpoint_local.layer_count() != DFlashConfig::local_layers ||
         local.capacity() != DFlashConfig::local_capacity ||
-        rewrite_checkpoint_local.capacity() != DFlashConfig::local_capacity ||
         local.num_kv_heads() != DFlashConfig::kv_heads ||
-        rewrite_checkpoint_local.num_kv_heads() != DFlashConfig::kv_heads ||
         local.head_dim() != DFlashConfig::head_dim ||
-        rewrite_checkpoint_local.head_dim() != DFlashConfig::head_dim ||
-        local.lane_capacity() != rewrite_checkpoint_local.lane_capacity() ||
         full.has_value() != (DFlashConfig::full_layers != 0)) {
         throw std::invalid_argument("masked draft persistent cache layout is invalid");
     }
 
-    const auto local_view   = local.layer_view(0);
-    const auto rewrite_view = rewrite_checkpoint_local.layer_view(0);
+    const auto local_view = local.layer_view(0);
     if (local_view.k.dtype != DType::BF16 ||
-        rewrite_view.k.dtype != DType::BF16 ||
-        local_view.v.dtype != rewrite_view.v.dtype ||
-        (local_view.v.dtype != DType::BF16 && local_view.v.dtype != DType::FP16)) {
-        throw std::invalid_argument("masked draft local cache dtype is invalid");
+        (local_view.v.dtype != DType::BF16 &&
+         local_view.v.dtype != DType::FP16)) {
+        throw std::invalid_argument(
+            "masked draft local cache dtype is invalid");
     }
 
     if (full &&
@@ -56,12 +49,34 @@ PagedKVBatchLayerView DFlashPersistentState::full_batch_layer(std::uint32_t laye
     return full->batch_layer_view(layer);
 }
 
-void DFlashPersistentState::save_rewrite_checkpoint(std::int32_t lane, cudaStream_t stream) {
-    rewrite_checkpoint_local.copy_lane_from(local, lane, stream);
+std::size_t DFlashPersistentState::rewrite_checkpoint_lane_bytes() const noexcept {
+    return local.lane_bytes();
 }
 
-void DFlashPersistentState::restore_rewrite_checkpoint(std::int32_t lane, cudaStream_t stream) {
-    local.copy_lane_from(rewrite_checkpoint_local, lane, stream);
+void DFlashPersistentState::save_rewrite_checkpoint(
+    std::int32_t lane,
+    void* host,
+    std::size_t host_bytes,
+    cudaStream_t stream) const {
+
+    local.copy_lane_to_host(
+        lane,
+        host,
+        host_bytes,
+        stream);
+}
+
+void DFlashPersistentState::restore_rewrite_checkpoint(
+    const void* host,
+    std::size_t host_bytes,
+    std::int32_t lane,
+    cudaStream_t stream) {
+
+    local.copy_lane_from_host(
+        host,
+        host_bytes,
+        lane,
+        stream);
 }
 
 } // namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS

@@ -57,6 +57,8 @@ struct PrefillContext {
     Tensor* rewrite_checkpoint_hidden;
     std::int32_t current_state_slot                         = 0;
     void* rewrite_checkpoint_state_host                     = nullptr;
+    void* dflash_rewrite_checkpoint_host                    = nullptr;
+    std::size_t dflash_rewrite_checkpoint_stride            = 0;
     std::uint32_t mtp_proposal_extent                       = 0;
     const qwen3_6::DFlashDecodeIngress* dflash_host_ingress = nullptr;
 };

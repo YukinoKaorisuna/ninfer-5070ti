@@ -13,7 +13,6 @@ namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS {
 
 struct DFlashPersistentState {
     CyclicKVCache local;
-    CyclicKVCache rewrite_checkpoint_local;
     std::optional<qwen3_6::PagedKVCache> full;
     Tensor prefill_projected;
     Tensor prefill_positions;
@@ -23,8 +22,13 @@ struct DFlashPersistentState {
 
     [[nodiscard]] CyclicKVCacheLayerView local_layer(std::uint32_t layer) const;
     [[nodiscard]] PagedKVBatchLayerView full_batch_layer(std::uint32_t layer) const;
-    void save_rewrite_checkpoint(std::int32_t lane, cudaStream_t stream);
-    void restore_rewrite_checkpoint(std::int32_t lane, cudaStream_t stream);
+    [[nodiscard]] std::size_t rewrite_checkpoint_lane_bytes() const noexcept;
+
+    void save_rewrite_checkpoint(std::int32_t lane, void* host, std::size_t host_bytes,
+                                 cudaStream_t stream) const;
+
+    void restore_rewrite_checkpoint(const void* host, std::size_t host_bytes,
+                                    std::int32_t lane, cudaStream_t stream);
 };
 
 } // namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS
