@@ -32,27 +32,17 @@ bool is_bf16_attention_output(std::size_t layer) { return layer == 3 || layer ==
 
 bool is_bf16_gdn_output(std::size_t layer) { return layer == 4; }
 
-NumericFormat embedding_format(WeightsProfile weights_profile) {
+NumericFormat endpoint_format(WeightsProfile weights_profile) {
     switch (weights_profile) {
     case WeightsProfile::Qwen36GroupwiseInt:
         return NumericFormat::Q6G64_F16S;
     case WeightsProfile::Qwen38GroupwiseInt:
-        return NumericFormat::Q5G64_F16S;
     case WeightsProfile::Qwen36Nvfp4:
         return NumericFormat::W8G32_F16S;
     case WeightsProfile::Qwen38Nvfp4:
         return NumericFormat::FP8_E4M3FN_ROW_BF16S;
     }
     throw std::invalid_argument("qwen3_6_27b: invalid weights profile");
-}
-
-NumericFormat output_head_format(WeightsProfile weights_profile) {
-    switch (weights_profile) {
-    case WeightsProfile::Qwen38GroupwiseInt:
-        return NumericFormat::Q4G64_F16S;
-    default:
-        return embedding_format(weights_profile);
-    }
 }
 
 std::uint32_t read_u32_le(std::span<const std::byte> bytes, std::uint64_t offset,
@@ -224,28 +214,7 @@ load_gdn_control_projection(const GdnPlan& plan,
     };
 }
 
-void bind_groupwise_text_layers(artifact::Binder& binder, BindingPlan& out,
-                                WeightsProfile weights_profile) {
-    const NumericFormat gdn_output_format =
-        weights_profile == WeightsProfile::Qwen38GroupwiseInt
-            ? NumericFormat::Q4G64_F16S
-            : NumericFormat::Q5G64_F16S;
-
-    const NumericFormat attention_output_format =
-        weights_profile == WeightsProfile::Qwen38GroupwiseInt
-            ? NumericFormat::Q4G64_F16S
-            : NumericFormat::Q5G64_F16S;
-
-    const NumericFormat mlp_gate_up_format =
-        weights_profile == WeightsProfile::Qwen38GroupwiseInt
-            ? NumericFormat::Q3G64_F16S
-            : NumericFormat::Q4G64_F16S;
-
-    const NumericFormat mlp_down_format =
-        weights_profile == WeightsProfile::Qwen38GroupwiseInt
-            ? NumericFormat::Q4G64_F16S
-            : NumericFormat::Q5G64_F16S;
-
+void bind_groupwise_text_layers(artifact::Binder& binder, BindingPlan& out) {
     for (std::size_t layer = 0; layer < kTextLayers; ++layer) {
         TextLayerPlan& target    = out.text_layers[layer];
         const std::string prefix = "text/layers/" + std::to_string(layer) + "/";
@@ -264,8 +233,8 @@ void bind_groupwise_text_layers(artifact::Binder& binder, BindingPlan& out,
             target.attention.key_norm = artifact::bind_device_tensor(
                 binder, prefix + "attention/key_norm", NumericFormat::BF16, {256});
             target.attention.output =
-                bind_weight(binder, prefix + "attention/output", attention_output_format,
-                            {5120, 6144});
+                bind_weight(binder, prefix + "attention/output",
+                            NumericFormat::Q5G64_F16S, {5120, 6144});
         } else {
             target.gdn.a_log       = artifact::bind_device_tensor(binder, prefix + "gdn/a_log",
                                                                   NumericFormat::FP32, {48});
@@ -288,14 +257,17 @@ void bind_groupwise_text_layers(artifact::Binder& binder, BindingPlan& out,
             target.gdn.norm = artifact::bind_device_tensor(binder, prefix + "gdn/norm",
                                                            NumericFormat::BF16, {128});
             target.gdn.output =
-                bind_weight(binder, prefix + "gdn/output", gdn_output_format, {5120, 6144});
+                bind_weight(binder, prefix + "gdn/output",
+                            NumericFormat::Q5G64_F16S, {5120, 6144});
         }
         target.post_attention_norm = artifact::bind_device_tensor(
             binder, prefix + "post_attention_norm", NumericFormat::BF16, {5120});
         target.mlp.gate_up =
-            bind_weight(binder, prefix + "mlp/gate_up", mlp_gate_up_format, {34816, 5120});
+            bind_weight(binder, prefix + "mlp/gate_up",
+                        NumericFormat::Q4G64_F16S, {34816, 5120});
         target.mlp.down =
-            bind_weight(binder, prefix + "mlp/down", mlp_down_format, {5120, 17408});
+            bind_weight(binder, prefix + "mlp/down",
+                        NumericFormat::Q5G64_F16S, {5120, 17408});
     }
 }
 
@@ -499,14 +471,13 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_
     out.frontend     = qwen3_6::bind_frontend_resources(binder);
     out.features     = features;
 
-    const NumericFormat token_embedding_format = embedding_format(weights_profile);
-    const NumericFormat lm_head_format = output_head_format(weights_profile);
+    const NumericFormat vocabulary_format = endpoint_format(weights_profile);
     out.token_embedding =
-        bind_weight(binder, "text/token_embedding", token_embedding_format, {248320, 5120});
+        bind_weight(binder, "text/token_embedding", vocabulary_format, {248320, 5120});
     switch (weights_profile) {
     case WeightsProfile::Qwen36GroupwiseInt:
     case WeightsProfile::Qwen38GroupwiseInt:
-        bind_groupwise_text_layers(binder, out, weights_profile);
+        bind_groupwise_text_layers(binder, out);
         break;
     case WeightsProfile::Qwen36Nvfp4:
         bind_nvfp4_text_layers(binder, out);
@@ -520,7 +491,7 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_
     out.final_norm =
         artifact::bind_device_tensor(binder, "text/final_norm", NumericFormat::BF16, {5120});
     out.output_head =
-        bind_weight(binder, "text/output_head", lm_head_format, {248320, 5120});
+        bind_weight(binder, "text/output_head", vocabulary_format, {248320, 5120});
     const artifact::TensorPlacement proposal_placement =
         features.optimized_proposal() ? artifact::TensorPlacement::Device
                                       : artifact::TensorPlacement::ValidateOnly;
@@ -537,10 +508,7 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_
                               std::initializer_list<std::uint64_t> shape) {
         return artifact::bind_tensor(binder, name, format, shape, mtp_placement);
     };
-    const NumericFormat mtp_linear_format =
-        weights_profile == WeightsProfile::Qwen38GroupwiseInt
-            ? NumericFormat::Q5G64_F16S
-            : NumericFormat::W8G32_F16S;
+    const NumericFormat mtp_linear_format = NumericFormat::W8G32_F16S;
 
     out.mtp.input_projection = WeightPlan{
         .object = bind_mtp("mtp/input_projection", mtp_linear_format, {5120, 10240}),
