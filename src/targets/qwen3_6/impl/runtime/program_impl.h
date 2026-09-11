@@ -255,13 +255,18 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
         });
     }
 
-    if (replay_records.has_value() != (speculative_backend != SpeculativeBackend::None) ||
-        replay_host_records.has_value() !=
-            (speculative_backend != SpeculativeBackend::None)) {
-        throw std::logic_error("ReplaySSM records do not match the sequence plan");
+    const bool speculative =
+        speculative_backend != SpeculativeBackend::None;
+    const bool streamed_replay =
+        speculative && !use_cuda_graph;
+
+    if (replay_records.has_value() != speculative ||
+        replay_host_records.has_value() != streamed_replay) {
+        throw std::logic_error(
+            "ReplaySSM records do not match the sequence plan");
     }
 
-    if (speculative_backend != SpeculativeBackend::None) {
+    if (streamed_replay) {
         for (std::size_t i = 0; i < replay_ready_events.size(); ++i) {
             CUDA_CHECK(cudaEventCreateWithFlags(
                 &replay_ready_events[i], cudaEventDisableTiming));
@@ -275,7 +280,7 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
         CUDA_CHECK(cudaStreamSynchronize(device.load_stream));
     }
     if (plan.persistent.dflash) { dflash.emplace(backing, *plan.persistent.dflash); }
-    if (dflash.has_value() != plan.features.dflash()) {
+    if (dflash.has_value() != plan.features.masked_draft()) {
         throw std::logic_error("DFlash state does not match the frozen sequence plan");
     }
 
@@ -596,7 +601,9 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
                 }
                 sequence.mtp_kv_valid = mtp_base;
             } else if (is_masked_draft_backend(speculative_backend)) {
-                if (!dflash || !sequence.kv->backend || sequence.dflash_context_frontier < base) {
+                if (!dflash || !sequence.kv ||
+                    (backend_kv_cache() && !sequence.kv->backend) ||
+                    sequence.dflash_context_frontier < base) {
                     throw std::logic_error("planned DFlash rewrite checkpoint is unavailable");
                 }
                 dflash->restore_rewrite_checkpoint(static_cast<std::int32_t>(sequence.lane),
@@ -630,8 +637,9 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
             speculative_backend == SpeculativeBackend::Mtp
                 ? std::min(capacity,
                            prompt_tokens + (initial_mtp_extent == 0 ? 0U : initial_mtp_extent - 1U))
-            : is_masked_draft_backend(speculative_backend) ? prompt_tokens
-                                                                : 0U;
+                : is_masked_draft_backend(speculative_backend) && backend_kv_cache()
+                      ? prompt_tokens
+                      : 0U;
         materialize_sequence_kv(sequence, prompt_tokens, backend_materialized);
         install_sampling(sequence, request, request_plan.sampling);
         sequence.rope_delta = prompt.rope_delta;
@@ -801,111 +809,128 @@ void ProgramImplCore::resolve_pending_batch(std::span<const std::uint32_t> lanes
 
     const auto tail_started = Clock::now();
     try {
-        if (!replay_host_records) {
-            throw std::logic_error(
-                "speculative pending batch has no host ReplaySSM records");
+        if (use_cuda_graph) {
+            ops::gdn_replay_fold(
+                *replay_records,
+                decoder->linear_attention.all_layers_view(),
+                std::span<const ops::GdnReplayFoldRow>(
+                    fold_rows.data(), lanes.size()),
+                device.stream);
+        } else {
+            if (!replay_host_records) {
+                throw std::logic_error(
+                    "speculative pending batch has no host ReplaySSM records");
+            }
+
+            // Target verification streams ReplaySSM records to pinned host
+            // memory on load_stream. The final one or two scratch slots may not
+            // be reused again during verification, so their completion is not
+            // otherwise observed by the compute stream. Host replay must be
+            // complete before folding it back into recurrent state.
+            CUDA_CHECK(cudaStreamSynchronize(device.load_stream));
+
+            const auto fold_states =
+                decoder->linear_attention.all_layers_view();
+            const auto fold_span =
+                std::span<const ops::GdnReplayFoldRow>(
+                    fold_rows.data(), lanes.size());
+
+            // Double-buffer ReplaySSM host->device staging across the two
+            // device scratch layers. The same event pairs used by verify-side
+            // D2H are safe to reuse here because load_stream was synchronized
+            // immediately above.
+            //
+            //   free[slot]  : previous user of scratch slot has completed
+            //   ready[slot] : H2D staging into scratch slot has completed
+            //
+            // load_stream may therefore stage layer n+1 while device.stream
+            // folds layer n.
+            for (std::int32_t gidx = 0;
+                 gidx < replay_host_records->layers;
+                 ++gidx) {
+                const std::size_t replay_slot =
+                    static_cast<std::size_t>(gidx & 1);
+
+                const GdnReplayRecordLayer host =
+                    replay_host_records->layer(
+                        gidx, static_cast<std::int32_t>(lanes.size()));
+
+                const GdnReplayRecordLayer scratch =
+                    replay_records->layer(
+                        static_cast<std::int32_t>(replay_slot),
+                        static_cast<std::int32_t>(lanes.size()));
+
+                // Do not overwrite a scratch slot until the compute stream has
+                // finished folding its previous contents.
+                CUDA_CHECK(cudaStreamWaitEvent(
+                    device.load_stream,
+                    replay_free_events[replay_slot], 0));
+
+                CUDA_CHECK(cudaMemcpyAsync(
+                    scratch.conv.data, host.conv.data, host.conv.bytes(),
+                    cudaMemcpyHostToDevice, device.load_stream));
+                CUDA_CHECK(cudaMemcpyAsync(
+                    scratch.key.data, host.key.data, host.key.bytes(),
+                    cudaMemcpyHostToDevice, device.load_stream));
+                CUDA_CHECK(cudaMemcpyAsync(
+                    scratch.value.data, host.value.data, host.value.bytes(),
+                    cudaMemcpyHostToDevice, device.load_stream));
+                CUDA_CHECK(cudaMemcpyAsync(
+                    scratch.gate.data, host.gate.data, host.gate.bytes(),
+                    cudaMemcpyHostToDevice, device.load_stream));
+
+                CUDA_CHECK(cudaEventRecord(
+                    replay_ready_events[replay_slot],
+                    device.load_stream));
+
+                // Fold only after this slot's H2D staging is complete.
+                CUDA_CHECK(cudaStreamWaitEvent(
+                    device.stream,
+                    replay_ready_events[replay_slot], 0));
+
+                // gdn_replay_fold_layer intentionally consumes a one-layer
+                // record object. Expose the selected scratch slot as a
+                // non-owning one-layer view.
+                const GdnReplayRecordLayer fold_layer =
+                    replay_records->layer(
+                        static_cast<std::int32_t>(replay_slot),
+                        replay_records->spec.record_capacity);
+
+                GdnReplayRecords fold_records;
+                fold_records.conv  = fold_layer.conv;
+                fold_records.key   = fold_layer.key;
+                fold_records.value = fold_layer.value;
+                fold_records.gate  = fold_layer.gate;
+                fold_records.spec  = replay_records->spec;
+                fold_records.spec.layers = 1;
+
+                ops::gdn_replay_fold_layer(
+                    fold_records, fold_states, gidx,
+                    fold_span, device.stream);
+
+                // Scratch slot becomes reusable only after the fold kernel has
+                // consumed it.
+                CUDA_CHECK(cudaEventRecord(
+                    replay_free_events[replay_slot],
+                    device.stream));
+            }
+
         }
 
-        // Target verification streams ReplaySSM records to pinned host
-        // memory on load_stream. The final one or two scratch slots may not
-        // be reused again during verification, so their completion is not
-        // otherwise observed by the compute stream. Host replay must be
-        // complete before folding it back into recurrent state.
-        CUDA_CHECK(cudaStreamSynchronize(device.load_stream));
-
-        const auto fold_states =
-            decoder->linear_attention.all_layers_view();
-        const auto fold_span =
-            std::span<const ops::GdnReplayFoldRow>(
-                fold_rows.data(), lanes.size());
-
-        // Double-buffer ReplaySSM host->device staging across the two
-        // device scratch layers. The same event pairs used by verify-side
-        // D2H are safe to reuse here because load_stream was synchronized
-        // immediately above.
-        //
-        //   free[slot]  : previous user of scratch slot has completed
-        //   ready[slot] : H2D staging into scratch slot has completed
-        //
-        // load_stream may therefore stage layer n+1 while device.stream
-        // folds layer n.
-        for (std::int32_t gidx = 0;
-             gidx < replay_host_records->layers;
-             ++gidx) {
-            const std::size_t replay_slot =
-                static_cast<std::size_t>(gidx & 1);
-
-            const GdnReplayRecordLayer host =
-                replay_host_records->layer(
-                    gidx, static_cast<std::int32_t>(lanes.size()));
-
-            const GdnReplayRecordLayer scratch =
-                replay_records->layer(
-                    static_cast<std::int32_t>(replay_slot),
-                    static_cast<std::int32_t>(lanes.size()));
-
-            // Do not overwrite a scratch slot until the compute stream has
-            // finished folding its previous contents.
-            CUDA_CHECK(cudaStreamWaitEvent(
-                device.load_stream,
-                replay_free_events[replay_slot], 0));
-
-            CUDA_CHECK(cudaMemcpyAsync(
-                scratch.conv.data, host.conv.data, host.conv.bytes(),
-                cudaMemcpyHostToDevice, device.load_stream));
-            CUDA_CHECK(cudaMemcpyAsync(
-                scratch.key.data, host.key.data, host.key.bytes(),
-                cudaMemcpyHostToDevice, device.load_stream));
-            CUDA_CHECK(cudaMemcpyAsync(
-                scratch.value.data, host.value.data, host.value.bytes(),
-                cudaMemcpyHostToDevice, device.load_stream));
-            CUDA_CHECK(cudaMemcpyAsync(
-                scratch.gate.data, host.gate.data, host.gate.bytes(),
-                cudaMemcpyHostToDevice, device.load_stream));
-
-            CUDA_CHECK(cudaEventRecord(
-                replay_ready_events[replay_slot],
-                device.load_stream));
-
-            // Fold only after this slot's H2D staging is complete.
-            CUDA_CHECK(cudaStreamWaitEvent(
-                device.stream,
-                replay_ready_events[replay_slot], 0));
-
-            // gdn_replay_fold_layer intentionally consumes a one-layer
-            // record object. Expose the selected scratch slot as a
-            // non-owning one-layer view.
-            const GdnReplayRecordLayer fold_layer =
-                replay_records->layer(
-                    static_cast<std::int32_t>(replay_slot),
-                    replay_records->spec.record_capacity);
-
-            GdnReplayRecords fold_records;
-            fold_records.conv  = fold_layer.conv;
-            fold_records.key   = fold_layer.key;
-            fold_records.value = fold_layer.value;
-            fold_records.gate  = fold_layer.gate;
-            fold_records.spec  = replay_records->spec;
-            fold_records.spec.layers = 1;
-
-            ops::gdn_replay_fold_layer(
-                fold_records, fold_states, gidx,
-                fold_span, device.stream);
-
-            // Scratch slot becomes reusable only after the fold kernel has
-            // consumed it.
-            CUDA_CHECK(cudaEventRecord(
-                replay_free_events[replay_slot],
-                device.stream));
-        }
-
-        // Sparse acceptance reads counts. Publish only the prefix licensed by the Frontend.
+        // Sparse DFlash2 acceptance reads persistent counts but does not own
+        // their commit. Publish only the prefix ultimately licensed by the
+        // Frontend. Match ops::sample(): temperature<=0 is raw greedy and
+        // neither consumes nor updates penalty counts.
         if (speculative_backend == SpeculativeBackend::DFlash2) {
             for (std::size_t row = 0; row < lanes.size(); ++row) {
-                if (cancelled[row] || !requests[lanes[row]].sampling_host.token_counts) {
+                const auto& sampling = requests[lanes[row]].sampling_host;
+                if (cancelled[row] || sampling.temperature <= 0.0F ||
+                    !sampling.token_counts) {
                     continue;
                 }
                 const auto count = static_cast<std::int32_t>(accepted_tokens[row]);
+                if (count == 0) { continue; }
+
                 Tensor ids =
                     io.dflash_decode->licensed_tokens
                         .slice(1, static_cast<std::int32_t>(row), 1)
@@ -1922,7 +1947,8 @@ runtime::PrefillStepResult ProgramImplCore::advance_prefill(SequenceState& seque
                 throw std::logic_error("rewrite checkpoint has no complete MTP prefix");
             }
             if (is_masked_draft_backend(speculative_backend) &&
-                (!dflash || !sequence.kv || !sequence.kv->backend ||
+                (!dflash || !sequence.kv ||
+                 (backend_kv_cache() && !sequence.kv->backend) ||
                  sequence.dflash_context_frontier < frontier)) {
                 throw std::logic_error("rewrite checkpoint has no complete DFlash prefix");
             }

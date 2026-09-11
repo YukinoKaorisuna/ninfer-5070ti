@@ -71,8 +71,8 @@ __global__
 __launch_bounds__(M64Schedule<ActiveColumns>::kThreads, 2) void q4_m64_linear_topk_kernel(
     const __nv_bfloat16* __restrict__ hidden, const std::uint8_t* __restrict__ weight_codes,
     const std::uint8_t* __restrict__ weight_scales,
-    const std::int32_t* __restrict__ row_to_global_ids, std::uint64_t* __restrict__ partial_keys,
-    std::int32_t producer_groups) {
+    const std::int32_t* __restrict__ row_to_global_ids, std::int32_t valid_rows,
+    std::uint64_t* __restrict__ partial_keys, std::int32_t producer_groups) {
     constexpr int kWarps        = M64Schedule<ActiveColumns>::kWarps;
     constexpr int kThreads      = M64Schedule<ActiveColumns>::kThreads;
     constexpr int kColumnWarps  = M64Schedule<ActiveColumns>::kColumnWarps;
@@ -263,8 +263,13 @@ __launch_bounds__(M64Schedule<ActiveColumns>::kThreads, 2) void q4_m64_linear_to
             for (int item = 0; item < 2; ++item) {
                 const int local_row = reducer_lane * 2 + item;
                 const int row       = row_begin + local_row;
-                keys[item] = score_id_order_key(reusable.reduction.scores[column][local_row],
-                                                row_to_global_ids[row]);
+                if (row < valid_rows) {
+                    const std::int32_t global_id =
+                        row_to_global_ids != nullptr ? row_to_global_ids[row] : row;
+                    keys[item] =
+                        score_id_order_key(reusable.reduction.scores[column][local_row],
+                                           global_id);
+                }
             }
             if (reducer_lane < kLinearTopK) { keys[2] = top_keys[column][reducer_lane]; }
             M64WarpSort(reusable.reduction.sort[reducer_warp]).Sort(keys, ScoreIdOrderGreater{});
@@ -287,35 +292,46 @@ __launch_bounds__(M64Schedule<ActiveColumns>::kThreads, 2) void q4_m64_linear_to
 }
 
 template <int ActiveColumns>
-void launch_exact(const Tensor& hidden, const Weight& head, const Tensor& row_to_global_ids,
+void launch_exact(const Tensor& hidden, const Weight& head,
+                  const Tensor* row_to_global_ids, std::int32_t valid_rows,
                   const LinearTopKWorkspace& workspace, cudaStream_t stream) {
     q4_m64_linear_topk_kernel<ActiveColumns>
         <<<workspace.producer_groups, M64Schedule<ActiveColumns>::kThreads, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(hidden.data),
             static_cast<const std::uint8_t*>(head.qdata),
             static_cast<const std::uint8_t*>(head.scales),
-            static_cast<const std::int32_t*>(row_to_global_ids.data),
-            static_cast<std::uint64_t*>(workspace.partial_keys.data), workspace.producer_groups);
+            row_to_global_ids != nullptr
+                ? static_cast<const std::int32_t*>(row_to_global_ids->data)
+                : nullptr,
+            valid_rows,
+            static_cast<std::uint64_t*>(workspace.partial_keys.data),
+            workspace.producer_groups);
     CUDA_CHECK(cudaGetLastError());
 }
 
 } // namespace
 
 void linear_topk_q4_m64_launch(const Tensor& hidden, const Weight& head,
-                               const Tensor& row_to_global_ids,
+                               const Tensor* row_to_global_ids, std::int32_t valid_rows,
                                const LinearTopKWorkspace& workspace, cudaStream_t stream) {
     if (hidden.ne[1] == 21) {
-        launch_exact<21>(hidden, head, row_to_global_ids, workspace, stream);
+        launch_exact<21>(
+            hidden, head, row_to_global_ids, valid_rows, workspace, stream);
     } else if (hidden.ne[1] == 28) {
-        launch_exact<28>(hidden, head, row_to_global_ids, workspace, stream);
+        launch_exact<28>(
+            hidden, head, row_to_global_ids, valid_rows, workspace, stream);
     } else if (hidden.ne[1] == 35) {
-        launch_exact<35>(hidden, head, row_to_global_ids, workspace, stream);
+        launch_exact<35>(
+            hidden, head, row_to_global_ids, valid_rows, workspace, stream);
     } else if (hidden.ne[1] == 42) {
-        launch_exact<42>(hidden, head, row_to_global_ids, workspace, stream);
+        launch_exact<42>(
+            hidden, head, row_to_global_ids, valid_rows, workspace, stream);
     } else if (hidden.ne[1] == 49) {
-        launch_exact<49>(hidden, head, row_to_global_ids, workspace, stream);
+        launch_exact<49>(
+            hidden, head, row_to_global_ids, valid_rows, workspace, stream);
     } else {
-        launch_exact<56>(hidden, head, row_to_global_ids, workspace, stream);
+        launch_exact<56>(
+            hidden, head, row_to_global_ids, valid_rows, workspace, stream);
     }
 }
 

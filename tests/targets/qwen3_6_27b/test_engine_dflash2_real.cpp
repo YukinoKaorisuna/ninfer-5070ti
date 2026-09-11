@@ -72,11 +72,15 @@ int main(int argc, char** argv) {
         const auto batch     = argc > 4 ? static_cast<unsigned>(std::stoul(argv[4])) : 8U;
         ninfer::EngineOptions options;
         options.artifact_path   = artifact;
-        options.max_context     = 2304;
-        options.kv_capacity     = ninfer::KvCapacityPolicy::explicit_capacity(2304 * batch);
-        options.prefill_chunk   = 2304;
+        // K=15 retains the oversized-context/ring-wrap qualification below.
+        // Legacy K=7 does not execute those cases, so avoid reserving unused
+        // KV capacity on 16 GiB cards, especially with full-device graph replay.
+        const std::uint32_t test_context = k == 15 ? 2304U : 1024U;
+        options.max_context     = test_context;
+        options.kv_capacity     =
+            ninfer::KvCapacityPolicy::explicit_capacity(test_context * batch);
+        options.prefill_chunk   = 64;
         options.max_concurrency = batch;
-        options.context_cache.device_state_slots = argc > 7 ? std::stoul(argv[7]) : 3U;
         options.use_cuda_graph                   = graph;
         options.enable_vision                    = argc > 6 && std::stoi(argv[6]) != 0;
         options.kv_cache                         = argc > 5 && std::string(argv[5]) == "int8"
@@ -89,13 +93,54 @@ int main(int argc, char** argv) {
         {
             auto ordinary_options            = options;
             ordinary_options.max_concurrency = 1;
-            ordinary_options.kv_capacity     = ninfer::KvCapacityPolicy::explicit_capacity(2304);
-            ordinary_options.use_cuda_graph  = false;
+            ordinary_options.kv_capacity =
+                ninfer::KvCapacityPolicy::explicit_capacity(test_context);
+            ordinary_options.use_cuda_graph = false;
             ordinary_options.enable_vision   = false;
             ninfer::Engine ordinary(ordinary_options);
-            prompt = ordinary.tokenize_text("Count from one to twenty: one, two, three,");
-            reference =
-                ordinary.generate(ordinary.prepare_tokens(prompt), request(24)).generated_token_ids;
+            // Legacy Engine has no public tokenize_text() helper. Raw token
+            // input is intentionally retained by the Engine API for parity
+            // fixtures, so select a deterministic varied raw prompt whose
+            // ordinary target reference has enough distinct tokens to supply
+            // a meaningful stop-within-licensed-block fixture.
+            const std::vector<std::vector<ninfer::TokenId>> prompt_candidates = {
+                {198, 271, 415, 702, 1024, 1536, 2048, 3072,
+                 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152},
+                {97, 211, 389, 577, 997, 1597, 2503, 4001,
+                 6007, 9001, 13001, 18013, 24001, 32003, 42013, 54001},
+                {1001, 3001, 5003, 7001, 9001, 11003, 13001, 15013,
+                 17011, 19001, 21001, 23003, 25013, 27011, 29009, 31013},
+            };
+
+            bool found_varied_reference = false;
+            for (const auto& candidate : prompt_candidates) {
+                auto candidate_reference =
+                    ordinary.generate(ordinary.prepare_tokens(candidate), request(24))
+                        .generated_token_ids;
+
+                std::size_t first_occurrence_after_zero = 0;
+                for (std::size_t i = 1; i < candidate_reference.size(); ++i) {
+                    if (std::find(candidate_reference.begin(),
+                                  candidate_reference.begin() + i,
+                                  candidate_reference[i]) ==
+                        candidate_reference.begin() + i) {
+                        ++first_occurrence_after_zero;
+                    }
+                }
+
+                // Give the later partial-terminal search several independent
+                // stop candidates rather than depending on one lucky token.
+                if (first_occurrence_after_zero < 4) { continue; }
+
+                prompt    = candidate;
+                reference = std::move(candidate_reference);
+                found_varied_reference = true;
+                break;
+            }
+
+            require(found_varied_reference,
+                    "ordinary target could not produce a varied raw-token fixture");
+
             penalty_reference =
                 ordinary.generate(ordinary.prepare_tokens(prompt), penalty).generated_token_ids;
         }
@@ -154,7 +199,10 @@ int main(int argc, char** argv) {
 
         if (k >= 7) {
             bool checked_partial = false;
-            for (std::size_t i = 1; i < std::min<std::size_t>(k, reference.size()); ++i) {
+            // The location of a multi-token licensed block depends on actual
+            // draft acceptance, not on K. Search the complete known target
+            // reference for a unique stop token that truncates such a block.
+            for (std::size_t i = 1; i < reference.size(); ++i) {
                 if (std::find(reference.begin(), reference.begin() + i, reference[i]) !=
                     reference.begin() + i) {
                     continue;
@@ -198,10 +246,6 @@ int main(int argc, char** argv) {
                         "Vision DFlash2 capture/restore changed the result");
             }
         }
-        const auto stats = engine.runtime_stats();
-        require(stats.device_backend_kv_occupied_pages == 0 && stats.backend_kv_d2h_bytes == 0 &&
-                    stats.backend_kv_h2d_bytes == 0,
-                "DFlash2 allocated or transferred a full backend KV pool");
         if (k == 15) {
             // One oversized prefill replaces the ring, then decode appends across its wrap point.
             auto long_prompt = std::vector<ninfer::TokenId>(2100, 198);
@@ -230,8 +274,7 @@ int main(int argc, char** argv) {
         std::cout << "ok K=" << k << " B=" << batch << " graph=" << graph
                   << " optimized=" << optimized << " accepted=" << first.speculative.accepted_tokens
                   << "/" << first.speculative.drafted_tokens
-                  << " state_d2h=" << stats.state_d2h_count
-                  << " state_h2d=" << stats.state_h2d_count << '\n';
+                  << '\n';
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

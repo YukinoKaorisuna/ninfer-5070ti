@@ -9,10 +9,9 @@ namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS::schedule {
 void target_verify_accept(ExecutionCore& execution, Tensor& continuation_hidden_store,
                           TextContext& card, TargetVerifyFrameView frame,
                           ops::GqaExecutionEnvelope envelope) {
-    if (frame.replay_records == nullptr ||
-        frame.replay_host_records == nullptr) {
+    if (frame.replay_records == nullptr) {
         throw std::logic_error(
-            "speculative target verify has incomplete ReplaySSM storage");
+            "speculative target verify has no ReplaySSM storage");
     }
     card.set_gdn_state_action(
         GdnStateAction::RecordForReplay,

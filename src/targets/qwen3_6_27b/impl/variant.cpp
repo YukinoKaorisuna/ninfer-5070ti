@@ -409,6 +409,7 @@ std::size_t Variant::attention_projection_workspace_capacity_bytes(WeightsProfil
     switch (weights_profile) {
     case WeightsProfile::Qwen36GroupwiseInt:
         return 0;
+    case WeightsProfile::Qwen38GroupwiseInt5080:
     case WeightsProfile::Qwen38GroupwiseInt:
         return ops::attn_input_proj_workspace_capacity_bytes(
             TextConfig::hidden, ops::LinearPolicy::AllowA8, first, last);
@@ -431,6 +432,7 @@ std::size_t Variant::attention_output_projection_workspace_capacity_bytes(
                                                         TextConfig::query_size,
                                                         ops::LinearPolicy::A16Only, first, last);
 
+    case WeightsProfile::Qwen38GroupwiseInt5080:
     case WeightsProfile::Qwen38GroupwiseInt: {
         WorkspaceLayoutBuilder layout;
         (void)layout.alloc(DType::BF16, {TextConfig::hidden, last});
@@ -457,6 +459,7 @@ std::size_t Variant::gdn_input_projection_workspace_capacity_bytes(WeightsProfil
     switch (weights_profile) {
     case WeightsProfile::Qwen36GroupwiseInt:
         return 0;
+    case WeightsProfile::Qwen38GroupwiseInt5080:
     case WeightsProfile::Qwen38GroupwiseInt:
         return ops::gdn_input_proj_workspace_capacity_bytes(
             TextConfig::hidden, ops::LinearPolicy::AllowA8, first, last);
@@ -476,6 +479,7 @@ std::size_t Variant::gdn_input_projection_snapshot_workspace_capacity_bytes(
     validate_token_interval(first, last);
     switch (weights_profile) {
     case WeightsProfile::Qwen36GroupwiseInt:
+    case WeightsProfile::Qwen38GroupwiseInt5080:
     case WeightsProfile::Qwen38GroupwiseInt:
         return std::max(kMinimumLeafWorkspaceBytes,
                         ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
@@ -501,6 +505,7 @@ std::size_t Variant::gdn_input_projection_record_workspace_capacity_bytes(
     validate_token_interval(first, last);
     switch (weights_profile) {
     case WeightsProfile::Qwen36GroupwiseInt:
+    case WeightsProfile::Qwen38GroupwiseInt5080:
     case WeightsProfile::Qwen38GroupwiseInt:
         return std::max(kMinimumLeafWorkspaceBytes,
                         ops::gdn_input_proj_conv_record_workspace_capacity_bytes(
@@ -531,6 +536,7 @@ std::size_t Variant::gdn_output_projection_workspace_capacity_bytes(WeightsProfi
                                                         TextConfig::value_dim,
                                                         ops::LinearPolicy::A16Only, first, last);
 
+    case WeightsProfile::Qwen38GroupwiseInt5080:
     case WeightsProfile::Qwen38GroupwiseInt: {
         WorkspaceLayoutBuilder layout;
         (void)layout.alloc(DType::BF16, {TextConfig::hidden, last});
@@ -562,6 +568,7 @@ std::size_t Variant::post_mixer_workspace_capacity_bytes(WeightsProfile weights_
     case WeightsProfile::Qwen36GroupwiseInt:
         return post_mixer_workspace_bytes(QType::Q4G64_F16S, QType::Q5G64_F16S,
                                           ops::LinearPolicy::A16Only, first, last);
+    case WeightsProfile::Qwen38GroupwiseInt5080:
     case WeightsProfile::Qwen38GroupwiseInt:
         return post_mixer_workspace_bytes(QType::Q3G64_F16S, QType::Q4G64_F16S,
                                           ops::LinearPolicy::AllowA8, first, last);

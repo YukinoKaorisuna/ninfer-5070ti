@@ -177,7 +177,11 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_accept_greedy_draft
     std::int32_t* row_tokens        = licensed_tokens + row * cols;
     const __nv_bfloat16* row_logits =
         logits + static_cast<std::int64_t>(row) * cols * physical_rows;
-    const bool penalties = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f;
+    // Match ops::sample(): temperature<=0 is raw greedy argmax.
+    // Presence/frequency penalties are sampling semantics only.
+    const bool penalties = cfg.temperature > 0.0f &&
+                           (cfg.presence_penalty != 0.0f ||
+                            cfg.frequency_penalty != 0.0f);
 
     if (!(cfg.temperature > 0.0f) && !penalties) {
         if (tid == 0) {
@@ -416,7 +420,11 @@ __launch_bounds__(kSamplerGroupBlock) __global__ void speculative_sampling_group
     }
     if (token_domain <= kSamplerTileItems) { return; }
     const bool greedy    = !(cfg.temperature > 0.0f);
-    const bool penalties = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f;
+    // Match ops::sample(): temperature<=0 is raw greedy argmax.
+    // Presence/frequency penalties are sampling semantics only.
+    const bool penalties = cfg.temperature > 0.0f &&
+                           (cfg.presence_penalty != 0.0f ||
+                            cfg.frequency_penalty != 0.0f);
 
     if (greedy && !penalties) {
         if (tid == 0 && col == 0 && group == 0) {

@@ -226,7 +226,8 @@ RequestPlan ProgramImplCore::plan_request_for_lane(std::uint32_t lane,
 
     if (is_rewrite_checkpoint_restore(plan->reuse) &&
         is_masked_draft_backend(speculative_backend) &&
-        (!dflash || !sequence.kv || !sequence.kv->backend ||
+        (!dflash || !sequence.kv ||
+         (backend_kv_cache() && !sequence.kv->backend) ||
          sequence.dflash_context_frontier < plan->reuse_base)) {
         plan->reuse      = ReusePath::FullReset;
         plan->reuse_base = 0;

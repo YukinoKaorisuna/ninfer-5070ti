@@ -13,7 +13,7 @@ from .dflash2_inventory import DFLASH2_TENSOR_SPECS
 
 
 MODEL_ID = "qwen3.8-27b"
-WEIGHTS_ID = "groupwise-int"
+WEIGHTS_ID = "groupwise-int-5080"
 TARGET_KEY = "qwen3_8_27b"
 
 BF16 = qwen3_6_inventory.BF16

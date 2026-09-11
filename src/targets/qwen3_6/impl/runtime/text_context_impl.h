@@ -254,27 +254,38 @@ void TextContext::set_gdn_state_action(
     cudaStream_t replay_copy_stream,
     const std::array<cudaEvent_t, 2>* replay_ready_events,
     const std::array<cudaEvent_t, 2>* replay_free_events) {
-    const bool recording = action == GdnStateAction::RecordForReplay;
-    if (recording != (replay_records != nullptr) ||
-        recording != (replay_host_records != nullptr)) {
+    const bool recording =
+        action == GdnStateAction::RecordForReplay;
+
+    if (recording != (replay_records != nullptr)) {
         throw std::invalid_argument(
             "TextContext GDN state action has inconsistent records");
     }
 
     if (recording) {
-        if (replay_records->spec.layers != 2) {
+        const bool full_device =
+            replay_records->spec.layers == TextConfig::gdn_layers();
+        const bool streamed =
+            replay_records->spec.layers == 2;
+
+        if (!full_device && !streamed) {
             throw std::invalid_argument(
-                "TextContext ReplaySSM device scratch must contain two layers");
+                "TextContext ReplaySSM records have unsupported layer count");
         }
-        if (replay_copy_stream == nullptr ||
-            replay_ready_events == nullptr ||
-            replay_free_events == nullptr) {
-            throw std::invalid_argument(
-                "TextContext ReplaySSM async transfer state is incomplete");
-        }
-        if (replay_host_records->layers != TextConfig::gdn_layers()) {
-            throw std::invalid_argument(
-                "TextContext ReplaySSM host storage has wrong layer count");
+
+        if (streamed) {
+            if (replay_host_records == nullptr ||
+                replay_copy_stream == nullptr ||
+                replay_ready_events == nullptr ||
+                replay_free_events == nullptr) {
+                throw std::invalid_argument(
+                    "TextContext ReplaySSM async transfer state is incomplete");
+            }
+
+            if (replay_host_records->layers != TextConfig::gdn_layers()) {
+                throw std::invalid_argument(
+                    "TextContext ReplaySSM host storage has wrong layer count");
+            }
         }
     }
 
@@ -913,14 +924,21 @@ void TextContext::gdn_mix(const GdnLayerW& w, Tensor& x, int gidx, Phase ph) {
             if (replay_records_ == nullptr) {
                 throw std::logic_error("Replay-record GDN has no record storage");
             }
+            const bool streamed_replay =
+                replay_records_->spec.layers == 2;
             const std::size_t replay_slot =
                 static_cast<std::size_t>(gidx & 1);
 
-            CUDA_CHECK(cudaStreamWaitEvent(
-                s, (*replay_free_events_)[replay_slot], 0));
+            if (streamed_replay) {
+                CUDA_CHECK(cudaStreamWaitEvent(
+                    s, (*replay_free_events_)[replay_slot], 0));
+            }
 
             GdnReplayRecordLayer records =
-                replay_records_->layer(gidx & 1, active_sequence_batch_);
+                replay_records_->layer(
+                    streamed_replay ? static_cast<std::int32_t>(replay_slot)
+                                    : gidx,
+                    active_sequence_batch_);
             Variant::gdn_input_projection_record(projection_input, *w.projection, *w.conv1d,
                                                  conv_states, valid, *active_linear_state_slots_,
                                                  records.conv, query_output, key_output,
@@ -964,50 +982,55 @@ void TextContext::gdn_mix(const GdnLayerW& w, Tensor& x, int gidx, Phase ph) {
             o.view({kCfg.gdn_v_dim, kCfg.gdn_v_heads, width, active_sequence_batch_});
         const Tensor valid = active_valid_columns_ != nullptr ? *active_valid_columns_ : Tensor{};
         if (gdn_state_action_ == GdnStateAction::RecordForReplay) {
+            const bool streamed_replay =
+                replay_records_->spec.layers == 2;
             const std::size_t replay_slot =
                 static_cast<std::size_t>(gidx & 1);
 
             GdnReplayRecordLayer records =
-                replay_records_->layer(gidx & 1, active_sequence_batch_);
+                replay_records_->layer(
+                    streamed_replay ? static_cast<std::int32_t>(replay_slot)
+                                    : gidx,
+                    active_sequence_batch_);
             ops::gated_delta_net_replay_record(q_batch, k_batch, v_batch, g_batch, beta_batch,
                                                kGdnScale, recurrent_states, valid,
                                                *active_linear_state_slots_, records.key,
                                                records.value, records.gate, out_batch, s);
 
-            if (replay_host_records_ == nullptr) {
-                throw std::logic_error(
-                    "Replay-record GDN has no host record storage");
+            if (streamed_replay) {
+                if (replay_host_records_ == nullptr) {
+                    throw std::logic_error(
+                        "Replay-record GDN has no host record storage");
+                }
+
+                const GdnReplayRecordLayer host =
+                    replay_host_records_->layer(
+                        gidx, active_sequence_batch_);
+
+                CUDA_CHECK(cudaEventRecord(
+                    (*replay_ready_events_)[replay_slot], s));
+
+                CUDA_CHECK(cudaStreamWaitEvent(
+                    replay_copy_stream_,
+                    (*replay_ready_events_)[replay_slot], 0));
+
+                CUDA_CHECK(cudaMemcpyAsync(
+                    host.conv.data, records.conv.data, records.conv.bytes(),
+                    cudaMemcpyDeviceToHost, replay_copy_stream_));
+                CUDA_CHECK(cudaMemcpyAsync(
+                    host.key.data, records.key.data, records.key.bytes(),
+                    cudaMemcpyDeviceToHost, replay_copy_stream_));
+                CUDA_CHECK(cudaMemcpyAsync(
+                    host.value.data, records.value.data, records.value.bytes(),
+                    cudaMemcpyDeviceToHost, replay_copy_stream_));
+                CUDA_CHECK(cudaMemcpyAsync(
+                    host.gate.data, records.gate.data, records.gate.bytes(),
+                    cudaMemcpyDeviceToHost, replay_copy_stream_));
+
+                CUDA_CHECK(cudaEventRecord(
+                    (*replay_free_events_)[replay_slot],
+                    replay_copy_stream_));
             }
-
-            const GdnReplayRecordLayer host =
-                replay_host_records_->layer(gidx, active_sequence_batch_);
-
-            // Same-stream ordering guarantees both ReplaySSM record kernels
-            // finish before these copies, and these copies finish before the
-            // next GDN layer reuses device scratch layer 0.
-            CUDA_CHECK(cudaEventRecord(
-                (*replay_ready_events_)[replay_slot], s));
-
-            CUDA_CHECK(cudaStreamWaitEvent(
-                replay_copy_stream_,
-                (*replay_ready_events_)[replay_slot], 0));
-
-            CUDA_CHECK(cudaMemcpyAsync(
-                host.conv.data, records.conv.data, records.conv.bytes(),
-                cudaMemcpyDeviceToHost, replay_copy_stream_));
-            CUDA_CHECK(cudaMemcpyAsync(
-                host.key.data, records.key.data, records.key.bytes(),
-                cudaMemcpyDeviceToHost, replay_copy_stream_));
-            CUDA_CHECK(cudaMemcpyAsync(
-                host.value.data, records.value.data, records.value.bytes(),
-                cudaMemcpyDeviceToHost, replay_copy_stream_));
-            CUDA_CHECK(cudaMemcpyAsync(
-                host.gate.data, records.gate.data, records.gate.bytes(),
-                cudaMemcpyDeviceToHost, replay_copy_stream_));
-
-            CUDA_CHECK(cudaEventRecord(
-                (*replay_free_events_)[replay_slot],
-                replay_copy_stream_));
         } else {
             ops::gated_delta_net_snapshot(q_batch, k_batch, v_batch, g_batch, beta_batch, kGdnScale,
                                           /*normalize_qk=*/true, recurrent_states, valid,

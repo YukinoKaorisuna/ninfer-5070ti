@@ -163,28 +163,36 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
             .value_dim       = TextConfig::gdn_value_head_dim,
         };
 
-        // Both device scratch and packed host slots use the exact same
-        // one-layer layout.
-        GdnReplayRecordSpec scratch_spec = full_replay_spec;
-        scratch_spec.layers = 2;
+        if (plan.use_cuda_graph) {
+            // CUDA graph capture is deliberately single-stream. Keep the
+            // complete ReplaySSM transaction on device so graph capture has
+            // no dependency on the host-transfer stream.
+            out.replay_records =
+                plan_gdn_replay_records(builder, full_replay_spec);
+        } else {
+            // Memory-saving non-graph path: double-buffer two ReplaySSM
+            // layers through pinned host storage.
+            GdnReplayRecordSpec scratch_spec = full_replay_spec;
+            scratch_spec.layers = 2;
 
-        GdnReplayRecordSpec host_slot_spec = scratch_spec;
-        host_slot_spec.layers = 1;
+            GdnReplayRecordSpec host_slot_spec = scratch_spec;
+            host_slot_spec.layers = 1;
 
-        LayoutBuilder replay_host_builder;
-        out.replay_host_layout =
-            plan_gdn_replay_records(replay_host_builder, host_slot_spec);
+            LayoutBuilder replay_host_builder;
+            out.replay_host_layout =
+                plan_gdn_replay_records(replay_host_builder, host_slot_spec);
 
-        const std::size_t replay_host_layer_stride =
-            replay_host_builder.finish(kArenaAlign, "ReplaySSM packed host layer");
+            const std::size_t replay_host_layer_stride =
+                replay_host_builder.finish(
+                    kArenaAlign, "ReplaySSM packed host layer");
 
-        out.replay_host_bytes =
-            replay_host_layer_stride *
-            static_cast<std::size_t>(TextConfig::gdn_layers());
+            out.replay_host_bytes =
+                replay_host_layer_stride *
+                static_cast<std::size_t>(TextConfig::gdn_layers());
 
-        // Device-resident ReplaySSM remains one streaming layer.
-        out.replay_records =
-            plan_gdn_replay_records(builder, scratch_spec);
+            out.replay_records =
+                plan_gdn_replay_records(builder, scratch_spec);
+        }
 
         std::fprintf(stderr,
                      "[REPLAY-LAYOUT] scratch bytes=%zu "
@@ -673,13 +681,15 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                     if (plan.proposal_head == ProposalHead::Optimized) {
                         scratch(layout, ops::linear_topk_workspace_capacity_bytes(
                                             QType::Q4G64_F16S, Variant::draft_head_rows,
-                                            DFlashConfig::hidden, mask_columns, mask_columns));
+                                            DFlashConfig::hidden, batch, batch));
                     } else {
-                        // The registered full heads are W8 and FP8; both use the same public input.
-                        for (const auto qtype : {QType::W8G32_F16S, QType::FP8_E4M3FN_ROW_BF16S}) {
+                        // Full proposal heads share the same public input and top-k contract.
+                        for (const auto qtype : {QType::W8G32_F16S,
+                                                 QType::FP8_E4M3FN_ROW_BF16S,
+                                                 QType::Q4G64_F16S}) {
                             scratch(layout, ops::linear_topk_workspace_capacity_bytes(
                                                 qtype, TextConfig::output_rows,
-                                                DFlashConfig::hidden, mask_columns, mask_columns));
+                                                DFlashConfig::hidden, batch, batch));
                         }
                     }
                     matrix(layout, DType::BF16, 256, mask_columns);

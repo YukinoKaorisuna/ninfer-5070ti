@@ -15,6 +15,7 @@ namespace {
 enum class HeadProfile : std::uint8_t {
     W8Full,
     Fp8Full,
+    Q4Full,
     Q4Optimized,
 };
 
@@ -43,6 +44,9 @@ HeadProfile resolve_profile(QType qtype, std::int32_t head_rows, std::int32_t in
     if (head_rows == detail::kLinearTopKFullRows && qtype == QType::FP8_E4M3FN_ROW_BF16S) {
         return HeadProfile::Fp8Full;
     }
+    if (head_rows == detail::kLinearTopKFullRows && qtype == QType::Q4G64_F16S) {
+        return HeadProfile::Q4Full;
+    }
     if (head_rows == detail::kLinearTopKOptimizedRows && qtype == QType::Q4G64_F16S) {
         return HeadProfile::Q4Optimized;
     }
@@ -53,7 +57,8 @@ std::int32_t producer_rows_for(HeadProfile profile, std::int32_t columns) {
     // The Q4 T=14 small-T producer is materially faster than the 64-row family and therefore owns
     // the same 16-row partial-candidate geometry as T=7.
     if (columns == detail::kLinearTopKWidth ||
-        (profile == HeadProfile::Q4Optimized && columns == 2 * detail::kLinearTopKWidth)) {
+        ((profile == HeadProfile::Q4Full || profile == HeadProfile::Q4Optimized) &&
+         columns == 2 * detail::kLinearTopKWidth)) {
         return detail::kLinearTopKKSplitRowsPerGroup;
     }
     return detail::kLinearTopKMRowsPerGroup;
@@ -106,15 +111,17 @@ void require_w8(const Weight& head) {
     if (!common) { throw std::invalid_argument("linear_topk: invalid W8 full head"); }
 }
 
-void require_q4(const Weight& head) {
+void require_q4(const Weight& head, std::int32_t expected_rows, const char* label) {
     const bool common =
         head.qtype == QType::Q4G64_F16S && head.layout == QuantLayout::RowSplit &&
         head.scale_dtype == DType::FP16 && head.group_size == 64 && head.group == 64 &&
-        head.ndim == 2 && head.n == detail::kLinearTopKOptimizedRows &&
+        head.ndim == 2 && head.n == expected_rows &&
         head.k == detail::kLinearTopKHidden && head.shape[0] == head.n && head.shape[1] == head.k &&
         head.padded_shape[0] == head.n && head.padded_shape[1] == head.k && head.qhigh == nullptr &&
         head.high_plane_bytes == 0 && aligned_to(head.qdata, 16) && aligned_to(head.scales, 16);
-    if (!common) { throw std::invalid_argument("linear_topk: invalid Q4 optimized head"); }
+    if (!common) {
+        throw std::invalid_argument(std::string("linear_topk: invalid ") + label);
+    }
 }
 
 void require_no_weight_overlap(const Weight& head, const Tensor& hidden,
@@ -193,6 +200,8 @@ void linear_topk(const Tensor& hidden, const Weight& head, std::int32_t valid_ro
     }
     if (profile == HeadProfile::W8Full) {
         require_w8(head);
+    } else if (profile == HeadProfile::Q4Full) {
+        require_q4(head, detail::kLinearTopKFullRows, "Q4 full head");
     } else {
         (void)detail::validate_fp8_weight(head, "linear_topk FP8 full head");
     }
@@ -205,6 +214,8 @@ void linear_topk(const Tensor& hidden, const Weight& head, std::int32_t valid_ro
     require_no_weight_overlap(head, hidden, candidate_ids, candidate_scores, nullptr, scratch);
     if (profile == HeadProfile::W8Full) {
         detail::linear_topk_w8_launch(hidden, head, valid_rows, scratch, stream);
+    } else if (profile == HeadProfile::Q4Full) {
+        detail::linear_topk_q4_launch(hidden, head, nullptr, valid_rows, scratch, stream);
     } else {
         detail::linear_topk_fp8_launch(hidden, head, valid_rows, scratch, stream);
     }
@@ -218,7 +229,7 @@ void linear_topk(const Tensor& hidden, const Weight& head, const Tensor& row_to_
     if (resolve_profile(head.qtype, head.n, head.k) != HeadProfile::Q4Optimized) {
         throw std::invalid_argument("linear_topk: invalid optimized-head profile");
     }
-    require_q4(head);
+    require_q4(head, detail::kLinearTopKOptimizedRows, "Q4 optimized head");
     require_matrix(row_to_global_ids, DType::I32, detail::kLinearTopKOptimizedRows, 1,
                    "row_to_global_ids", 4);
     if (overlaps(hidden, row_to_global_ids) || overlaps(candidate_ids, row_to_global_ids) ||
@@ -234,7 +245,8 @@ void linear_topk(const Tensor& hidden, const Weight& head, const Tensor& row_to_
                                scratch);
     require_no_weight_overlap(head, hidden, candidate_ids, candidate_scores, &row_to_global_ids,
                               scratch);
-    detail::linear_topk_q4_launch(hidden, head, row_to_global_ids, scratch, stream);
+    detail::linear_topk_q4_launch(hidden, head, &row_to_global_ids,
+                                  detail::kLinearTopKOptimizedRows, scratch, stream);
     detail::linear_topk_merge_launch(scratch, candidate_ids, candidate_scores, stream);
 }
 

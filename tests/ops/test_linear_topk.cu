@@ -270,18 +270,18 @@ void replay_graph_twice(Launch&& launch, cudaStream_t stream) {
 int run_full(QType qtype, const char* profile, const DeviceBuffer& hidden,
              const std::vector<double>& base_score) {
     FixtureWeight fixture =
-        qtype == QType::W8G32_F16S ? make_rowsplit(qtype, kFullRows) : make_fp8();
+        qtype == QType::FP8_E4M3FN_ROW_BF16S ? make_fp8() : make_rowsplit(qtype, kFullRows);
     for (std::size_t index = 0; index < kFullWinnerRows.size(); ++index) {
-        if (qtype == QType::W8G32_F16S) {
-            patch_rowsplit_row(fixture, qtype, kFullWinnerRows[index], factor_for(index));
-        } else {
+        if (qtype == QType::FP8_E4M3FN_ROW_BF16S) {
             patch_fp8_row(fixture, kFullWinnerRows[index], factor_for(index));
+        } else {
+            patch_rowsplit_row(fixture, qtype, kFullWinnerRows[index], factor_for(index));
         }
     }
-    if (qtype == QType::W8G32_F16S) {
-        patch_rowsplit_row(fixture, qtype, kFullRows - 1, 64.0F);
-    } else {
+    if (qtype == QType::FP8_E4M3FN_ROW_BF16S) {
         patch_fp8_row(fixture, kFullRows - 1, 64.0F);
+    } else {
+        patch_rowsplit_row(fixture, qtype, kFullRows - 1, 64.0F);
     }
 
     const auto expected = expected_order(kFullWinnerRows, nullptr);
@@ -388,6 +388,8 @@ int main() {
                              base_scores(QType::W8G32_F16S, host_hidden));
         failures += run_full(QType::FP8_E4M3FN_ROW_BF16S, "fp8-full", hidden,
                              base_scores(QType::FP8_E4M3FN_ROW_BF16S, host_hidden));
+        failures += run_full(QType::Q4G64_F16S, "q4-full", hidden,
+                             base_scores(QType::Q4G64_F16S, host_hidden));
         failures += run_q4(hidden, base_scores(QType::Q4G64_F16S, host_hidden));
         std::cout << (failures == 0 ? "OK" : "FAIL") << " linear_topk\n";
         return failures == 0 ? 0 : 1;
