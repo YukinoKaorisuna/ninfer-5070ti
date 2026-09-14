@@ -35,6 +35,42 @@ Validated Vision source commit before merge to `main`:
 
 The Vision source is about 0.19% lower in prefill and effectively identical in decode/MTP behavior. This is within normal run-to-run variation; no meaningful text-path regression was observed.
 
+## Recommended Vision 1792 serving profile
+
+The recommended Vision profile is now empirically validated with the full `131072 / 131072` text context/KV allocation and:
+
+```text
+--prefill-chunk 896
+--kv-dtype q4
+--spec mtp
+--draft-tokens 3
+--vision
+--vision-max-tokens 1792
+```
+
+Measured startup envelope:
+
+| Item | Value |
+|---|---:|
+| Text prefill workspace | 116.0127 MiB |
+| MTP prefill workspace | 116.0127 MiB |
+| Vision encode workspace | 115.7751 MiB |
+| Free after startup | 26.56 MiB |
+| Planned slack | 28.88 MiB |
+
+A deterministic synthetic image request also passed. The input was a 512×256 image with a red left half and blue right half; the model correctly returned that the left half was red and the right half blue.
+
+Request metrics:
+
+```text
+prompt=211
+generated=62
+prefill=685.8 tok/s
+decode=118.3 tok/s
+ttft=719 ms
+MTP=3.10 tok/round (70.0%)
+```
+
 ## Vision 2048 serving profile
 
 The maximum validated Vision profile kept the full `131072 / 131072` text context/KV allocation and used:
@@ -83,6 +119,10 @@ media_cache=2/1/0
 ```
 
 Cached historical images remain present in the model prompt but do not consume the fresh preprocessing budget again.
+
+## Video status
+
+Video input is supported by the frontend/server path, but it is not yet included in the empirical validation matrix for the final 128K HostMapped Vision configuration. The first dedicated hardware test skipped video because `ffmpeg` was not installed on the validation host.
 
 ## Historical comparison
 
