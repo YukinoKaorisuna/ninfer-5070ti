@@ -1,10 +1,10 @@
 # Benchmarks
 
-## Final validated result
+## Current recommended result: true 128K + Vision source
 
-Batch 212 ran the final 118,001-token workload while keeping the full 131,072-token maximum context and KV capacity allocated.
+The Vision-enabled source was regression-tested with the exact historical 118,001-token workload while keeping the full 131,072-token maximum context and KV capacity allocated.
 
-| Metric | Value |
+| Metric | Vision source |
 |---|---:|
 | Prompt tokens | 118001 |
 | Max context | 131072 |
@@ -12,17 +12,77 @@ Batch 212 ran the final 118,001-token workload while keeping the full 131,072-to
 | Prefill chunk | 896 |
 | KV dtype | Q4 |
 | Speculation | MTP-3 |
-| Prefill | 1377.81 tok/s |
-| Decode | 71.51 tok/s |
-| MTP acceptance rate | 44.74% |
-| MTP acceptance length | 2.31 |
-| Free after weights | 2.56 GiB |
-| Free after startup | 10.56 MiB |
-| Runtime reservation | 2.55 GiB |
-| KV cache payload | 2.26 GiB |
-| Planned slack | 11.39 MiB |
+| Prefill | **1375.16 tok/s** |
+| Decode | **71.52 tok/s** |
+| MTP acceptance rate | **44.74%** |
+| MTP acceptance length | **2.31 tok/round** |
+| Workspace peak, text-only CLI | 116.00 MiB |
+| Free after startup, text-only CLI | 44.56 MiB |
+| Planned slack, text-only CLI | 46.39 MiB |
 
-All final runtime checks passed: no reservation failure, matrix-window error, contract error, out-of-memory error, or non-finite warning.
+Validated Vision source commit before merge to `main`:
+
+```text
+7c10db07ac8c5803f921b83603b707750652873e
+```
+
+## Original text-only release comparison
+
+| Result | Prefill | Decode | MTP acceptance | Acceptance length |
+|---|---:|---:|---:|---:|
+| Original validated text release | 1377.81 tok/s | 71.51 tok/s | 44.74% | 2.31 |
+| Vision source, same 118001-token corpus | 1375.16 tok/s | 71.52 tok/s | 44.74% | 2.31 |
+
+The Vision source is about 0.19% lower in prefill and effectively identical in decode/MTP behavior. This is within normal run-to-run variation; no meaningful text-path regression was observed.
+
+## Vision 2048 serving profile
+
+The maximum validated Vision profile kept the full `131072 / 131072` text context/KV allocation and used:
+
+```text
+--prefill-chunk 896
+--kv-dtype q4
+--spec mtp
+--draft-tokens 3
+--vision
+--vision-max-tokens 2048
+```
+
+Measured startup envelope:
+
+| Item | Value |
+|---|---:|
+| Text prefill workspace | 116.0127 MiB |
+| MTP prefill workspace | 116.0127 MiB |
+| Vision encode workspace | 132.3142 MiB |
+| Free after weights | 2.56 GiB |
+| Free after startup | 8.56 MiB |
+| Planned slack | 10.08 MiB |
+
+A representative OpenWebUI image request at the 2048 profile reported:
+
+```text
+prompt=9134
+prefill=2153.3 tok/s
+decode=113.7 tok/s
+ttft=8.35 s
+MTP=3.01 tok/round (67.1%)
+```
+
+This includes the complete OpenWebUI prompt/tool payload and is not a standalone Vision-kernel microbenchmark.
+
+## Multi-image history validation
+
+After the cache-aware media-budget fix, OpenWebUI conversations containing old images plus a newly uploaded image completed instead of failing with `media_budget_exceeded`.
+
+Observed request patterns included:
+
+```text
+media_cache=1/1/0
+media_cache=2/1/0
+```
+
+Cached historical images remain present in the model prompt but do not consume the fresh preprocessing budget again.
 
 ## Historical comparison
 
@@ -31,22 +91,9 @@ All final runtime checks passed: no reservation failure, matrix-window error, co
 | Older baseline | 1235.03 tok/s | — |
 | Historical optimized | 1371.10 tok/s | — |
 | Historical B133 | 1377.66 tok/s | 70.24 tok/s |
-| Final validated | **1377.81 tok/s** | **71.51 tok/s** |
-
-The final prefill result is approximately **11.56% faster** than the older baseline, **0.49% faster** than the historical optimized mean, and effectively identical to the historical B133 run.
-
-## Long-oracle validation
-
-Batch 211 used a 3,201-token prompt with the full 131072 capacity. Prefill reached **2236.99 tok/s**, versus **2238.05 tok/s** historically, a difference of about **-0.047%**. The run exercised both `T=896` and `T=509` large-token-width paths.
-
-## Short-oracle capacity validation
-
-Batch 210 proved that the final mixed-Q4 artifact could start with both max context and KV capacity set to 131072 and return the deterministic JSON oracle correctly. It reported about **11.39 MiB planned slack**.
-
-## Earlier compute-path isolation
-
-Batch 201 tested the recovered large-T Q4 attention path before the final memory-profile fix. It produced **2226.37 tok/s** prefill on the 3,201-token oracle, confirming that the optimized compute path had been recovered before the final 128K artifact was produced.
+| Original final text release | 1377.81 tok/s | 71.51 tok/s |
+| Current Vision source | **1375.16 tok/s** | **71.52 tok/s** |
 
 ## Comparing results fairly
 
-Short-prompt decode numbers are not directly comparable with the 118K active-prompt result. Public comparisons should report GPU, VRAM, quantization profile, actual prompt tokens, max context, allocated KV capacity, KV dtype, prefill chunk, speculation settings, prefill speed and decode speed.
+Public comparisons should report GPU, VRAM, quantization profile, actual prompt tokens, max context, allocated KV capacity, KV dtype, prefill chunk, speculation settings, Vision settings, prefill speed and decode speed. Short-prompt decode numbers are not directly comparable with the 118K active-prompt result.
