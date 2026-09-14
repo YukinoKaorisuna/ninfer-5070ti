@@ -6,7 +6,7 @@ Vision is now the recommended/default path. The original text-only 128K release 
 
 ## Recommended serving command
 
-Use `--vision-max-tokens 1792` as the safer default:
+The recommended profile is now empirically validated at `--vision-max-tokens 1792`:
 
 ```bash
 ./build/apps/ninfer-serve /path/to/model.ninfer \
@@ -25,7 +25,17 @@ Use `--vision-max-tokens 1792` as the safer default:
   --vision-max-tokens 1792
 ```
 
-The maximum validated Vision profile is `--vision-max-tokens 2048`. At 2048 the server measured:
+Measured 1792 startup envelope on a clean RTX 5080:
+
+```text
+vision_encode       115.7751 MiB
+free after startup   26.56 MiB
+planned slack        28.88 MiB
+```
+
+A deterministic synthetic image test also passed at this profile: a 512×256 red/blue image was correctly identified as red on the left and blue on the right. The request completed with `prompt=211`, `prefill=685.8 tok/s`, `decode=118.3 tok/s`, `ttft=719 ms`, and MTP `3.10 tok/round (70.0%)`.
+
+The maximum validated Vision profile remains `--vision-max-tokens 2048`. At 2048 the server measured:
 
 ```text
 text_prefill       116.0127 MiB
@@ -35,7 +45,7 @@ free after startup   8.56 MiB
 planned slack       10.08 MiB
 ```
 
-Use a clean GPU for 2048. See [`docs/VISION_128K.md`](docs/VISION_128K.md) for details.
+Use a clean GPU for both true-128K Vision profiles; 2048 is especially tight. See [`docs/VISION_128K.md`](docs/VISION_128K.md) for details.
 
 ## Validated result
 
@@ -63,7 +73,7 @@ The validated Vision path adds four changes on top of the original true-128K res
 
 Image understanding is empirically validated, including multi-image OpenWebUI history. Cached old images remain in the model prompt but no longer consume the fresh preprocessing cap again.
 
-Video input is supported by the frontend, but **video has not yet been empirically validated on the final 128K HostMapped Vision path**.
+Video input is supported by the frontend, but **video has not yet been empirically validated on the final 128K HostMapped Vision path**. The first hardware validation attempt skipped video because `ffmpeg` was not installed on the test host.
 
 ## Source and artifacts
 
