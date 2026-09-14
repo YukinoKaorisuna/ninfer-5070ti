@@ -8,6 +8,7 @@ Final validated workload:
 
 - GPU: **RTX 5080 16 GB**
 - Model: **Qwen3.8-27B**
+- Main-model effective precision: **~3.95 BPW** (GGUF-comparable weighted storage figure)
 - Max context: **131,072**
 - KV capacity: **131,072**
 - KV dtype: **Q4**
@@ -45,6 +46,39 @@ SHA256: b38e987a16f7cdda3c5eee81b0ac821f9f2aad86f117b745401a9ef3b5c43012
 
 The release tag remains on the exact source that produced the final benchmark. Documentation lives on later commits/branches so the tested state stays immutable.
 
+## Quantization profile and BPW
+
+The final text-model core is a mixed **Q3/Q4/Q5 groupwise** profile, not a predominantly-Q5 model.
+
+Approximate parameter-weighted distribution of the main text model:
+
+| Format | Share of main-model parameters | Encoded storage |
+|---|---:|---:|
+| Q3G64_F16S | **42.42%** | 3.25 bpw |
+| Q4G64_F16S | **45.92%** | 4.25 bpw |
+| Q5G64_F16S | **11.57%** | 5.25 bpw |
+| BF16 / FP32 | ~0.10% | small norms/other tensors |
+
+Main text-model accounting:
+
+```text
+logical parameters:          26,895,998,464
+encoded main-model bytes:    13,289,938,944
+effective main-model BPW:    3.953
+
+quantized matrix parameters: 26,869,760,000
+quantized matrix bytes:      13,237,452,800
+weighted matrix BPW:         3.941
+```
+
+For public GGUF-style comparisons, **~3.95 BPW effective main-model quantization** is the appropriate headline figure. The full `.ninfer` artifact is larger because it also contains auxiliary/non-main-model data and should not be divided by the headline parameter count to infer quantization quality.
+
+The exact 128K recovery also restores the historical selective Q4 placements:
+
+- 24 GDN `value_z` tensors in Q4
+- 7 attention `gate_value` tensors in Q4
+- roughly **210.625 MiB** GPU weight-memory saving versus the heavier comparison artifact
+
 ## What made 128K fit
 
 The final solution combined three pieces:
@@ -54,10 +88,11 @@ The final solution combined three pieces:
    - `T >= 257`: independent Q4 RowSplit tensor-core MMA
    - retained output-stride correctness fix
 
-2. **Selective mixed-Q4 weight profile**
+2. **Correct mixed Q3/Q4/Q5 weight profile**
+   - ~3.95 BPW effective main-model quantization
    - 24 GDN `value_z` tensors in Q4
    - 7 attention `gate_value` tensors in Q4
-   - roughly **210.625 MiB** GPU weight-memory saving versus the all-Q5 variant
+   - roughly **210.625 MiB** recovered GPU weight memory in the 128K profile transition
 
 3. **128K runtime-memory recovery**
    - combined persistent + workspace device backing
@@ -67,7 +102,7 @@ The final solution combined three pieces:
 
 ## Why this result is interesting
 
-The target was not merely to squeeze the model into memory. The goal was to keep a relatively high-quality mixed quantization profile while simultaneously retaining:
+The target was not merely to squeeze the model into memory. The goal was to keep a useful ~3.95-BPW mixed quantization profile while simultaneously retaining:
 
 - full binary 128K capacity,
 - high long-prompt prefill throughput,
@@ -106,6 +141,7 @@ For a credible reproduction, publish more than a tok/s screenshot. Record:
 - source commit
 - model SHA256
 - binary SHA256
+- effective main-model BPW and how it was calculated
 - prompt SHA256/token count
 - max context and KV capacity
 - KV dtype
