@@ -604,10 +604,31 @@ public:
         if (options.max_context == 0) {
             throw std::invalid_argument("frontend max_context must be nonzero");
         }
-        const std::uint64_t vision_tokens =
+        std::uint64_t vision_tokens =
             std::min<std::uint64_t>(options.max_context, kMaximumVisionTokens);
+        if (options.vision_max_tokens != 0) {
+            vision_tokens = std::min<std::uint64_t>(vision_tokens, options.vision_max_tokens);
+        }
         processor.max_vision_tokens = vision_tokens;
         processor.max_raw_patches   = vision_tokens * kRawPatchesPerVisionToken;
+
+        // Keep ordinary images within the configured Vision budget by resizing them before
+        // patchification instead of decoding at the model's large default image ceiling and
+        // rejecting the request afterwards. One merged image token covers 4 raw 16x16 patches.
+        constexpr std::uint64_t kImagePixelsPerVisionToken =
+            kRawPatchesPerVisionToken * 16ULL * 16ULL;
+        const std::uint64_t budgeted_image_pixels =
+            vision_tokens * kImagePixelsPerVisionToken;
+        processor.image_max_pixels =
+            std::max(processor.image_min_pixels,
+                     std::min(processor.image_max_pixels, budgeted_image_pixels));
+        constexpr std::uint64_t kVideoPixelsPerVisionToken =
+            kRawPatchesPerVisionToken * 2ULL * 16ULL * 16ULL;
+        const std::uint64_t budgeted_video_pixels =
+            vision_tokens * kVideoPixelsPerVisionToken;
+        processor.video_max_pixels =
+            std::max(processor.video_min_pixels,
+                     std::min(processor.video_max_pixels, budgeted_video_pixels));
         if (vision_enabled) {
             const std::uint64_t minimum_live =
                 processor.max_raw_patches * kPreparedVisionPatchFeatures * sizeof(std::uint16_t);

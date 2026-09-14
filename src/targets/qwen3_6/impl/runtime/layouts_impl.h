@@ -317,6 +317,13 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
     return out;
 }
 
+std::uint32_t resolved_vision_token_limit(const SequencePlanImpl& plan) {
+    constexpr std::uint32_t kFrontendMergedLimit = 32768;
+    std::uint32_t merged = std::min(plan.capacity, kFrontendMergedLimit);
+    if (plan.vision_max_tokens != 0) { merged = std::min(merged, plan.vision_max_tokens); }
+    return merged;
+}
+
 WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
     const std::uint32_t chunk_u32 = std::min(plan.prefill_chunk, plan.capacity);
     if (chunk_u32 == 0 ||
@@ -411,6 +418,11 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
             scratch(layout, Variant::gdn_input_projection_record_workspace_capacity_bytes(
                                 plan.weights_profile, phase, batch_size, min_width, max_width));
         } else {
+            // The projected/convolved prefill buffers are only needed through the column
+            // extraction into q/k/v. They are dead before the recurrent GDN stage, so model
+            // that lifetime explicitly instead of carrying ~35 MiB of chunk-896 temporaries
+            // into the recurrent workspace peak.
+            auto conv_scope = layout.scope();
             (void)workspace_recipe::gdn_prefill_conv<TextConfig>(layout, last);
             scratch(layout, Variant::gdn_input_projection_workspace_capacity_bytes(
                                 plan.weights_profile, phase, first, last));
@@ -755,9 +767,8 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
     }
 
     if (plan.features.vision) {
-        constexpr std::uint32_t kFrontendMergedLimit  = 32768;
         constexpr std::uint32_t kFrontendSegmentLimit = 768 / 2;
-        const std::uint32_t merged = std::min(plan.capacity, kFrontendMergedLimit);
+        const std::uint32_t merged = resolved_vision_token_limit(plan);
         out.vision_encode          = schedule::VisionContext::workspace_capacity_bytes(
             merged, std::min(merged, kFrontendSegmentLimit));
     }
@@ -792,6 +803,9 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
     }
     if (options.max_concurrency == 0 || options.max_concurrency > kMaximumConcurrency) {
         throw std::invalid_argument("max_concurrency must be in [1,8]");
+    }
+    if (options.vision_max_tokens > 32768) {
+        throw std::invalid_argument("vision_max_tokens must be in [0,32768]");
     }
     const std::uint32_t logical_pages = page_count(options.max_context);
     const std::uint32_t minimum_pages = std::max(logical_pages, options.max_concurrency);
@@ -861,6 +875,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
         "resolved Paged KV capacity exceeds int32"));
     impl->max_concurrency     = inputs.max_concurrency;
     impl->prefill_chunk       = inputs.prefill_chunk;
+    impl->vision_max_tokens  = inputs.vision_max_tokens;
     impl->draft_window        = inputs.draft_window;
     impl->speculative_backend = inputs.speculative_backend;
     impl->proposal_head       = inputs.proposal_head;
@@ -872,8 +887,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->persistent          = persistent_layout(*impl);
     impl->workspace           = build_workspace_plan(*impl);
     if (impl->features.vision) {
-        constexpr std::uint32_t kFrontendMergedLimit = 32768;
-        const std::uint32_t merged = std::min(impl->capacity, kFrontendMergedLimit);
+        const std::uint32_t merged = resolved_vision_token_limit(*impl);
         impl->request_transient_capacity_bytes =
             schedule::VisionContext::output_transient_bytes(merged);
     }
@@ -939,6 +953,7 @@ make_sequence_planner_impl(DeviceContext& device, const EngineOptions& options,
         .capacity            = options.max_context,
         .max_concurrency     = options.max_concurrency,
         .prefill_chunk       = std::min(options.prefill_chunk, options.max_context),
+        .vision_max_tokens   = options.vision_max_tokens,
         .draft_window        = options.speculative.draft_tokens,
         .speculative_backend = options.speculative.backend,
         .kv_dtype =

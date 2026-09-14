@@ -69,7 +69,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--max-pending-requests N] [--pending-timeout-ms N] "
            "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
            "[--max-request-mib N] [--media-cache-mib N] [--media-live-mib N] "
-           "[--media-preprocess-threads N] "
+           "[--media-preprocess-threads N] [--vision-max-tokens N] "
            "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|q4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
@@ -92,6 +92,8 @@ std::string serve_usage_text(const char* argv0) {
            "default\n"
            "       --log-stats-interval-ms defaults to 5000; 0 disables periodic throughput logs\n"
            "       --vision enables media and loads the fixed Vision GPU allocations\n"
+           "       --vision-max-tokens caps merged Vision tokens independently of text context; "
+           "0 uses the historical automatic limit\n"
            "       --kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of sizing headroom\n"
@@ -189,6 +191,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                 throw std::invalid_argument("--media-preprocess-threads must be in [0,64]");
             }
             options.media_preprocess_threads = static_cast<std::uint32_t>(threads);
+        } else if (arg == "--vision-max-tokens") {
+            const int tokens = parse_nonnegative_int(require_value("--vision-max-tokens"),
+                                                     "vision-max-tokens");
+            options.vision_max_tokens = static_cast<std::uint32_t>(tokens);
         } else if (arg == "--request-log-jsonl") {
             options.request_log_jsonl = require_value("--request-log-jsonl");
             if (options.request_log_jsonl.empty()) {

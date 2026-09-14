@@ -89,6 +89,10 @@ struct EngineOptions {
     SpeculativeOptions speculative;
     std::size_t media_cache_bytes = kDefaultMediaCacheBytes;
     std::size_t media_live_bytes  = kDefaultMediaLiveBytes;
+    // Zero keeps the historical behavior: Vision may consume up to min(max_context, 32768)
+    // merged tokens. A nonzero value independently caps Vision preprocessing/workspace without
+    // reducing the text context/KV capacity.
+    std::uint32_t vision_max_tokens = 0;
     // Zero selects a bounded worker count from the detected host concurrency.
     std::uint32_t media_preprocess_threads = 0;
     bool enable_vision                     = false;
