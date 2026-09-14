@@ -22,6 +22,44 @@ Final validated workload:
 
 This was not a reduced-KV or short-context benchmark. The full 131,072-token KV capacity remained allocated during the 118,001-token test.
 
+## Important VRAM startup requirement
+
+This configuration is an **extremely tight 16 GB fit**. For reliable startup, the RTX 5080 should be effectively idle before launching NInfer.
+
+A validated clean-card `ninfer-serve` startup began with NVIDIA-SMI reporting:
+
+```text
+memory.total = 16303 MiB
+memory.used  = 1 MiB
+memory.free  = 15841 MiB
+```
+
+After loading the ~12.64 GiB weights and completing the required prewarms, NInfer reported:
+
+```text
+free before runtime reservation = 2624.56 MiB
+runtime reservation             = 2613.17 MiB
+planned slack                   = 11.39 MiB
+free after startup              = 10.56 MiB
+```
+
+The exact production server configuration successfully reached:
+
+```text
+ninfer-serve: listening on http://0.0.0.0:8080
+```
+
+with `131072 / 131072`, Q4 KV, MTP-3 and `--prefill-chunk 896` unchanged.
+
+Because the final margin is only about **11 MiB**, even modest competing GPU allocations can make startup fail. Before launching, check that no other process is using the GPU:
+
+```bash
+nvidia-smi
+nvidia-smi --query-gpu=memory.total,memory.used,memory.free --format=csv,noheader,nounits
+```
+
+Do not interpret “16 GB GPU” as sufficient by itself: the tested full-128K configuration assumes essentially the full usable framebuffer is available to NInfer at startup.
+
 ## Canonical validated release
 
 The exact tested source is frozen at:
