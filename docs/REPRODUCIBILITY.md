@@ -55,15 +55,39 @@ If benchmark parity matters, record the compiler, CUDA toolkit, driver and final
 
 ## Mixed quantization profile
 
-The validated 128K artifact uses selective Q4 tensors rather than reducing the entire model aggressively:
+The validated text core is a mixed **Q3/Q4/Q5 groupwise** profile.
+
+Approximate parameter-weighted distribution:
 
 ```text
-24 x GDN value_z       -> Q4 groupwise
-7  x attention gate_value -> Q4 groupwise
-remaining relevant weights -> predominantly Q5 groupwise
+Q3G64_F16S   42.42%   3.25 bpw encoded
+Q4G64_F16S   45.92%   4.25 bpw encoded
+Q5G64_F16S   11.57%   5.25 bpw encoded
+BF16 / FP32  ~0.10%   small norms / miscellaneous tensors
 ```
 
-This profile saves approximately **210.625 MiB** of GPU weight memory relative to the all-Q5 variant.
+Main-model accounting:
+
+```text
+logical parameters:          26,895,998,464
+encoded main-model bytes:    13,289,938,944
+effective main-model BPW:    3.953
+
+quantized matrix parameters: 26,869,760,000
+quantized matrix bytes:      13,237,452,800
+weighted matrix BPW:         3.941
+```
+
+For GGUF-style public comparisons, report this as **~3.95 BPW effective main-model quantization**.
+
+The final 128K profile also uses these specific Q4 placements:
+
+```text
+24 x GDN value_z          -> Q4 groupwise
+7  x attention gate_value -> Q4 groupwise
+```
+
+Those placements recovered approximately **210.625 MiB** of GPU weight memory relative to the heavier comparison artifact used during the 128K recovery work.
 
 ## Artifact conversion
 
@@ -81,7 +105,7 @@ python -m tools.convert.qwen3_8_27b.convert \
   --device cpu
 ```
 
-Use the converter options from the validated source tree for the exact mixed-Q4 profile.
+Use the converter options from the validated source tree for the exact mixed Q3/Q4/Q5 profile.
 
 Final artifact:
 
@@ -89,6 +113,8 @@ Final artifact:
 bytes:  16461267456
 SHA256: c4a7e9ab593a7f42d58208fa0065d67a82d61921107686cc9f6ed1ec6b050e21
 ```
+
+The full artifact size is **not** the GGUF-comparable BPW numerator because the container includes auxiliary/non-main-model content in addition to the text-core weights.
 
 ## True 128K acceptance configuration
 
