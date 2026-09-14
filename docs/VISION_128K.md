@@ -8,7 +8,7 @@ Validated Vision source commit before merge to `main`:
 
 ## Recommended serving command
 
-Use `--vision-max-tokens 1792` as the safer default:
+The recommended profile is empirically validated at `--vision-max-tokens 1792`:
 
 ```bash
 ./build/apps/ninfer-serve /path/to/model.ninfer \
@@ -27,6 +27,18 @@ Use `--vision-max-tokens 1792` as the safer default:
   --vision-max-tokens 1792
 ```
 
+Measured 1792 workspace/startup envelope:
+
+```text
+text_prefill       116.0127 MiB
+mtp_prefill        116.0127 MiB
+vision_encode      115.7751 MiB
+free after startup  26.56 MiB
+planned slack       28.88 MiB
+```
+
+The server reached the listening state with the full `131072 / 131072` text context/KV allocation unchanged. A deterministic 512×256 synthetic image containing a red left half and blue right half was correctly described as: “The left half is red and the right half is blue.” The request reported `prompt=211`, `prefill=685.8 tok/s`, `decode=118.3 tok/s`, `ttft=719 ms`, and MTP `3.10 tok/round (70.0%)`.
+
 The maximum validated profile is `--vision-max-tokens 2048`. At 2048 the measured workspace/startup envelope was:
 
 ```text
@@ -37,7 +49,7 @@ free after startup   8.56 MiB
 planned slack       10.08 MiB
 ```
 
-A clean GPU is required for the 2048 profile.
+A clean GPU is required for these true-128K profiles; the 2048 setting is especially tight.
 
 ## Validation
 
@@ -54,7 +66,7 @@ No meaningful text-performance regression was observed.
 
 Image understanding is empirically validated. OpenWebUI multi-image history is also validated: cached historical media no longer consumes the fresh preprocessing budget again, while genuinely new media still does.
 
-Video input is supported by the frontend, but video has not yet been empirically validated on the final 128K HostMapped Vision configuration.
+Video input is supported by the frontend, but video has not yet been empirically validated on the final 128K HostMapped Vision configuration. The first dedicated hardware test skipped video because `ffmpeg` was not installed on the validation host.
 
 ## Validation hashes
 
