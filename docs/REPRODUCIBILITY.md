@@ -1,24 +1,18 @@
 # Reproducibility Guide
 
-This guide describes the validated path for reproducing the RTX 5080 true-128K result.
+This guide describes the validated RTX 5080 true-128K path with Vision enabled.
 
 ## Validated hardware/software
-
-Validated system:
 
 - NVIDIA GeForce RTX 5080 16 GB
 - Linux
 - GCC 15.2.0
 - CUDA 13.3.73
-- NInfer source commit `473dade56031852a7d96edef049d859da96a6df9`
+- validated Vision source commit: `7c10db07ac8c5803f921b83603b707750652873e`
 
-The result may transfer to other Blackwell GPUs, but memory margins and performance will differ.
+The original text-only release remains frozen at `473dade56031852a7d96edef049d859da96a6df9` / tag `qwen3.8-27b-rtx5080-128k-v1`.
 
-## Pin all source revisions
-
-Do not reproduce from floating `main` branches if you want comparable results.
-
-Validated upstream model revisions:
+## Pin model revisions
 
 ```text
 Qwen/Qwen3.8-27B
@@ -28,203 +22,154 @@ z-lab/Qwen3.8-27B-DFlash2
 50307d4c4cde6860d4eee73e2547cd786fe8e8a4
 ```
 
-Validated NInfer source:
-
-```text
-473dade56031852a7d96edef049d859da96a6df9
-```
-
 ## Build
 
-Use a Release build. The validated environment used Ninja and ccache:
+Use a Release build and record compiler/CUDA/driver details if benchmark parity matters:
 
 ```bash
-export CCACHE_BASEDIR="$HOME"
-export CCACHE_NOHASHDIR=true
-
 cmake -S . -B build -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_C_COMPILER_LAUNCHER=ccache \
   -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
   -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache
 
-ninja -C build -j16 ninfer
+ninja -C build -j16 ninfer ninfer-serve
 ```
 
-If benchmark parity matters, record the compiler, CUDA toolkit, driver and final binary SHA256.
+## Model artifact
 
-## Mixed quantization profile
-
-The validated text core is a mixed **Q3/Q4/Q5 groupwise** profile.
-
-Approximate parameter-weighted distribution:
-
-```text
-Q3G64_F16S   42.42%   3.25 bpw encoded
-Q4G64_F16S   45.92%   4.25 bpw encoded
-Q5G64_F16S   11.57%   5.25 bpw encoded
-BF16 / FP32  ~0.10%   small norms / miscellaneous tensors
-```
-
-Main-model accounting:
-
-```text
-logical parameters:          26,895,998,464
-encoded main-model bytes:    13,289,938,944
-effective main-model BPW:    3.953
-
-quantized matrix parameters: 26,869,760,000
-quantized matrix bytes:      13,237,452,800
-weighted matrix BPW:         3.941
-```
-
-For GGUF-style public comparisons, report this as **~3.95 BPW effective main-model quantization**.
-
-The final 128K profile also uses these specific Q4 placements:
-
-```text
-24 x GDN value_z          -> Q4 groupwise
-7  x attention gate_value -> Q4 groupwise
-```
-
-Those placements recovered approximately **210.625 MiB** of GPU weight memory relative to the heavier comparison artifact used during the 128K recovery work.
-
-## Artifact conversion
-
-GPU-side conversion hit a PyTorch scratch-allocation OOM on the 16 GB card, so the final artifact was converted on CPU.
-
-The validated source directories were pinned to the exact upstream revisions above.
-
-Conceptually:
-
-```bash
-python -m tools.convert.qwen3_8_27b.convert \
-  --model /path/to/Qwen3.8-27B \
-  --dflash2-model /path/to/Qwen3.8-27B-DFlash2 \
-  --out /path/to/model.ninfer \
-  --device cpu
-```
-
-Use the converter options from the validated source tree for the exact mixed Q3/Q4/Q5 profile.
-
-Final artifact:
+Validated artifact:
 
 ```text
 bytes:  16461267456
 SHA256: c4a7e9ab593a7f42d58208fa0065d67a82d61921107686cc9f6ed1ec6b050e21
 ```
 
-The full artifact size is **not** the GGUF-comparable BPW numerator because the container includes auxiliary/non-main-model content in addition to the text-core weights.
+The text core is a mixed Q3/Q4/Q5 groupwise profile at approximately 3.953 effective BPW. The full `.ninfer` container size is not itself a GGUF-comparable BPW numerator.
 
-## Clean-GPU prerequisite for true 128K
+## Recommended true-128K Vision server
 
-The full `131072 / 131072` configuration has only about **11 MiB of planned slack**. Reproduction should therefore begin with the RTX 5080 effectively idle.
+Use `1792` Vision tokens as the safer default:
 
-A validated clean-card server start reported:
+```bash
+./build/apps/ninfer-serve /path/to/model.ninfer \
+  --host 0.0.0.0 \
+  --port 8080 \
+  --model-id qwen3.8-27b \
+  --max-context 131072 \
+  --kv-capacity 131072 \
+  --prefill-chunk 896 \
+  --kv-dtype q4 \
+  --spec mtp \
+  --draft-tokens 3 \
+  --no-cuda-graph \
+  --max-concurrency 1 \
+  --vision \
+  --vision-max-tokens 1792
+```
+
+The maximum validated Vision setting is `--vision-max-tokens 2048`.
+
+At 2048 the measured startup envelope was:
 
 ```text
-NVIDIA-SMI before launch:
+vision_encode workspace  132.3142 MiB
+free after weights         2.56 GiB
+free after startup          8.56 MiB
+planned slack              10.08 MiB
+```
+
+## Clean-GPU prerequisite
+
+A representative successful launch started from:
+
+```text
 memory.total = 16303 MiB
 memory.used  = 1 MiB
 memory.free  = 15841 MiB
-
-NInfer after weights and prewarm:
-free before runtime reservation = 2624.56 MiB
-runtime reservation             = 2613.17 MiB
-planned slack                   = 11.39 MiB
-free after startup              = 10.56 MiB
 ```
 
-Check the card before launching:
+Check before launch:
 
 ```bash
 nvidia-smi
 nvidia-smi --query-gpu=memory.total,memory.used,memory.free --format=csv,noheader,nounits
 ```
 
-If another process is holding GPU memory, stop it before attempting the true-128K profile. A nominal 16 GB card is not sufficient by itself; the validated configuration assumes essentially the full usable framebuffer is available to NInfer at startup.
+The 2048 profile is extremely tight; even a small competing GPU allocation can make startup fail.
 
-## True 128K acceptance configuration
+## True 128K definition
 
-For this project, “true 128K” means both the maximum context and allocated KV capacity are exactly 131072:
+For this project, true 128K means both values are exactly 131072:
 
 ```text
 --max-context 131072
 --kv-capacity 131072
---prefill-chunk 896
---kv-dtype q4
---spec mtp
---draft-tokens 3
---no-cuda-graph
 ```
 
-The same settings were also successfully started under `ninfer-serve`, reaching the listening state with `131072 / 131072`, Q4 KV, MTP-3 and prefill chunk 896 unchanged.
+Do not describe a reduced KV allocation as the same result.
 
-A configuration such as 129024 is useful for 896-token chunk alignment and historical performance comparison, but it is not the final binary 128K acceptance target.
+## Long-context regression acceptance
 
-## Validation sequence
-
-Run progressively rather than jumping directly to an 118K prompt:
-
-1. Confirm the GPU is effectively idle.
-2. Short deterministic JSON oracle.
-3. 3,201-token long oracle.
-4. Confirm the long path hits `T=896` and the final partial chunk.
-5. Confirm `131072 / 131072` startup succeeds.
-6. Run the 118,001-token final workload.
-
-## Deterministic short oracle
-
-Prompt:
+The Vision source was re-tested with the exact historical corpus:
 
 ```text
-You are auditing deterministic model arithmetic.
-Return a JSON object with exactly these keys:
-{"answer":"","number":0,"valid":false}
-Set answer to the lowercase word produced by joining alpha and beta with a hyphen.
-Set number to the result of 137 + 286.
-Set valid to true if 17 multiplied by 19 equals 323.
-Do not include markdown or any additional text.
+prompt SHA256: 078d726e07b6c610d3136751fb2bdfbf4965ebdd9d8afc1a07dedb9ac03fe0fd
+prompt tokens: 118001
+max context:   131072
+KV capacity:   131072
+prefill chunk: 896
+KV dtype:      q4
+speculation:   MTP-3
+max-new:       32
 ```
 
-Expected output:
-
-```json
-{"answer":"alpha-beta","number":423,"valid":true}
-```
-
-Expected output SHA256:
+Observed result:
 
 ```text
-4c509613de14990e22aeb295ef7c8aff44cb704ffadf836d5cc25518ecce36a9
+return code:           0
+prefill:               1375.16 tok/s
+decode:                  71.52 tok/s
+MTP acceptance:          44.74%
+MTP acceptance length:    2.31 tok/round
+workspace peak:          116.00 MiB
+free after startup:       44.56 MiB
+planned slack:            46.39 MiB
 ```
 
-## Final acceptance conditions
-
-The final validated run showed:
+Historical text release on the same acceptance workload:
 
 ```text
-MODEL_RC=0
-PROMPT_TOKENS=118001
-PREFILL_TOK_S=1377.81
-DECODE_TOK_S=71.51
-
-RUNTIME_RESERVATION_ERROR=NO
-MATRIX_WINDOW_ERROR=NO
-CONTRACT_ERROR=NO
-OOM_ERROR=NO
-NONFINITE_WARNING=NO
+prefill:               1377.81 tok/s
+decode:                  71.51 tok/s
+MTP acceptance:          44.74%
+MTP acceptance length:    2.31 tok/round
 ```
 
-Memory:
+No meaningful text-path regression was observed.
+
+## Vision acceptance
+
+Validated on the final HostMapped Vision path:
+
+- image input through the OpenAI-compatible server;
+- ordinary photos and small-text/receipt input;
+- OpenWebUI multi-image history;
+- cached historical media plus a newly uploaded image;
+- full 131072 text context/KV retained.
+
+Observed cache patterns included `media_cache=1/1/0` and `media_cache=2/1/0`, proving old cached images were no longer charged repeatedly against the fresh preprocessing cap.
+
+Video input is supported by the frontend but has not yet been empirically validated on this final 128K HostMapped configuration.
+
+## Validation hashes
 
 ```text
-GPU_WEIGHTS≈12.64 GiB
-FREE_AFTER_WEIGHTS=2.56 GiB
-FREE_AFTER_STARTUP=10.56 MiB
-RUNTIME_RESERVATION=2.55 GiB
-KV_CACHE_PAYLOAD=2.26 GiB
-PLANNED_SLACK=11.39 MiB
+ninfer SHA256:
+5ef4df2862ac5b2f63359cc86188a5f91636e54bd07d6417e6567c7a86076140
+
+ninfer-serve SHA256:
+61dbffa243a54bf32db8c6f55f4b1db288c1ebcfe390dff50ec9a1ba7a2f7399
 ```
 
-Small run-to-run performance variation is expected; hashes and configuration are the first reproducibility checks.
+Rebuilt binaries can differ byte-for-byte if compiler/toolkit inputs change, so always record the full build environment alongside hashes.
