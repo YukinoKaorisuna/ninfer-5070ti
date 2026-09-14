@@ -81,6 +81,40 @@ Observed planner/runtime values:
 | Free after startup | 10.56 MiB |
 | Planned slack | **11.39 MiB** |
 
+## Measured clean-start requirement
+
+The true-128K profile should be treated as requiring an effectively clean RTX 5080 at process start.
+
+A successful `ninfer-serve` launch with the full `131072 / 131072`, Q4 KV, MTP-3 and chunk-896 configuration began from this NVIDIA-SMI state:
+
+```text
+memory.total = 16303 MiB
+memory.used  = 1 MiB
+memory.free  = 15841 MiB
+```
+
+After the ~12.64 GiB weights were resident and all required prewarms had run, the measured free memory was:
+
+```text
+free before runtime reservation = 2624.56 MiB
+runtime reservation             = 2613.17 MiB
+planned slack                   = 11.39 MiB
+free after startup              = 10.56 MiB
+```
+
+The server then successfully reached the listening state without reducing context, KV capacity, MTP draft width or prefill chunk.
+
+This means the practical memory requirement is not simply “an RTX 5080 with 16 GB.” The process needs essentially the entire usable framebuffer at startup. A competing CUDA process or other GPU allocation can consume the ~11 MiB margin and cause the runtime-reservation check to fail.
+
+Recommended preflight check:
+
+```bash
+nvidia-smi
+nvidia-smi --query-gpu=memory.total,memory.used,memory.free --format=csv,noheader,nounits
+```
+
+For comparable reproduction, record this pre-launch GPU memory state alongside the benchmark configuration.
+
 ## Why combined backing matters
 
 The known-good runtime used one combined CUDA backing allocation for persistent data and workspace. This does not reduce the planner's required byte count, but it avoids relying on a second very large device allocation after VRAM is already heavily committed.
