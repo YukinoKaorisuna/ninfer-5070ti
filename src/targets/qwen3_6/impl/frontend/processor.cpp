@@ -735,8 +735,11 @@ ProcessedInput Processor::process(std::vector<ChatMessage> messages,
         item.patch_count = media.payload->patch_elements / kPatchFeatures;
         patch_cursor += item.patch_count;
         try {
+            // Keep aggregate request statistics for logging/token accounting, but do not
+            // re-charge cached historical media against the fresh preprocessing budget.
+            // Cache misses are already bounded by ConcurrentMediaBudget inside their builder,
+            // and every individual media item is validated when it is first prepared.
             add_budget(stats, item);
-            enforce_media_resource_limits(stats, options_);
         } catch (...) {
             preparation_error = std::current_exception();
             stop_preparation.store(true, std::memory_order_relaxed);
@@ -781,7 +784,9 @@ ProcessedInput Processor::process(std::vector<ChatMessage> messages,
         }
     }
     stats.prompt_tokens = output.input_ids.size();
-    enforce_media_resource_limits(stats, options_);
+    // Do not enforce the fresh-media processor budget over the aggregate historical
+    // media set here. Cached items may legitimately remain in chat history; only
+    // newly prepared cache misses are charged by ConcurrentMediaBudget.
 
     stats.media_cache_hits              = cache_stats.hits;
     stats.media_cache_misses            = cache_stats.misses;
