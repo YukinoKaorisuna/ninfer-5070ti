@@ -37,7 +37,7 @@ The Vision source is about 0.19% lower in prefill and effectively identical in d
 
 ## Recommended Vision 1792 serving profile
 
-The recommended Vision profile is now empirically validated with the full `131072 / 131072` text context/KV allocation and:
+The recommended Vision profile is empirically validated with the full `131072 / 131072` text context/KV allocation and:
 
 ```text
 --prefill-chunk 896
@@ -70,6 +70,14 @@ decode=118.3 tok/s
 ttft=719 ms
 MTP=3.10 tok/round (70.0%)
 ```
+
+## Video validation
+
+Video is empirically validated on the final 128K HostMapped Vision configuration. The test used a deterministic 6-second MP4 containing three solid-color scenes in chronological order: red, green and blue. With thinking disabled and a constrained answer format, the model returned `red, green, blue`.
+
+The server retained the full `131072 / 131072` context/KV allocation. Request metrics were `prompt=572`, `generated=6`, `prefill=1721.9 tok/s`, `decode=97.1 tok/s`, `ttft=1111 ms`, `wall=1.16 s`, MTP `4.00 tok/round`, and `finish=stop_token`.
+
+This is an end-to-end functional validation of video acquisition, preprocessing, Vision encode and generation, not a broad video-understanding quality benchmark.
 
 ## Vision 2048 serving profile
 
@@ -119,10 +127,6 @@ media_cache=2/1/0
 ```
 
 Cached historical images remain present in the model prompt but do not consume the fresh preprocessing budget again.
-
-## Video status
-
-Video input is supported by the frontend/server path, but it is not yet included in the empirical validation matrix for the final 128K HostMapped Vision configuration. The first dedicated hardware test skipped video because `ffmpeg` was not installed on the validation host.
 
 ## Historical comparison
 
