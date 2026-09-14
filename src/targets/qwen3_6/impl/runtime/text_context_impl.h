@@ -1054,6 +1054,10 @@ void TextContext::gdn_mix(const GdnLayerW& w, Tensor& x, int gidx, Phase ph) {
                 value_output, gate_output, ph, work_, s);
         }
     } else {
+        // qkv/qkv_c are only staging buffers for the convolution. q/k/v above own the extracted
+        // results, so release these large temporaries before the recurrent GDN workspace is
+        // allocated. This is allocation-lifetime only; arithmetic and tensor values are unchanged.
+        auto conv_scope = work_.scope();
         const auto conv = workspace_recipe::gdn_prefill_conv<TextConfig>(work_, T);
         Tensor qkv      = conv.projected;
         Variant::gdn_input_projection(h, *w.projection, qkv, z, ph, work_, s);
