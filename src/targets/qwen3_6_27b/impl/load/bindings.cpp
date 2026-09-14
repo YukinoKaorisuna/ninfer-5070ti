@@ -602,7 +602,7 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_
     out.mtp.final_norm = bind_mtp("mtp/final_norm", NumericFormat::BF16, {5120});
 
     const artifact::TensorPlacement vision_placement =
-        features.vision ? artifact::TensorPlacement::Device
+        features.vision ? artifact::TensorPlacement::HostMapped
                         : artifact::TensorPlacement::ValidateOnly;
     out.vision_backbone     = qwen3_6::bind_vision_backbone(binder, vision_placement);
     out.vision_merger_input = qwen3_6::bind_vision_merger_input(binder, vision_placement);
