@@ -45,11 +45,33 @@ revision: 50307d4c4cde6860d4eee73e2547cd786fe8e8a4
 
 ## Quantization profile
 
+The final text core is mixed Q3/Q4/Q5 groupwise.
+
 ```text
+Q3G64_F16S_SHARE=42.42%
+Q4G64_F16S_SHARE=45.92%
+Q5G64_F16S_SHARE=11.57%
+BF16_FP32_SHARE_APPROX=0.10%
+
 Q4_VALUE_Z_COUNT=24
 Q4_GATE_VALUE_COUNT=7
-remaining relevant main-model weights predominantly Q5 groupwise
 ```
+
+GGUF-comparable main-model accounting:
+
+```text
+MAIN_TEXT_LOGICAL_PARAMS=26895998464
+MAIN_TEXT_ENCODED_BYTES=13289938944
+MAIN_TEXT_EFFECTIVE_BPW=3.953
+
+QUANTIZED_MATRIX_PARAMS=26869760000
+QUANTIZED_MATRIX_BYTES=13237452800
+QUANTIZED_MATRIX_WEIGHTED_BPW=3.941
+```
+
+Public shorthand: **~3.95 BPW effective main-model quantization**.
+
+The full `.ninfer` artifact size is not itself a GGUF-comparable BPW measurement because the container includes auxiliary/non-main-model data.
 
 ## Runtime
 
