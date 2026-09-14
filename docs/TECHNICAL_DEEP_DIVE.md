@@ -8,7 +8,7 @@ Run Qwen3.8-27B on a single RTX 5080 16 GB with all of the following at once:
 - genuine 131,072-token KV capacity,
 - Q4 KV cache,
 - MTP-3 speculative decoding,
-- relatively high-quality mixed quantization,
+- mixed Q3/Q4/Q5 groupwise weights,
 - strong long-prompt prefill,
 - useful decode speed,
 - deterministic correctness.
@@ -40,18 +40,16 @@ A key lesson was that synthetic operator tests were insufficient. Small-width te
 
 ## 2. Why the newer artifact stopped fitting
 
-The current production artifact had drifted away from the historical exact-128K quantization profile.
+The current production artifact had drifted away from the historical exact-128K memory profile.
 
-The older working profile selectively quantized:
+The exact-128K recovery restored these specific Q4 placements:
 
 ```text
 24 x GDN value_z
 7  x attention gate_value
 ```
 
-to Q4 while keeping the rest of the relevant model at the higher Q5-class profile.
-
-Historical GPU-weight saving:
+Historical GPU-weight saving from those placements:
 
 ```text
 value_z      180.000 MiB
@@ -60,7 +58,9 @@ gate_value    30.625 MiB
 total        210.625 MiB
 ```
 
-The all-Q5-ish artifact failed a large-context runtime reservation by roughly 166 MiB. Restoring the historical mixed-Q4 profile provided enough headroom to recover full 131072 capacity.
+The heavier comparison artifact failed a large-context runtime reservation by roughly 166 MiB. Restoring the historical 128K profile provided enough headroom to recover full 131072 capacity.
+
+Important correction: this does **not** mean the rest of the model is predominantly Q5. The final text core is a mixed Q3/Q4/Q5 groupwise model; see the BPW section below.
 
 ## 3. Runtime memory architecture
 
@@ -126,7 +126,7 @@ historical: 2238.05 tok/s
 delta: -0.047%
 ```
 
-That result effectively reproduced historical performance while using the new current-contract mixed-Q4 artifact at full 131072 capacity.
+That result effectively reproduced historical performance while using the current-contract 128K artifact at full 131072 capacity.
 
 ## 6. Final B133 workload
 
@@ -176,12 +176,35 @@ The final project acceptance target is explicitly:
 
 This distinction is important when comparing public long-context claims.
 
-## 8. Artifact quality
+## 8. GGUF-comparable BPW and artifact quality
 
-The final artifact is deliberately mixed rather than globally reduced to Q2/Q3.
+The final text core is a mixed **Q3/Q4/Q5 groupwise** profile.
 
-It keeps the majority of the main model at the higher Q5-class profile and selectively spends Q4 only where it buys the memory needed for 128K.
+Parameter-weighted distribution:
 
-The `.ninfer` file size is 16,461,267,456 bytes (~15.33 GiB). A naive artifact-size / parameter-count calculation gives an effective storage figure around the mid-4-bit range, but this should not be confused with a pure GGUF-style neural-weight BPW because the artifact also contains scales, metadata, non-quantized tensors and auxiliary model/runtime data.
+```text
+Q3G64_F16S   42.42%   3.25 bpw encoded
+Q4G64_F16S   45.92%   4.25 bpw encoded
+Q5G64_F16S   11.57%   5.25 bpw encoded
+BF16 / FP32  ~0.10%   small norms / miscellaneous tensors
+```
 
-For quality comparisons, the actual tensor-level quantization profile is more meaningful than treating the entire file as one uniform BPW number.
+Main text-model accounting:
+
+```text
+logical parameters:          26,895,998,464
+encoded main-model bytes:    13,289,938,944
+effective main-model BPW:    3.953
+
+quantized matrix parameters: 26,869,760,000
+quantized matrix bytes:      13,237,452,800
+weighted matrix BPW:         3.941
+```
+
+Therefore, for public comparisons against GGUF claims, the most useful description is:
+
+> **~3.95 BPW effective main-model quantization**
+
+The full `.ninfer` artifact is 16,461,267,456 bytes (~15.33 GiB), but dividing the whole container by a headline model parameter count is not a valid GGUF-style BPW comparison because the artifact includes auxiliary/non-main-model content in addition to the quantized text weights.
+
+The 24 Q4 `value_z` and 7 Q4 `gate_value` placements remain important to the final 128K memory profile, but they are only part of the overall mixed Q3/Q4/Q5 quantization layout.
