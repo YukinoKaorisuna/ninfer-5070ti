@@ -116,6 +116,34 @@ SHA256: c4a7e9ab593a7f42d58208fa0065d67a82d61921107686cc9f6ed1ec6b050e21
 
 The full artifact size is **not** the GGUF-comparable BPW numerator because the container includes auxiliary/non-main-model content in addition to the text-core weights.
 
+## Clean-GPU prerequisite for true 128K
+
+The full `131072 / 131072` configuration has only about **11 MiB of planned slack**. Reproduction should therefore begin with the RTX 5080 effectively idle.
+
+A validated clean-card server start reported:
+
+```text
+NVIDIA-SMI before launch:
+memory.total = 16303 MiB
+memory.used  = 1 MiB
+memory.free  = 15841 MiB
+
+NInfer after weights and prewarm:
+free before runtime reservation = 2624.56 MiB
+runtime reservation             = 2613.17 MiB
+planned slack                   = 11.39 MiB
+free after startup              = 10.56 MiB
+```
+
+Check the card before launching:
+
+```bash
+nvidia-smi
+nvidia-smi --query-gpu=memory.total,memory.used,memory.free --format=csv,noheader,nounits
+```
+
+If another process is holding GPU memory, stop it before attempting the true-128K profile. A nominal 16 GB card is not sufficient by itself; the validated configuration assumes essentially the full usable framebuffer is available to NInfer at startup.
+
 ## True 128K acceptance configuration
 
 For this project, “true 128K” means both the maximum context and allocated KV capacity are exactly 131072:
@@ -130,17 +158,20 @@ For this project, “true 128K” means both the maximum context and allocated K
 --no-cuda-graph
 ```
 
+The same settings were also successfully started under `ninfer-serve`, reaching the listening state with `131072 / 131072`, Q4 KV, MTP-3 and prefill chunk 896 unchanged.
+
 A configuration such as 129024 is useful for 896-token chunk alignment and historical performance comparison, but it is not the final binary 128K acceptance target.
 
 ## Validation sequence
 
 Run progressively rather than jumping directly to an 118K prompt:
 
-1. Short deterministic JSON oracle.
-2. 3,201-token long oracle.
-3. Confirm the long path hits `T=896` and the final partial chunk.
-4. Confirm `131072 / 131072` startup succeeds.
-5. Run the 118,001-token final workload.
+1. Confirm the GPU is effectively idle.
+2. Short deterministic JSON oracle.
+3. 3,201-token long oracle.
+4. Confirm the long path hits `T=896` and the final partial chunk.
+5. Confirm `131072 / 131072` startup succeeds.
+6. Run the 118,001-token final workload.
 
 ## Deterministic short oracle
 
