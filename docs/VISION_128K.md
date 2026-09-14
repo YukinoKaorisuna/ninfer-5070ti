@@ -39,6 +39,8 @@ planned slack       28.88 MiB
 
 The server reached the listening state with the full `131072 / 131072` text context/KV allocation unchanged. A deterministic 512×256 synthetic image containing a red left half and blue right half was correctly described as: “The left half is red and the right half is blue.” The request reported `prompt=211`, `prefill=685.8 tok/s`, `decode=118.3 tok/s`, `ttft=719 ms`, and MTP `3.10 tok/round (70.0%)`.
 
+A deterministic 6-second synthetic MP4 containing red, then green, then blue scenes was also processed successfully at the same profile. With thinking disabled and a constrained output format, the model returned exactly `red, green, blue`. The video request reported `prompt=572`, `gen=6`, `prefill=1721.9 tok/s`, `decode=97.1 tok/s`, `ttft=1111 ms`, wall time `1.16 s`, and MTP `4.00 tok/round (100.0%)`.
+
 The maximum validated profile is `--vision-max-tokens 2048`. At 2048 the measured workspace/startup envelope was:
 
 ```text
@@ -66,7 +68,7 @@ No meaningful text-performance regression was observed.
 
 Image understanding is empirically validated. OpenWebUI multi-image history is also validated: cached historical media no longer consumes the fresh preprocessing budget again, while genuinely new media still does.
 
-Video input is supported by the frontend, but video has not yet been empirically validated on the final 128K HostMapped Vision configuration. The first dedicated hardware test skipped video because `ffmpeg` was not installed on the validation host.
+Video input is now empirically validated on the final 128K HostMapped Vision configuration using a deterministic chronological-color MP4 test. This validates the end-to-end video acquisition, preprocessing, Vision encode and generation path on the RTX 5080 configuration; it is not a broad video-quality benchmark.
 
 ## Validation hashes
 
