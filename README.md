@@ -35,6 +35,8 @@ planned slack        28.88 MiB
 
 A deterministic synthetic image test also passed at this profile: a 512×256 red/blue image was correctly identified as red on the left and blue on the right. The request completed with `prompt=211`, `prefill=685.8 tok/s`, `decode=118.3 tok/s`, `ttft=719 ms`, and MTP `3.10 tok/round (70.0%)`.
 
+A deterministic synthetic video test also passed at the same full-128K profile. A 6-second red → green → blue MP4 was correctly returned as `red, green, blue` with thinking disabled. The request completed with `prompt=572`, `gen=6`, `prefill=1721.9 tok/s`, `decode=97.1 tok/s`, `ttft=1111 ms`, and MTP `4.00 tok/round (100.0%)`.
+
 The maximum validated Vision profile remains `--vision-max-tokens 2048`. At 2048 the server measured:
 
 ```text
@@ -73,7 +75,7 @@ The validated Vision path adds four changes on top of the original true-128K res
 
 Image understanding is empirically validated, including multi-image OpenWebUI history. Cached old images remain in the model prompt but no longer consume the fresh preprocessing cap again.
 
-Video input is supported by the frontend, but **video has not yet been empirically validated on the final 128K HostMapped Vision path**. The first hardware validation attempt skipped video because `ffmpeg` was not installed on the test host.
+Video input is also empirically validated on the final 128K HostMapped Vision path with a deterministic synthetic MP4 sequence. The model correctly identified the chronological red → green → blue sequence while retaining the full `131072 / 131072` context/KV allocation.
 
 ## Source and artifacts
 
