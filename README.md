@@ -1,68 +1,79 @@
-# NInfer RTX 5080 — Qwen3.8-27B at true 128K on 16 GB
+# NInfer RTX 5080 — Qwen3.8-27B at true 128K + Vision on 16 GB
 
-This repository preserves and documents a validated NInfer configuration for running **Qwen3.8-27B** on a single **NVIDIA GeForce RTX 5080 16 GB** with a genuine **131,072-token context/KV capacity**.
+This repository documents a validated NInfer configuration for **Qwen3.8-27B** on one **RTX 5080 16 GB** with a genuine **131,072-token context/KV capacity**, Q4 KV, MTP-3 and Vision enabled.
 
-## Headline result
+Vision is now the recommended/default path. The original text-only 128K release remains preserved as the historical baseline.
 
-Final validated workload:
+## Recommended serving command
 
-- GPU: **RTX 5080 16 GB**
-- Model: **Qwen3.8-27B**
-- Main-model effective precision: **~3.95 BPW** (GGUF-comparable weighted storage figure)
-- Max context: **131,072**
-- KV capacity: **131,072**
-- KV dtype: **Q4**
-- Speculation: **MTP-3**
-- Prompt length: **118,001 tokens**
-- Prefill: **1,377.81 tok/s**
-- Decode: **71.51 tok/s**
-- GPU weights: **~12.64 GiB**
-- KV payload: **2.26 GiB**
-- Planned slack: **11.39 MiB**
-
-This was not a reduced-KV or short-context benchmark. The full 131,072-token KV capacity remained allocated during the 118,001-token test.
-
-## Important VRAM startup requirement
-
-This configuration is an **extremely tight 16 GB fit**. For reliable startup, the RTX 5080 should be effectively idle before launching NInfer.
-
-A validated clean-card `ninfer-serve` startup began with NVIDIA-SMI reporting:
-
-```text
-memory.total = 16303 MiB
-memory.used  = 1 MiB
-memory.free  = 15841 MiB
-```
-
-After loading the ~12.64 GiB weights and completing the required prewarms, NInfer reported:
-
-```text
-free before runtime reservation = 2624.56 MiB
-runtime reservation             = 2613.17 MiB
-planned slack                   = 11.39 MiB
-free after startup              = 10.56 MiB
-```
-
-The exact production server configuration successfully reached:
-
-```text
-ninfer-serve: listening on http://0.0.0.0:8080
-```
-
-with `131072 / 131072`, Q4 KV, MTP-3 and `--prefill-chunk 896` unchanged.
-
-Because the final margin is only about **11 MiB**, even modest competing GPU allocations can make startup fail. Before launching, check that no other process is using the GPU:
+Use `--vision-max-tokens 1792` as the safer default:
 
 ```bash
-nvidia-smi
-nvidia-smi --query-gpu=memory.total,memory.used,memory.free --format=csv,noheader,nounits
+./build/apps/ninfer-serve /path/to/model.ninfer \
+  --host 0.0.0.0 \
+  --port 8080 \
+  --model-id qwen3.8-27b \
+  --max-context 131072 \
+  --kv-capacity 131072 \
+  --prefill-chunk 896 \
+  --kv-dtype q4 \
+  --spec mtp \
+  --draft-tokens 3 \
+  --no-cuda-graph \
+  --max-concurrency 1 \
+  --vision \
+  --vision-max-tokens 1792
 ```
 
-Do not interpret “16 GB GPU” as sufficient by itself: the tested full-128K configuration assumes essentially the full usable framebuffer is available to NInfer at startup.
+The maximum validated Vision profile is `--vision-max-tokens 2048`. At 2048 the server measured:
 
-## Canonical validated release
+```text
+text_prefill       116.0127 MiB
+mtp_prefill        116.0127 MiB
+vision_encode      132.3142 MiB
+free after startup   8.56 MiB
+planned slack       10.08 MiB
+```
 
-The exact tested source is frozen at:
+Use a clean GPU for 2048. See [`docs/VISION_128K.md`](docs/VISION_128K.md) for details.
+
+## Validated result
+
+The Vision source was regression-tested with the exact historical 118,001-token corpus:
+
+| Metric | Original text release | Vision source |
+|---|---:|---:|
+| Prompt tokens | 118,001 | 118,001 |
+| Prefill | 1377.81 tok/s | 1375.16 tok/s |
+| Decode | 71.51 tok/s | 71.52 tok/s |
+| MTP acceptance | 44.74% | 44.74% |
+| Acceptance length | 2.31 | 2.31 |
+| KV capacity | 131072 | 131072 |
+
+No meaningful text-performance regression was observed.
+
+## Vision changes
+
+The validated Vision path adds four changes on top of the original true-128K result:
+
+1. Vision workspace/token budgeting is decoupled from text context.
+2. GDN prefill convolution temporaries are released earlier, recovering about 35 MiB of peak workspace.
+3. Vision weights are HostMapped so true 128K text KV and Vision coexist on 16 GB.
+4. Cached historical media is not charged repeatedly against the fresh-media preprocessing budget.
+
+Image understanding is empirically validated, including multi-image OpenWebUI history. Cached old images remain in the model prompt but no longer consume the fresh preprocessing cap again.
+
+Video input is supported by the frontend, but **video has not yet been empirically validated on the final 128K HostMapped Vision path**.
+
+## Source and artifacts
+
+Validated Vision source before merge to `main`:
+
+```text
+7c10db07ac8c5803f921b83603b707750652873e
+```
+
+It was merged to `main` through PR #1. The original immutable text-only release remains:
 
 ```text
 commit: 473dade56031852a7d96edef049d859da96a6df9
@@ -72,123 +83,59 @@ tag:    qwen3.8-27b-rtx5080-128k-v1
 Model artifact:
 
 ```text
-SHA256: c4a7e9ab593a7f42d58208fa0065d67a82d61921107686cc9f6ed1ec6b050e21
 bytes:  16461267456
+SHA256: c4a7e9ab593a7f42d58208fa0065d67a82d61921107686cc9f6ed1ec6b050e21
 ```
 
-Validated binary:
+Vision validation binaries:
 
 ```text
-SHA256: b38e987a16f7cdda3c5eee81b0ac821f9f2aad86f117b745401a9ef3b5c43012
+ninfer:       5ef4df2862ac5b2f63359cc86188a5f91636e54bd07d6417e6567c7a86076140
+ninfer-serve: 61dbffa243a54bf32db8c6f55f4b1db288c1ebcfe390dff50ec9a1ba7a2f7399
 ```
 
-The release tag remains on the exact source that produced the final benchmark. Documentation lives on later commits/branches so the tested state stays immutable.
+## Quantization profile
 
-## Quantization profile and BPW
+The text core is mixed Q3/Q4/Q5 groupwise, approximately **3.953 effective BPW**:
 
-The final text-model core is a mixed **Q3/Q4/Q5 groupwise** profile, not a predominantly-Q5 model.
+| Format | Share |
+|---|---:|
+| Q3G64_F16S | 42.42% |
+| Q4G64_F16S | 45.92% |
+| Q5G64_F16S | 11.57% |
+| BF16 / FP32 | ~0.10% |
 
-Approximate parameter-weighted distribution of the main text model:
+The 128K profile retains 24 GDN `value_z` tensors and 7 attention `gate_value` tensors in Q4, recovering about 210.625 MiB versus the heavier comparison artifact.
 
-| Format | Share of main-model parameters | Encoded storage |
-|---|---:|---:|
-| Q3G64_F16S | **42.42%** | 3.25 bpw |
-| Q4G64_F16S | **45.92%** | 4.25 bpw |
-| Q5G64_F16S | **11.57%** | 5.25 bpw |
-| BF16 / FP32 | ~0.10% | small norms/other tensors |
+## Clean-GPU requirement
 
-Main text-model accounting:
+A representative successful launch began with:
 
 ```text
-logical parameters:          26,895,998,464
-encoded main-model bytes:    13,289,938,944
-effective main-model BPW:    3.953
-
-quantized matrix parameters: 26,869,760,000
-quantized matrix bytes:      13,237,452,800
-weighted matrix BPW:         3.941
+memory.total = 16303 MiB
+memory.used  = 1 MiB
+memory.free  = 15841 MiB
 ```
 
-For public GGUF-style comparisons, **~3.95 BPW effective main-model quantization** is the appropriate headline figure. The full `.ninfer` artifact is larger because it also contains auxiliary/non-main-model data and should not be divided by the headline parameter count to infer quantization quality.
+Check before launch:
 
-The exact 128K recovery also restores the historical selective Q4 placements:
-
-- 24 GDN `value_z` tensors in Q4
-- 7 attention `gate_value` tensors in Q4
-- roughly **210.625 MiB** GPU weight-memory saving versus the heavier comparison artifact
-
-## What made 128K fit
-
-The final solution combined three pieces:
-
-1. **Recovered large-T Q4 attention path**
-   - `T <= 256`: known-safe legacy/native route
-   - `T >= 257`: independent Q4 RowSplit tensor-core MMA
-   - retained output-stride correctness fix
-
-2. **Correct mixed Q3/Q4/Q5 weight profile**
-   - ~3.95 BPW effective main-model quantization
-   - 24 GDN `value_z` tensors in Q4
-   - 7 attention `gate_value` tensors in Q4
-   - roughly **210.625 MiB** recovered GPU weight memory in the 128K profile transition
-
-3. **128K runtime-memory recovery**
-   - combined persistent + workspace device backing
-   - full prefill hidden tensor moved to workspace
-   - only the final hidden column kept persistently
-   - first-use prewarms for critical Q4 paths
-
-## Why this result is interesting
-
-The target was not merely to squeeze the model into memory. The goal was to keep a useful ~3.95-BPW mixed quantization profile while simultaneously retaining:
-
-- full binary 128K capacity,
-- high long-prompt prefill throughput,
-- useful decode speed,
-- deterministic correctness,
-- reproducible source/model/binary hashes.
-
-The final 118K benchmark was essentially identical to the earlier historical optimized result:
-
-| Result | Prefill | Decode |
-|---|---:|---:|
-| Earlier baseline | 1235.03 tok/s | — |
-| Historical optimized | 1371.10 tok/s | — |
-| Historical B133 | 1377.66 tok/s | 70.24 tok/s |
-| **Final validated** | **1377.81 tok/s** | **71.51 tok/s** |
-
-Final prefill improvement over the older baseline: **+11.56%**.
+```bash
+nvidia-smi
+nvidia-smi --query-gpu=memory.total,memory.used,memory.free --format=csv,noheader,nounits
+```
 
 ## Documentation
 
-- [`docs/REPRODUCIBILITY.md`](docs/REPRODUCIBILITY.md) — end-to-end reproduction path
+- [`docs/VISION_128K.md`](docs/VISION_128K.md) — Vision serving profiles and validation
+- [`docs/REPRODUCIBILITY.md`](docs/REPRODUCIBILITY.md) — end-to-end reproduction
 - [`docs/TECHNICAL_DEEP_DIVE.md`](docs/TECHNICAL_DEEP_DIVE.md) — architecture and optimization details
-- [`docs/FAILURES_AND_LESSONS.md`](docs/FAILURES_AND_LESSONS.md) — dead ends and why they failed
-- [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) — validation results and comparisons
-- [`docs/MEMORY_PROFILE.md`](docs/MEMORY_PROFILE.md) — how the 16 GB fit was recovered
-- [`docs/VALIDATED_MANIFEST.md`](docs/VALIDATED_MANIFEST.md) — exact immutable hashes and settings
-- [`docs/HISTORY.md`](docs/HISTORY.md) — chronological engineering journey
-- [`docs/YOUTUBE_SCRIPT.md`](docs/YOUTUBE_SCRIPT.md) — video script for sharing the project
-
-## Reproduction philosophy
-
-For a credible reproduction, publish more than a tok/s screenshot. Record:
-
-- GPU model and VRAM
-- OS / driver / CUDA / compiler
-- source commit
-- model SHA256
-- binary SHA256
-- effective main-model BPW and how it was calculated
-- prompt SHA256/token count
-- max context and KV capacity
-- KV dtype
-- MTP settings
-- prefill chunk
-- cold/warm run status
+- [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) — results and comparisons
+- [`docs/MEMORY_PROFILE.md`](docs/MEMORY_PROFILE.md) — the 16 GB memory fit
+- [`docs/VALIDATED_MANIFEST.md`](docs/VALIDATED_MANIFEST.md) — exact hashes and settings
+- [`docs/HISTORY.md`](docs/HISTORY.md) — engineering history
 
 A result should not be described as “true 128K” unless both max context and KV capacity are actually **131072**.
 
 ## Upstream attribution
 
-This project builds on NInfer and the Qwen3.8-27B / DFlash2 ecosystem. Preserve upstream copyright and license notices when redistributing source, binaries, patches, or converted artifacts. Verify all relevant licenses before publishing model files or binary releases.
+This project builds on NInfer and the Qwen3.8-27B / DFlash2 ecosystem. Preserve upstream copyright and license notices when redistributing source, binaries, patches or converted artifacts. Verify all relevant licenses before publishing model files or binary releases.
