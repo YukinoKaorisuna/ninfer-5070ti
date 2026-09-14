@@ -1361,9 +1361,9 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 tap.capture_positions(positions, s);
             }
 
-            Tensor xf = prefill_hidden_.data != nullptr
-                            ? matrix_window(prefill_hidden_, len)
-                            : work_.alloc(DType::BF16, {kCfg.hidden, len});
+            // Full-chunk normalized hidden is temporary and belongs in the
+            // prefill workspace. Only its final column is retained persistently.
+            Tensor xf = work_.alloc(DType::BF16, {kCfg.hidden, len});
             ops::rmsnorm(x, *final_norm_, kCfg.rms_eps, true, xf, s);
 
             if (is_last) {
@@ -1471,6 +1471,16 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 const Tensor checkpoint_hidden = xf.slice(1, len - 1, 1);
                 CUDA_CHECK(cudaMemcpyAsync(rewrite_checkpoint_hidden_output_->data,
                                            checkpoint_hidden.data, checkpoint_hidden.bytes(),
+                                           cudaMemcpyDeviceToDevice, s));
+            }
+
+            if (is_last) {
+                require_tensor_shape(prefill_hidden_, DType::BF16, {kCfg.hidden, 1},
+                                     "persistent prefill hidden tail");
+                const Tensor final_prefill_hidden = xf.slice(1, len - 1, 1);
+                CUDA_CHECK(cudaMemcpyAsync(prefill_hidden_.data,
+                                           final_prefill_hidden.data,
+                                           final_prefill_hidden.bytes(),
                                            cudaMemcpyDeviceToDevice, s));
             }
         }

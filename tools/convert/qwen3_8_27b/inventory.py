@@ -35,9 +35,40 @@ FULL_ATTENTION_LAYERS = qwen3_6_inventory.FULL_ATTENTION_LAYERS
 GDN_LAYERS = qwen3_6_inventory.GDN_LAYERS
 RESOURCE_SPECS = qwen3_6_inventory.RESOURCE_SPECS
 
+# Historical RTX 5080 128K production composition validated through Batch 105.
+Q4_VALUE_Z_LAYERS = frozenset({
+    57, 58, 61, 56, 60, 53, 50, 48, 45, 42, 46, 49,
+    37, 54, 9, 0, 30, 16, 34, 41, 17, 20, 18, 40,
+})
+Q4_GATE_VALUE_LAYERS = frozenset({59, 35, 63, 51, 55, 39, 19})
+
+
+def _text_layer_index(name: str) -> int | None:
+    prefix = "text/layers/"
+    if not name.startswith(prefix):
+        return None
+    rest = name[len(prefix):]
+    layer_text, sep, _ = rest.partition("/")
+    if not sep:
+        return None
+    return int(layer_text)
+
 
 def _w8_vocabulary_endpoint(spec: TensorSpec) -> TensorSpec:
-    # RTX 5080 16 GB profile v3.
+    # RTX 5080 16 GB profile v3 plus the historically validated 128K mixed-Q4 parents.
+    layer = _text_layer_index(spec.name)
+    if (
+        layer in Q4_GATE_VALUE_LAYERS
+        and spec.name.endswith("/attention/gate_value")
+    ):
+        return qwen3_6_inventory.tensor_spec(spec.name, spec.shape, Q4)
+
+    if (
+        layer in Q4_VALUE_Z_LAYERS
+        and spec.name.endswith("/gdn/value_z")
+    ):
+        return qwen3_6_inventory.tensor_spec(spec.name, spec.shape, Q4)
+
     if spec.name == "text/token_embedding":
         return qwen3_6_inventory.tensor_spec(spec.name, spec.shape, Q5)
 
