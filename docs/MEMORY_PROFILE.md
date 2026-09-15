@@ -78,7 +78,7 @@ MTP_DRAFT_TOKENS=3
 VISION=enabled
 ```
 
-Image tests confirm the HostMapped path is usable. It can incur PCIe traffic versus fully GPU-resident Vision weights, but it makes true 128K + Vision possible on the 16 GB card.
+Image and video tests confirm the HostMapped path is usable. It can incur PCIe traffic versus fully GPU-resident Vision weights, but it makes true 128K + Vision possible on the 16 GB card.
 
 ## Vision token profiles
 
@@ -86,16 +86,28 @@ Measured Vision workspace:
 
 ```text
 vision-max-tokens 1024 -> vision_encode  66.1580 MiB
+vision-max-tokens 1792 -> vision_encode 115.7751 MiB
 vision-max-tokens 2048 -> vision_encode 132.3142 MiB
 ```
 
-At 1024, Vision workspace remains below the 116 MiB text-prefill peak. At 2048, Vision becomes the workspace peak.
+At 1024, Vision workspace remains below the 116 MiB text-prefill peak. At 1792, Vision and text-prefill workspace are effectively the same size. At 2048, Vision becomes the workspace peak.
 
-### Recommended profile
+### Recommended validated profile: 1792
 
-Use `--vision-max-tokens 1792` as the safer default. It offers more visual detail than 1024 while retaining more startup margin than the maximum profile.
+At `--vision-max-tokens 1792`:
 
-### Maximum validated profile
+```text
+text_prefill       116.0127 MiB
+mtp_prefill        116.0127 MiB
+vision_encode      115.7751 MiB
+free after weights   2.56 GiB
+free after startup   26.56 MiB
+planned slack        28.88 MiB
+```
+
+This profile retains substantially more startup margin than 2048 while keeping the full `131072 / 131072` context/KV allocation. Deterministic image and video requests both passed at this setting.
+
+### Maximum validated profile: 2048
 
 At `--vision-max-tokens 2048`:
 
