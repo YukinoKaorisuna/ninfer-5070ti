@@ -49,7 +49,7 @@ The text core is a mixed Q3/Q4/Q5 groupwise profile at approximately 3.953 effec
 
 ## Recommended true-128K Vision server
 
-Use `1792` Vision tokens as the safer default:
+Use `1792` Vision tokens as the recommended validated default:
 
 ```bash
 ./build/apps/ninfer-serve /path/to/model.ninfer \
@@ -66,6 +66,15 @@ Use `1792` Vision tokens as the safer default:
   --max-concurrency 1 \
   --vision \
   --vision-max-tokens 1792
+```
+
+Measured startup envelope at 1792:
+
+```text
+vision_encode workspace  115.7751 MiB
+free after weights         2.56 GiB
+free after startup         26.56 MiB
+planned slack              28.88 MiB
 ```
 
 The maximum validated Vision setting is `--vision-max-tokens 2048`.
@@ -96,7 +105,7 @@ nvidia-smi
 nvidia-smi --query-gpu=memory.total,memory.used,memory.free --format=csv,noheader,nounits
 ```
 
-The 2048 profile is extremely tight; even a small competing GPU allocation can make startup fail.
+The 2048 profile is extremely tight; even a small competing GPU allocation can make startup fail. The recommended 1792 profile provides materially more startup margin while keeping full `131072 / 131072` text context/KV.
 
 ## True 128K definition
 
@@ -148,19 +157,59 @@ MTP acceptance length:    2.31 tok/round
 
 No meaningful text-path regression was observed.
 
-## Vision acceptance
+## Image acceptance at 1792
+
+A deterministic 512×256 PNG was generated with a red left half and blue right half. The server correctly returned that the left half was red and the right half blue.
+
+Repeated hardware validation reported approximately:
+
+```text
+prompt:          211 tokens
+prefill:         682.8-685.8 tok/s
+decode:          118.1-118.3 tok/s
+ttft:            719-725 ms
+MTP:             3.10 tok/round (70.0%)
+```
+
+This validates the image acquisition, preprocessing, HostMapped Vision encode and generation path while retaining full `131072 / 131072` text context/KV.
+
+## Video acceptance at 1792
+
+Install `ffmpeg` on the validation host and generate a deterministic six-second MP4 containing three two-second solid-color scenes in chronological order: red, green, blue.
+
+Send the video through the OpenAI-compatible chat endpoint with thinking disabled and constrain the response to the three color names. The validated response was exactly:
+
+```text
+red, green, blue
+```
+
+Observed request metrics:
+
+```text
+finish reason:   stop_token
+prompt:          572 tokens
+generated:       6 tokens
+prefill:         1721.9 tok/s
+decode:          97.1 tok/s
+ttft:            1111 ms
+wall:            1.16 s
+MTP:             4.00 tok/round (100.0%)
+```
+
+This is an end-to-end functional validation of video acquisition, preprocessing, Vision encode and generation on the final true-128K HostMapped configuration. It is not a broad video-quality benchmark.
+
+## Multi-image history acceptance
 
 Validated on the final HostMapped Vision path:
 
-- image input through the OpenAI-compatible server;
-- ordinary photos and small-text/receipt input;
+- ordinary image input through the OpenAI-compatible server;
+- photos and small-text/receipt input;
 - OpenWebUI multi-image history;
 - cached historical media plus a newly uploaded image;
+- deterministic video input;
 - full 131072 text context/KV retained.
 
 Observed cache patterns included `media_cache=1/1/0` and `media_cache=2/1/0`, proving old cached images were no longer charged repeatedly against the fresh preprocessing cap.
-
-Video input is supported by the frontend but has not yet been empirically validated on this final 128K HostMapped configuration.
 
 ## Validation hashes
 
