@@ -128,6 +128,7 @@ CudaEventTimer::CudaEventTimer(const DeviceContext& ctx) : stream_(ctx.stream) {
     ctx.bind_to_current_thread();
 
     cudaEvent_t start = nullptr;
+    cudaEvent_t stop  = nullptr;
     cudaError_t err   = cudaEventCreate(&start);
     if (err != cudaSuccess) {
         throw std::runtime_error(cuda_error_message("cudaEventCreate(start) failed", err));
