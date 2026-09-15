@@ -8,6 +8,7 @@ This file records both the immutable original text-only 128K release and the lat
 repository: toddballinger/ninfer-5080
 validated Vision commit: 7c10db07ac8c5803f921b83603b707750652873e
 Vision branch: qwen3.8-27b-rtx5080-128k-vision
+Vision release tag: qwen3.8-27b-rtx5080-128k-vision-v1
 merged to main via PR #1
 ```
 
@@ -95,6 +96,9 @@ MAX_CONCURRENCY=1
 ```text
 VISION=on
 VISION_MAX_TOKENS=1792
+VISION_ENCODE_WORKSPACE=115.7751_MiB
+FREE_AFTER_STARTUP=26.56_MiB
+PLANNED_SLACK=28.88_MiB
 ```
 
 Maximum validated Vision profile:
@@ -131,15 +135,52 @@ MTP_ACCEPTANCE_LENGTH=2.31
 
 No meaningful text-path regression was observed.
 
-## Vision validation status
+## Deterministic image validation at 1792
 
 ```text
 IMAGE_INPUT=VALIDATED
+IMAGE_TEST=512x256_RED_LEFT_BLUE_RIGHT
+IMAGE_RESULT=LEFT_RED_RIGHT_BLUE
+PROMPT_TOKENS=211
+PREFILL_TOK_S=682.8
+DECODE_TOK_S=118.1
+TTFT_MS=725
+MTP_TOK_PER_ROUND=3.10
+MTP_ACCEPTANCE=70.0%
+```
+
+A previous run of the same deterministic image test measured 685.8 tok/s prefill and 719 ms TTFT; the repeated result confirms the functional path.
+
+## Deterministic video validation at 1792
+
+A six-second MP4 containing red, then green, then blue scenes was generated locally with ffmpeg and sent through the OpenAI-compatible server with thinking disabled.
+
+```text
+VIDEO_ON_FINAL_128K_HOSTMAPPED_PATH=VALIDATED
+VIDEO_EXPECTED=red,green,blue
+VIDEO_RESULT=red,green,blue
+FINISH_REASON=stop_token
+PROMPT_TOKENS=572
+GENERATED_TOKENS=6
+PREFILL_TOK_S=1721.9
+DECODE_TOK_S=97.1
+TTFT_MS=1111
+WALL_S=1.16
+MTP_TOK_PER_ROUND=4.00
+MTP_ACCEPTANCE=100.0%
+```
+
+This is an end-to-end functional validation of video acquisition, preprocessing, Vision encode and generation. It is not a broad video-quality benchmark.
+
+## Multi-image history validation
+
+```text
 OPENWEBUI_MULTI_IMAGE_HISTORY=VALIDATED
 CACHED_MEDIA_FRESH_BUDGET_FIX=VALIDATED
-VIDEO_FRONTEND_SUPPORT=PRESENT
-VIDEO_ON_FINAL_128K_HOSTMAPPED_PATH=NOT_YET_EMPIRICALLY_VALIDATED
+OBSERVED_MEDIA_CACHE_PATTERNS=1/1/0,2/1/0
 ```
+
+Cached historical media remains in the model prompt but is not charged repeatedly against the fresh preprocessing budget.
 
 ## Acceptance checks
 
@@ -149,8 +190,11 @@ TRUE_131072_KV=PASS
 Q4_KV=PASS
 MTP3=PASS
 118001_TOKEN_REGRESSION=PASS
+VISION_1792_STARTUP=PASS
 VISION_2048_STARTUP=PASS
 IMAGE_REQUEST=PASS
+VIDEO_REQUEST=PASS
+VIDEO_SEMANTIC_RESULT=PASS
 MULTI_IMAGE_HISTORY=PASS
 OOM_ERROR=NO
 NONFINITE_WARNING=NO
