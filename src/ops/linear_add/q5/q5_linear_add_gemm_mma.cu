@@ -18,6 +18,9 @@ using MmaR64C16Schedule =
 using MmaR64C24Schedule =
     Q5RowSplitMmaGemmSchedule<64, 24, 64, 16, 8, 2, 2, Q5FragmentPipeline::Serial, Cache::cg,
                               Cache::cg, Q5ScaleLoad::Pair32>;
+using MmaR64C64Schedule =
+    Q5RowSplitMmaGemmSchedule<64, 64, 64, 32, 32, 2, 3, Q5FragmentPipeline::PingPong, Cache::ca,
+                              Cache::ca, Q5ScaleLoad::Scalar16>;
 using MmaR64C32S3Schedule =
     Q5RowSplitMmaGemmSchedule<64, 32, 64, 16, 16, 3, 2, Q5FragmentPipeline::Serial, Cache::cg,
                               Cache::cg, Q5ScaleLoad::Pair32>;
@@ -74,6 +77,11 @@ void q5_linear_add_mma_r64_c16_launch(const Tensor& x, const Weight& w, Tensor& 
 void q5_linear_add_mma_r64_c24_launch(const Tensor& x, const Weight& w, Tensor& residual_out,
                                       cudaStream_t stream) {
     launch_route<MmaR64C24Schedule>(x, w, residual_out, stream);
+}
+
+void q5_linear_add_mma_r64_c64_launch(const Tensor& x, const Weight& w, Tensor& residual_out,
+                                      cudaStream_t stream) {
+    launch_route<MmaR64C64Schedule>(x, w, residual_out, stream);
 }
 
 void q5_linear_add_mma_r64_c32_s3_launch(const Tensor& x, const Weight& w, Tensor& residual_out,
