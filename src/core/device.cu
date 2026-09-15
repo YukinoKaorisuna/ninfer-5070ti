@@ -51,10 +51,7 @@ DeviceContext::DeviceContext(int device_id) : device(device_id) {
     if (count <= 0) { throw std::runtime_error("no CUDA devices available"); }
     if (device_id < 0 || device_id >= count) { throw std::runtime_error("invalid CUDA device id"); }
 
-    err = cudaSetDevice(device_id);
-    if (err != cudaSuccess) {
-        throw std::runtime_error(cuda_error_message("cudaSetDevice failed", err));
-    }
+    bind_to_current_thread();
 
     err = cudaGetDeviceProperties(&props, device_id);
     if (err != cudaSuccess) {
@@ -81,9 +78,7 @@ DeviceContext::DeviceContext(int device_id) : device(device_id) {
 }
 
 DeviceContext::~DeviceContext() {
-    if (stream != nullptr || load_stream != nullptr) {
-        log_cuda_error("cudaSetDevice", cudaSetDevice(device));
-    }
+    if (stream != nullptr || load_stream != nullptr) { bind_to_current_thread_noexcept(); }
     destroy_stream(load_stream);
     destroy_stream(stream);
 }
@@ -98,9 +93,7 @@ DeviceContext::DeviceContext(DeviceContext&& other) noexcept
 DeviceContext& DeviceContext::operator=(DeviceContext&& other) noexcept {
     if (this == &other) { return *this; }
 
-    if (stream != nullptr || load_stream != nullptr) {
-        log_cuda_error("cudaSetDevice", cudaSetDevice(device));
-    }
+    if (stream != nullptr || load_stream != nullptr) { bind_to_current_thread_noexcept(); }
     destroy_stream(load_stream);
     destroy_stream(stream);
 
@@ -114,6 +107,17 @@ DeviceContext& DeviceContext::operator=(DeviceContext&& other) noexcept {
     return *this;
 }
 
+void DeviceContext::bind_to_current_thread() const {
+    const cudaError_t err = cudaSetDevice(device);
+    if (err != cudaSuccess) {
+        throw std::runtime_error(cuda_error_message("cudaSetDevice failed", err));
+    }
+}
+
+void DeviceContext::bind_to_current_thread_noexcept() const noexcept {
+    log_cuda_error("cudaSetDevice", cudaSetDevice(device));
+}
+
 int DeviceContext::sm() const noexcept { return props.major * 10 + props.minor; }
 
 std::size_t DeviceContext::total_vram() const noexcept { return props.totalGlobalMem; }
@@ -121,14 +125,11 @@ std::size_t DeviceContext::total_vram() const noexcept { return props.totalGloba
 void DeviceContext::synchronize() const { CUDA_CHECK(cudaStreamSynchronize(stream)); }
 
 CudaEventTimer::CudaEventTimer(const DeviceContext& ctx) : stream_(ctx.stream) {
-    cudaError_t err = cudaSetDevice(ctx.device);
-    if (err != cudaSuccess) {
-        throw std::runtime_error(cuda_error_message("cudaSetDevice(timer) failed", err));
-    }
+    ctx.bind_to_current_thread();
 
     cudaEvent_t start = nullptr;
     cudaEvent_t stop  = nullptr;
-    err               = cudaEventCreate(&start);
+    cudaError_t err   = cudaEventCreate(&start);
     if (err != cudaSuccess) {
         throw std::runtime_error(cuda_error_message("cudaEventCreate(start) failed", err));
     }

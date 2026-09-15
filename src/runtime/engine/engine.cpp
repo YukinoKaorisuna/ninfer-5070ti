@@ -148,17 +148,18 @@ public:
                 using Instance =
                     typename std::remove_reference_t<decltype(target_ptr)>::element_type;
                 if constexpr (std::is_same_v<Instance, targets::Qwen3_5_9BInstance>) {
-                    return std::make_unique<Executor9>(*target_ptr, options);
+                    return std::make_unique<Executor9>(*target_ptr, device, options);
                 } else if constexpr (std::is_same_v<Instance, targets::Qwen3_6_27BInstance>) {
-                    return std::make_unique<Executor27>(*target_ptr, options);
+                    return std::make_unique<Executor27>(*target_ptr, device, options);
                 } else {
-                    return std::make_unique<Executor35>(*target_ptr, options);
+                    return std::make_unique<Executor35>(*target_ptr, device, options);
                 }
             },
             active);
     }
 
     ~Impl() noexcept {
+        device.bind_to_current_thread_noexcept();
         executor.emplace<std::monostate>();
         try {
             device.synchronize();
