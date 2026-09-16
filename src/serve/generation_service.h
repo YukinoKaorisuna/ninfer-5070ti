@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -75,6 +76,7 @@ struct PreparedRequest {
     bool tool_capable                      = false;
     std::size_t tool_name_max_length       = 64;
     bool enable_thinking                   = true;
+    std::optional<std::uint32_t> reasoning_budget;
     bool preserve_thinking                 = false;
     bool preserve_thinking_semantic_change = false;
     std::shared_ptr<RequestLifetime> lifetime;

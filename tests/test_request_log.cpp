@@ -55,6 +55,7 @@ int main() {
     options.enable_vision                  = false;
     options.allow_prefix_reuse             = false;
     options.preserve_thinking              = true;
+    options.default_thinking_budget         = 2048;
     options.sampling_overrides.temperature = 0.6F;
     options.startup_argv = {"ninfer-serve", options.artifact_path, "--api-key", "<redacted>"};
 
@@ -141,6 +142,8 @@ int main() {
         check(server.at("engine").at("prefix_reuse") == false, "prefix-reuse state missing");
     failures += check(server.at("server").at("default_preserve_thinking") == true,
                       "server preserve-thinking default missing");
+    failures += check(server.at("server").at("default_thinking_budget") == 2048,
+                      "server default thinking budget missing");
     failures +=
         check(server.at("sampling_defaults").at("thinking").at("temperature") == 1.0 &&
                   server.at("sampling_defaults").at("non_thinking").at("presence_penalty") == 1.5,
@@ -218,6 +221,75 @@ int main() {
                           started.at("preparation_seconds").at("cache_misses") == 1,
                       "request-scoped media preparation diagnostics missing");
 
+    GenerationRequest server_budget_request = request;
+
+    PreparedRequest server_budget_prepared;
+    server_budget_prepared.enable_thinking = true;
+    server_budget_prepared.reasoning_budget = 2048;
+    server_budget_prepared.preserve_thinking = true;
+    server_budget_prepared.preserve_thinking_semantic_change = false;
+    server_budget_prepared.sampling = prepared.sampling;
+
+    const RequestLogContext server_budget_context =
+        make_request_log_context(
+            9,
+            "openai_chat_completions",
+            server_budget_request,
+            server_budget_prepared);
+
+    const Json server_budget_started =
+        Json::parse(
+            format_request_start_json(
+                "serve-test",
+                2250,
+                server_budget_context));
+
+    failures += check(
+        server_budget_started.at("request").at("enable_thinking") == true &&
+            server_budget_started.at("request").at("reasoning_budget") == 2048 &&
+            server_budget_started.at("request").at("reasoning_budget_source") ==
+                "server_default",
+        "resolved server-default reasoning budget missing");
+
+    failures += check(
+        format_request_start(server_budget_context)
+                    .find("thinking=on") != std::string::npos &&
+            format_request_start(server_budget_context)
+                    .find("reasoning_budget=2048(server-default)") !=
+                std::string::npos,
+        "human request log omits server-default reasoning budget");
+
+    GenerationRequest client_budget_request = request;
+    client_budget_request.reasoning_budget = 64;
+
+    PreparedRequest client_budget_prepared;
+    client_budget_prepared.enable_thinking = true;
+    client_budget_prepared.reasoning_budget = 64;
+    client_budget_prepared.preserve_thinking = true;
+    client_budget_prepared.preserve_thinking_semantic_change = false;
+    client_budget_prepared.sampling = prepared.sampling;
+
+    const RequestLogContext client_budget_context =
+        make_request_log_context(
+            10,
+            "openai_chat_completions",
+            client_budget_request,
+            client_budget_prepared);
+
+    const Json client_budget_started =
+        Json::parse(
+            format_request_start_json(
+                "serve-test",
+                2300,
+                client_budget_context));
+
+    failures += check(
+        client_budget_started.at("request").at("enable_thinking") == true &&
+            client_budget_started.at("request").at("reasoning_budget") == 64 &&
+            client_budget_started.at("request").at("reasoning_budget_source") ==
+                "client",
+        "resolved client reasoning budget missing");
+
     ApiError preparation_error;
     preparation_error.status = 400;
     preparation_error.type   = "invalid_request_error";
@@ -251,6 +323,7 @@ int main() {
     GenerationOutcome outcome;
     outcome.prompt_tokens                       = 401;
     outcome.completion_tokens                   = 1024;
+    outcome.reasoning_tokens                    = 777;
     outcome.finish_reason                       = ninfer::FinishReason::OutputLimit;
     outcome.metrics.prepare_seconds             = 0.1234567890123;
     outcome.metrics.ttft_seconds                = 0.3580246791357;
@@ -272,6 +345,8 @@ int main() {
     failures +=
         check(done.at("result").at("finish_reason") == "output_limit", "finish reason missing");
     failures += check(done.at("result").at("prompt_tokens") == 401, "prompt tokens missing");
+    failures += check(done.at("result").at("reasoning_tokens") == 777,
+                      "reasoning token count missing");
     failures += check(done.at("result").at("computed_prefill_tokens") == 300,
                       "computed prefill tokens missing");
     failures += check(done.at("result").at("prefix_reuse_path") == "restore_turn_checkpoint",
@@ -305,6 +380,9 @@ int main() {
 
     failures += check(format_request_start(context).find("thinking=off") != std::string::npos,
                       "human request log omits resolved thinking mode");
+    failures += check(
+        format_request_done(context, outcome).find("reasoning=777") != std::string::npos,
+        "human request completion log omits reasoning token count");
     failures +=
         check(format_request_start(context).find("preserve_thinking=on") != std::string::npos,
               "human request log omits preserve-thinking mode");

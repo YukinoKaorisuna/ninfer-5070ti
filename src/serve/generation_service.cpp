@@ -280,6 +280,7 @@ PreparedRequest GenerationService::prepare(const GenerationRequest& request,
     const ResolvedPromptSemantics semantics =
         resolve_prompt_semantics(request, options_, prompt_capabilities_);
     prepared.enable_thinking                   = semantics.enable_thinking;
+    prepared.reasoning_budget                  = semantics.reasoning_budget;
     prepared.preserve_thinking                 = semantics.preserve_thinking;
     prepared.preserve_thinking_semantic_change = request.preserve_thinking_semantic_change;
     const bool request_has_media               = request.media_item_count() != 0;
