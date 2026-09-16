@@ -158,3 +158,17 @@ Final exact 118,001-token acceptance: **1380.61 tok/s prefill**, **71.57 tok/s d
 Vision 2048 acceptance also passed deterministic image, video, cached-history (`1/1/0` and `2/1/0`) and strict no-OOM validation. Startup remained intentionally tight at **8.56 MiB free / 10.08 MiB planned slack**.
 
 Full record: `docs/RELEASE_QWEN3.8_27B_RTX5080_V1.2.md`.
+
+---
+
+## Qwen3.8-27B RTX 5080 v1.3 final validation
+
+Validated runtime code head: `a7c6bd78d55da1ab23b6d91fdcd1731b6dc69e4f`
+
+v1.3 preserves the validated **131,072 context / 131,072 Q4 KV / MTP-3 / Vision-2048** RTX 5080 profile while adding corrected Q4 strided-output handling and a server default thinking budget.
+
+Combined v1.3 live validation passed with a three-request MTP sanity average of **84.7 tok/s decode**, **40.47% MTP acceptance** and **2.213 tok/round**. Client `reasoning_budget=64` and server-default `reasoning_budget=2048` resolution both passed.
+
+The exact v1.2 118,001-token long-context and deterministic Vision/OOM validation remains preserved in the v1.2 release record.
+
+Full record: `docs/RELEASE_QWEN3.8_27B_RTX5080_V1.3.md`.
