@@ -48,6 +48,8 @@ q36::DecoderStateSpec decoder_spec(ninfer::DType dtype, bool mtp) {
         .attention_head_dim        = 64,
         .kv_dtype                  = dtype,
         .kv_quant_group            = dtype == ninfer::DType::I8 ? q36::kKvQuantGroup : 0,
+        .mtp_kv_dtype              = dtype,
+        .mtp_kv_quant_group        = dtype == ninfer::DType::I8 ? q36::kKvQuantGroup : 0,
         .enable_mtp                = mtp,
         .text_physical_page_groups = 5,
         .mtp_physical_page_groups  = mtp ? 4U : 0U,
@@ -122,9 +124,11 @@ void test_round_layout() {
     expect(round.mtp.has_value() && round.mtp->draft_tokens.shape[0] == 5 &&
                round.mtp->target_input_ids.shape[0] == 6,
            "MTP prefill scratch shapes");
-    expect(round.logits.region.offset < exact_prefill.region.offset &&
-               exact_prefill.region.offset < round.mtp->draft_tokens.region.offset,
-           "exact prefill extension retains established round-region order");
+    expect(exact_prefill.region.offset < round.mtp->draft_tokens.region.offset,
+           "exact prefill extension precedes completed MTP scratch");
+    expect(round.mtp_decode.has_value() &&
+               round.logits.region.offset == round.mtp_decode->target_logits.region.offset,
+           "single-lane MTP step logits alias target-verification logits");
     expect(round.mtp.has_value() && round.mtp->position.shape[0] == 1,
            "MTP prefill scratch is explicit");
     expect(round.mtp_decode.has_value() && round.mtp_decode->alignment_ids.shape[0] == 6 &&
