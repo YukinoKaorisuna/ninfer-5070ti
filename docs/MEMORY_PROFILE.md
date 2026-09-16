@@ -146,3 +146,15 @@ nvidia-smi --query-gpu=memory.total,memory.used,memory.free --format=csv,noheade
 ```
 
 At this utilization level, tens of MiB are material: they determine whether full `131072 / 131072` plus Vision starts or fails during runtime reservation.
+
+---
+
+## Qwen3.8-27B RTX 5080 v1.2 final validation
+
+Validated code head: `dd2cb0341c321f8a808a6ed75f0a53225983f718`
+
+Final exact 118,001-token acceptance: **1380.61 tok/s prefill**, **71.57 tok/s decode**, **44.74% MTP acceptance**, **2.31 tok/round**, with full **131,072 context / 131,072 Q4 KV**.
+
+Vision 2048 acceptance also passed deterministic image, video, cached-history (`1/1/0` and `2/1/0`) and strict no-OOM validation. Startup remained intentionally tight at **8.56 MiB free / 10.08 MiB planned slack**.
+
+Full record: `docs/RELEASE_QWEN3.8_27B_RTX5080_V1.2.md`.
