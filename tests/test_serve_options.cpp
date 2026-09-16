@@ -66,6 +66,33 @@ int main() {
                   resolve_public_model_id(model_alias, "artifact-model") == "deployment-alias",
               "explicit model id did not override the artifact identity");
 
+    const ServeOptions thinking_budget =
+        parse({"ninfer-serve",
+               "model.ninfer",
+               "--default-thinking-budget",
+               "2048"});
+
+    failures += check(
+        thinking_budget.default_thinking_budget == 2048,
+        "--default-thinking-budget did not preserve its value");
+
+    bool zero_thinking_budget_rejected = false;
+
+    try {
+        (void)parse({
+            "ninfer-serve",
+            "model.ninfer",
+            "--default-thinking-budget",
+            "0"
+        });
+    } catch (const std::invalid_argument&) {
+        zero_thinking_budget_rejected = true;
+    }
+
+    failures += check(
+        zero_thinking_budget_rejected,
+        "zero --default-thinking-budget was accepted");
+
     bool empty_model_id_rejected = false;
     try {
         (void)parse({"ninfer-serve", "model.ninfer", "--model-id", ""});

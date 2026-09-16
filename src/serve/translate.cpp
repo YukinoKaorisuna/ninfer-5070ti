@@ -101,70 +101,136 @@ std::vector<std::string> effective_tool_jsons(const GenerationRequest& request) 
 
 } // namespace
 
-ResolvedPromptSemantics resolve_prompt_semantics(const GenerationRequest& request,
-                                                 const ServeOptions& server,
-                                                 const ninfer::PromptCapabilities& capabilities) {
-    ResolvedPromptSemantics result{
-        .enable_thinking   = request.enable_thinking.value_or(server.enable_thinking),
-        .reasoning_effort  = std::nullopt,
-        .preserve_thinking = request.preserve_thinking.value_or(server.preserve_thinking),
-    };
-    if (!request.reasoning_effort) { return result; }
+ResolvedPromptSemantics resolve_prompt_semantics(
+    const GenerationRequest& request,
+    const ServeOptions& server,
+    const ninfer::PromptCapabilities& capabilities) {
 
-    const RequestedReasoningEffort requested = *request.reasoning_effort;
-    const bool enables_thinking              = requested != RequestedReasoningEffort::None;
-    if (request.enable_thinking && *request.enable_thinking != enables_thinking) {
-        invalid_prompt_option("reasoning effort conflicts with enable_thinking",
-                              request.reasoning_effort_param, "conflicting_template_option");
+    ResolvedPromptSemantics result{
+        .enable_thinking =
+            request.enable_thinking.value_or(server.enable_thinking),
+        .reasoning_effort = std::nullopt,
+        .reasoning_budget = std::nullopt,
+        .preserve_thinking =
+            request.preserve_thinking.value_or(server.preserve_thinking),
+    };
+
+    const auto resolve_budget = [&]() {
+
+        if (request.reasoning_budget &&
+            !result.enable_thinking) {
+
+            invalid_prompt_option(
+                "reasoning_budget cannot be combined with disabled thinking",
+                "reasoning_budget",
+                "conflicting_template_option");
+        }
+
+        if (!result.enable_thinking) {
+            result.reasoning_budget.reset();
+            return;
+        }
+
+        if (request.reasoning_budget) {
+            result.reasoning_budget =
+                request.reasoning_budget;
+        } else {
+            result.reasoning_budget =
+                server.default_thinking_budget;
+        }
+    };
+
+    if (!request.reasoning_effort) {
+        resolve_budget();
+        return result;
     }
+
+    const RequestedReasoningEffort requested =
+        *request.reasoning_effort;
+
+    const bool enables_thinking =
+        requested != RequestedReasoningEffort::None;
+
+    if (request.enable_thinking &&
+        *request.enable_thinking != enables_thinking) {
+
+        invalid_prompt_option(
+            "reasoning effort conflicts with enable_thinking",
+            request.reasoning_effort_param,
+            "conflicting_template_option");
+    }
+
     result.enable_thinking = enables_thinking;
 
-    if (requested == RequestedReasoningEffort::None) {
+    if (requested ==
+        RequestedReasoningEffort::None) {
+
         if (!capabilities.enable_thinking) {
-            invalid_prompt_option("the loaded chat template cannot disable thinking",
-                                  request.reasoning_effort_param, "reasoning_effort_not_supported");
+            invalid_prompt_option(
+                "the loaded chat template cannot disable thinking",
+                request.reasoning_effort_param,
+                "reasoning_effort_not_supported");
         }
+
+        resolve_budget();
         return result;
     }
 
     switch (requested) {
+
     case RequestedReasoningEffort::Low:
-        result.reasoning_effort = ninfer::ReasoningEffort::Low;
+        result.reasoning_effort =
+            ninfer::ReasoningEffort::Low;
         break;
+
     case RequestedReasoningEffort::Medium:
-        result.reasoning_effort = ninfer::ReasoningEffort::Medium;
+        result.reasoning_effort =
+            ninfer::ReasoningEffort::Medium;
         break;
+
     case RequestedReasoningEffort::XHigh:
-        result.reasoning_effort = ninfer::ReasoningEffort::XHigh;
+        result.reasoning_effort =
+            ninfer::ReasoningEffort::XHigh;
         break;
+
     case RequestedReasoningEffort::Minimal:
     case RequestedReasoningEffort::High:
     case RequestedReasoningEffort::Max:
-        invalid_prompt_option("reasoning effort '" +
-                                  std::string(requested_reasoning_effort_name(requested)) +
-                                  "' is not supported by the loaded chat template",
-                              request.reasoning_effort_param, "reasoning_effort_not_supported");
+
+        invalid_prompt_option(
+            "reasoning effort '" +
+                std::string(
+                    requested_reasoning_effort_name(
+                        requested)) +
+                "' is not supported by the loaded chat template",
+            request.reasoning_effort_param,
+            "reasoning_effort_not_supported");
+
     case RequestedReasoningEffort::None:
         break;
     }
 
-    if (!capabilities.reasoning_effort.supports(*result.reasoning_effort)) {
-        invalid_prompt_option("reasoning effort '" +
-                                  std::string(requested_reasoning_effort_name(requested)) +
-                                  "' is not supported by the loaded chat template",
-                              request.reasoning_effort_param, "reasoning_effort_not_supported");
+    if (!capabilities.reasoning_effort.supports(
+            *result.reasoning_effort)) {
+
+        invalid_prompt_option(
+            "reasoning effort '" +
+                std::string(
+                    requested_reasoning_effort_name(
+                        requested)) +
+                "' is not supported by the loaded chat template",
+            request.reasoning_effort_param,
+            "reasoning_effort_not_supported");
     }
+
+    resolve_budget();
+
     return result;
 }
 
 ninfer::PromptInput to_prompt_input(const GenerationRequest& request,
                                     const ResolvedPromptSemantics& semantics,
                                     const MediaAcquirer& acquire_media) {
-    if (request.reasoning_budget && !semantics.enable_thinking) {
-        invalid_prompt_option("reasoning_budget cannot be combined with disabled thinking",
-                              "reasoning_budget", "conflicting_template_option");
-    }
-
     ninfer::PromptInput input;
     input.messages.reserve(request.messages.size());
     for (const ChatTurn& turn : request.messages) {
@@ -213,7 +279,7 @@ ninfer::PromptInput to_prompt_input(const GenerationRequest& request,
     input.options.add_generation_prompt = true;
     input.options.enable_thinking       = semantics.enable_thinking;
     input.options.reasoning_effort      = semantics.reasoning_effort;
-    input.options.reasoning_budget      = request.reasoning_budget;
+    input.options.reasoning_budget      = semantics.reasoning_budget;
     input.options.preserve_thinking     = semantics.preserve_thinking;
     input.options.add_vision_id         = false;
     input.options.tool_jsons            = effective_tool_jsons(request);

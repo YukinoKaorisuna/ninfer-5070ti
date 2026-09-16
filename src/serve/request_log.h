@@ -17,7 +17,7 @@
 
 namespace ninfer::serve {
 
-inline constexpr int kRequestLogSchemaVersion        = 10;
+inline constexpr int kRequestLogSchemaVersion        = 11;
 inline constexpr const char* kRequestLogArtifactType = "ninfer_serve_request_log";
 
 struct RequestLogContext {
@@ -33,6 +33,8 @@ struct RequestLogContext {
     ToolChoice tool_choice;
     bool has_tool_history                  = false;
     bool enable_thinking                   = true;
+    std::optional<std::uint32_t> reasoning_budget;
+    bool reasoning_budget_client_set       = false;
     bool preserve_thinking                 = false;
     bool preserve_thinking_semantic_change = false;
     ninfer::ResolvedSamplingParameters sampling;

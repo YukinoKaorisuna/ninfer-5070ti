@@ -167,6 +167,19 @@ Json overrides_json(const ninfer::SamplingOverrides& overrides) {
 }
 
 Json request_json(const RequestLogContext& context) {
+    Json reasoning_budget = nullptr;
+
+    if (context.reasoning_budget) {
+        reasoning_budget = *context.reasoning_budget;
+    }
+
+    const char* reasoning_budget_source =
+        !context.reasoning_budget
+            ? "none"
+            : context.reasoning_budget_client_set
+                  ? "client"
+                  : "server_default";
+
     return Json{{"request_id", context.id},
                 {"protocol", context.protocol},
                 {"model", context.model},
@@ -180,6 +193,8 @@ Json request_json(const RequestLogContext& context) {
                 {"tool_choice", tool_choice_name(context.tool_choice)},
                 {"has_tool_history", context.has_tool_history},
                 {"enable_thinking", context.enable_thinking},
+                {"reasoning_budget", std::move(reasoning_budget)},
+                {"reasoning_budget_source", reasoning_budget_source},
                 {"preserve_thinking", context.preserve_thinking},
                 {"preserve_thinking_semantic_change", context.preserve_thinking_semantic_change},
                 {"sampling", sampler_json(context.sampling)}};
@@ -313,6 +328,8 @@ RequestLogContext make_request_log_context(std::uint64_t id, std::string protoco
     context.tool_choice                        = request.tool_choice;
     context.has_tool_history                   = request.has_tool_history();
     context.enable_thinking                    = prepared.enable_thinking;
+    context.reasoning_budget                   = prepared.reasoning_budget;
+    context.reasoning_budget_client_set        = request.reasoning_budget.has_value();
     context.preserve_thinking                  = prepared.preserve_thinking;
     context.preserve_thinking_semantic_change  = prepared.preserve_thinking_semantic_change;
     context.sampling                           = prepared.sampling;
@@ -350,8 +367,20 @@ std::string format_request_start(const RequestLogContext& context) {
         << " tools=" << context.tool_count
         << " tool_choice=" << tool_choice_name(context.tool_choice)
         << " tool_history=" << (context.has_tool_history ? "yes" : "no")
-        << " thinking=" << (context.enable_thinking ? "on" : "off")
-        << " preserve_thinking=" << (context.preserve_thinking ? "on" : "off")
+        << " thinking=" << (context.enable_thinking ? "on" : "off");
+
+    if (context.reasoning_budget) {
+        out << " reasoning_budget=" << *context.reasoning_budget
+            << '('
+            << (context.reasoning_budget_client_set
+                    ? "client"
+                    : "server-default")
+            << ')';
+    } else {
+        out << " reasoning_budget=none";
+    }
+
+    out << " preserve_thinking=" << (context.preserve_thinking ? "on" : "off")
         << " preserve_change=" << (context.preserve_thinking_semantic_change ? "yes" : "no")
         << " sampler=[" << sampler_str(context.sampling) << ']';
     if (context.media_item_count != 0) {
@@ -393,7 +422,9 @@ std::string format_request_done(const RequestLogContext& context,
     out << "[req " << context.id << "] done finish="
         << (outcome.tool_calls.empty() ? finish_reason_name(outcome.finish_reason) : "tool_calls");
     if (!outcome.tool_calls.empty()) { out << " tool_calls=" << outcome.tool_calls.size(); }
-    out << " prompt=" << outcome.prompt_tokens << " gen=" << outcome.completion_tokens
+    out << " prompt=" << outcome.prompt_tokens
+        << " gen=" << outcome.completion_tokens
+        << " reasoning=" << outcome.reasoning_tokens
         << " cache=" << metrics.prefix_cache_hit_tokens
         << " reuse=" << prefix_reuse_path_name(metrics.prefix_reuse_path) << " ttft=" << std::fixed
         << std::setprecision(0) << ttft_ms << "ms"
@@ -446,6 +477,13 @@ std::string format_server_start_json(
     Json artifact_size = nullptr;
     if (artifact_size_bytes.has_value()) { artifact_size = *artifact_size_bytes; }
 
+    Json default_thinking_budget = nullptr;
+
+    if (options.default_thinking_budget) {
+        default_thinking_budget =
+            *options.default_thinking_budget;
+    }
+
     record["server"]   = Json{{"host", options.host},
                               {"port", options.port},
                               {"public_model_id", public_model_id},
@@ -458,6 +496,8 @@ std::string format_server_start_json(
                               {"request_log_jsonl", options.request_log_jsonl},
                               {"default_output_tokens", options.default_max_tokens},
                               {"default_thinking", options.enable_thinking},
+                              {"default_thinking_budget",
+                               std::move(default_thinking_budget)},
                               {"default_preserve_thinking", options.preserve_thinking}};
     record["artifact"] = Json{{"path", options.artifact_path},
                               {"size_bytes", std::move(artifact_size)},
@@ -551,6 +591,7 @@ std::string format_request_done_json(const std::string& server_instance_id, std:
         Json{{"finish_reason", finish_reason_name(outcome.finish_reason)},
              {"prompt_tokens", outcome.prompt_tokens},
              {"completion_tokens", outcome.completion_tokens},
+             {"reasoning_tokens", outcome.reasoning_tokens},
              {"computed_prefill_tokens",
               std::max(0, outcome.prompt_tokens -
                               static_cast<int>(outcome.metrics.prefix_cache_hit_tokens))},

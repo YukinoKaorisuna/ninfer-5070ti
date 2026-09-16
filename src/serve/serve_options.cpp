@@ -73,7 +73,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|q4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
-           "[--default-max-tokens N] "
+           "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] [--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
@@ -98,6 +98,8 @@ std::string serve_usage_text(const char* argv0) {
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of sizing headroom\n"
            "       --no-prefix-reuse disables compatible-prefix caching (enabled by default)\n"
+           "       --default-thinking-budget supplies a process default reasoning budget for "
+           "thinking-enabled requests that omit reasoning_budget\n"
            "       --preserve-thinking retains closed-turn assistant reasoning in later prompts\n"
            "       sampler defaults come from the loaded model and resolved thinking mode; "
            "server flags and request fields override individual values.\n"
@@ -228,6 +230,19 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.default_max_tokens =
                 parse_nonnegative_int(require_value("--default-max-tokens"), "default-max-tokens");
             default_max_tokens_explicit = true;
+        } else if (arg == "--default-thinking-budget") {
+            const int value =
+                parse_nonnegative_int(
+                    require_value("--default-thinking-budget"),
+                    "default-thinking-budget");
+
+            if (value == 0) {
+                throw std::invalid_argument(
+                    "--default-thinking-budget must be positive");
+            }
+
+            options.default_thinking_budget =
+                static_cast<std::uint32_t>(value);
         } else if (arg == "--vision") {
             options.enable_vision = true;
         } else if (arg == "--no-cuda-graph") {
