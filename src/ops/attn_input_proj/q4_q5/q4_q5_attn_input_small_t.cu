@@ -64,8 +64,10 @@ void launch_q4_simt(const Tensor& x, const Weight& weight, Tensor& q, Tensor& ke
             static_cast<const __nv_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
             static_cast<const std::uint8_t*>(weight.scales), static_cast<__nv_bfloat16*>(q.data),
-            static_cast<__nv_bfloat16*>(key.data), q.ne[0], key.ne[0], kParentRows, kHidden, cols,
-            weight.padded_shape[1]);
+            static_cast<__nv_bfloat16*>(key.data),
+            static_cast<std::int32_t>(q.nb[1] / sizeof(__nv_bfloat16)),
+            static_cast<std::int32_t>(key.nb[1] / sizeof(__nv_bfloat16)),
+            kParentRows, kHidden, cols, weight.padded_shape[1]);
     CUDA_CHECK(cudaGetLastError());
 }
 
