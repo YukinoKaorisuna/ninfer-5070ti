@@ -21,6 +21,8 @@ The recommended profile is now empirically validated at `--vision-max-tokens 179
   --draft-tokens 3 \
   --no-cuda-graph \
   --max-concurrency 1 \
+  --default-thinking-budget 2048 \
+  --prefix-checkpoint-policy rolling-tool \
   --vision \
   --vision-max-tokens 1792
 ```
@@ -168,11 +170,31 @@ Full record: `docs/RELEASE_QWEN3.8_27B_RTX5080_V1.2.md`.
 
 ## Qwen3.8-27B RTX 5080 v1.3 final validation
 
-Validated runtime code head: `a7c6bd78d55da1ab23b6d91fdcd1731b6dc69e4f`
+Validated production runtime code head: `ceb32f7d002edab224a83a2e2609f45fca4f8919`
 
-v1.3 preserves the validated **131,072 context / 131,072 Q4 KV / MTP-3 / Vision-2048** RTX 5080 profile while adding corrected Q4 strided-output handling and a server default thinking budget.
+v1.3 preserves the validated **131,072 context / 131,072 Q4 KV / MTP-3 / Vision-2048** RTX 5080 profile while adding corrected Q4 strided-output handling, server default thinking-budget support, and configurable rolling checkpoints for long agent/tool loops.
 
-Combined v1.3 live validation passed with a three-request MTP sanity average of **84.7 tok/s decode**, **40.47% MTP acceptance** and **2.213 tok/round**. Client `reasoning_budget=64` and server-default `reasoning_budget=2048` resolution both passed.
+For append-only tool-loop clients such as OpenClaw, the validated production profile uses:
+
+```text
+--prefix-checkpoint-policy rolling-tool
+```
+
+`stable-turn` remains the general default. `rolling-tool` advances the private turn checkpoint through completed tool history so rewritten continuations do not repeatedly fall back to the first assistant boundary.
+
+Production OpenClaw validation passed with the restore checkpoint advancing:
+
+```text
+19023 -> 21146 -> 24664 -> 26641
+```
+
+with **3 advances, 0 plateaus and 0 regressions**. All five continuation requests required at most 3,520 new prefill tokens.
+
+Production `ninfer-serve` SHA256:
+
+```text
+3179bfbcb88a72c04b983f28c25c62db468fbc8ef267fe043899de30a4281c56
+```
 
 The exact v1.2 118,001-token long-context and deterministic Vision/OOM validation remains preserved in the v1.2 release record.
 

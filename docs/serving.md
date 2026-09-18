@@ -614,6 +614,16 @@ response which no longer matches the raw generated tokens replays only that resp
 suffix. Stable `false` keeps the first assistant opener in the open turn so a newly closed turn can
 be recomputed without its reasoning.
 
+The startup option `--prefix-checkpoint-policy stable-turn|rolling-tool` controls the
+`preserve_thinking=false` turn-closure checkpoint policy. `stable-turn` is the default and retains
+the first assistant boundary. `rolling-tool` keeps that stable boundary until completed tool history
+exists after the most recent real user query, then advances the checkpoint to the current generation
+opener. This is useful for append-only agent/tool loops because a later rewritten suffix can restore
+from progressively newer completed tool history instead of repeatedly recomputing from the first
+assistant response. A new real user turn establishes a new stable boundary. The option does not
+change `preserve_thinking=true` response-replay semantics.
+
+
 `preserve_thinking` selects where the next checkpoint should live; it is not a cache-compatibility
 bit. An exact current frontier or matching complete checkpoint remains reusable across a mode
 change. If the newly desired boundary is already behind the selected reuse frontier and no snapshot
