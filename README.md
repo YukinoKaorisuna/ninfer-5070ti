@@ -146,6 +146,16 @@ nvidia-smi --query-gpu=memory.total,memory.used,memory.free --format=csv,noheade
 - [`docs/VALIDATED_MANIFEST.md`](docs/VALIDATED_MANIFEST.md) — exact hashes and settings
 - [`docs/HISTORY.md`](docs/HISTORY.md) — engineering history
 
+## Upstream synchronization
+
+This fork selectively incorporates upstream NInfer changes rather than tracking `Neroued/ninfer:master` commit-for-commit.
+
+Upstream has currently been **assessed through `9e163eee`** (`perf(ops): route the q4/q5 a16 input projections by column band`) on **2026-09-20**. The current validated fork baseline for that assessment is `f6088f85`.
+
+A GitHub "behind" count does not mean all reported commits still need merging: several upstream fixes are already present here as semantic backports or RTX 5080-specific retunes with different commit SHAs.
+
+See [`docs/UPSTREAM_SYNC_STATUS.md`](docs/UPSTREAM_SYNC_STATUS.md) for the authoritative upstream checkpoint, the upstream-to-fork integration ledger, changes already merged, reviewed-but-deferred candidates, and the restart procedure for the next upstream review.
+
 A result should not be described as “true 128K” unless both max context and KV capacity are actually **131072**.
 
 ## Upstream attribution
