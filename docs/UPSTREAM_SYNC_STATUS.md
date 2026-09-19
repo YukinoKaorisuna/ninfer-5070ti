@@ -10,7 +10,7 @@ This file is the authoritative restart point for future upstream reviews.
 
 - Upstream repository: `Neroued/ninfer`
 - Upstream branch: `master`
-- Upstream commits assessed through: `9e163eee1f...`
+- Upstream commits assessed through: `9e163eee4b8acec21ab0ac765107b6a3f287b217`
 - Checkpoint commit: `9e163eee` — `perf(ops): route the q4/q5 a16 input projections by column band`
 - Assessment date: **2026-09-20**
 - Fork branch assessed against: `main`
