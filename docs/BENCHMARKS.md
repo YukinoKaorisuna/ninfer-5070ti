@@ -167,3 +167,55 @@ Combined v1.3 live validation passed with a three-request MTP sanity average of 
 The exact v1.2 118,001-token long-context and deterministic Vision/OOM validation remains preserved in the v1.2 release record.
 
 Full record: `docs/RELEASE_QWEN3.8_27B_RTX5080_V1.3.md`.
+
+
+---
+
+## PR #3 post-merge production qualification
+
+Merge commit `33546d7d5be6d82eaac5e4a87a3f7e578f8a1a13` includes the semantic port of upstream `9e163eee4b8acec21ab0ac765107b6a3f287b217`, which retunes Q4/Q5 attention and GDN input-projection routing by column band while preserving the RTX 5080 fork's Q4/Q4, Q4 value_z, A8, 4096-geometry and workspace-aware behavior.
+
+The operator-level A/B benchmark against pre-port baseline `bfe42032` showed substantial local gains:
+
+- attention: **42 candidate wins / 1 minor warm-cache variance / 11 ties**
+- GDN: **20 candidate wins / 0 losses / 16 ties**
+- representative attention gains ranged from roughly **10–54%** in changed bands
+- representative GDN gains ranged from roughly **12–53%** in changed bands
+
+After merge, the exact historical 118,001-token production workload was rerun three times on RTX 5080 16 GB with:
+
+```text
+prompt tokens: 118001
+max context:   131072
+KV capacity:   131072
+prefill chunk: 896
+KV dtype:      q4-group64
+speculation:   MTP-3
+max-new:       32
+thinking:      disabled
+sampling:      greedy
+CUDA Graph:    disabled
+```
+
+Results:
+
+| Run | Prefill | Decode | MTP acceptance | MTP length |
+|---|---:|---:|---:|---:|
+| 1 | 1377.46 tok/s | 71.50 tok/s | 44.74% | 2.31 tok/round |
+| 2 | 1378.82 tok/s | 71.50 tok/s | 44.74% | 2.31 tok/round |
+| 3 | 1378.51 tok/s | 71.40 tok/s | 44.74% | 2.31 tok/round |
+| **Mean** | **1378.263 tok/s** | **71.467 tok/s** | **44.74%** | **2.31 tok/round** |
+
+Against the strongest previously validated v1.2 reference of **1380.61 tok/s prefill / 71.57 tok/s decode**, the three-run mean is **-0.170% prefill and -0.144% decode**. This is within normal run-to-run variation and is treated as end-to-end performance equivalence rather than a regression.
+
+The lack of a material whole-model throughput increase is expected. PR #3 optimizes specific Q4/Q5 attention and GDN input-projection kernels, while the 118K workload also spends substantial time in other transformer/runtime stages. The port does not change model weights, KV representation, persistent allocations, or the overall true-128K memory plan. The operator benchmark therefore captures the intended local speedups; the full-model benchmark serves primarily as a production-regression check.
+
+Memory behavior remained unchanged at the validated geometry:
+
+```text
+GPU workspace peak:   116.00 MiB
+free after startup:    44.56 MiB
+planned slack:          46.39 MiB
+```
+
+Production qualification result: **PASS**.
