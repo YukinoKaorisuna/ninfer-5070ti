@@ -106,6 +106,17 @@ The following upstream work was identified during the 2026-09-20 review but was 
 | `1d8587bc`, `05507ab0`, `5f5fccab` | `DEFER` | NVFP4/W4A4 improvements. Useful upstream work, but not part of the current validated mixed-Q4 true-128K artifact. |
 | `b9219f3f` → `98dada0e` → `8eaed538` | `DEFER` | Custom Jinja/chat-template stack and literal-content fix. Desirable for serving compatibility, but large enough to treat as a separate frontend integration milestone. |
 
+## Hot-path follow-up after the 118,001-token production trace
+
+The exact true-128K qualification also identifies the operators worth prioritising for future performance work:
+
+- Q3 LinearSwiGLU `34816x5120`: the production trace recorded 8,448 calls in the `T>=257` bucket and 960 calls at `T=4`. In the current Qwen3.8 RTX 5080 profile, `gate_up` is Q3 and the prefill policy is `AllowA8`; therefore bulk prefill reaches the fork-specific Q3/A8 fused SwiGLU path. This is a genuine production-hot path and should be treated as a fork-specific RTX 5080 tuning target rather than inferred from upstream Q4/NVFP4 work.
+- Q4 Linear `5120x6144`: the trace recorded 8,384 calls at `T=896`, 64 at the final partial chunk, and 960 at `T=4`. Upstream `fb0035bc` adds a tuned shape implementation, but its `T>192` route remains `r64_c128`, the same bulk mechanism used by the fork, while the fork already owns an exact Qwen3.8 `T=4` path. It therefore does not currently demonstrate a production-hot route improvement at the observed widths; keep as `DEFER` unless RTX 5080 A/B evidence shows a gain at the actual partial/full chunk widths.
+- Q4 Linear `5120x17408`: the trace recorded the same hot `T=896` / partial-chunk pattern and `T=4` calls. Current upstream `master` has no registered generic Q4 `5120x17408` shape, so there is no upstream route to port. Any improvement here is fork-specific work.
+- Upstream `61535c6c` tunes Q4 `6144x5120`, which is the inverse geometry of the production-hot `5120x6144` projection and does not appear in the exact production histogram. It is not a current production target.
+
+**Next performance priority:** profile and retune the fork-specific Q3/A8 LinearSwiGLU bulk-prefill path at the actual production widths, especially `T=896` and the final partial chunk, before spending effort on cold upstream Q4 shapes. Any candidate must still pass the exact 118,001-token true-128K qualification and preserve the 16 GB memory envelope.
+
 ## Why GitHub can still report many commits "behind"
 
 The fork and upstream histories diverged and some upstream commits were reapplied or adapted as new fork commits. Git therefore sees different commit identities even when equivalent code is already present.
