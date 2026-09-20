@@ -207,3 +207,53 @@ The production smoke test advanced the restored checkpoint:
 with zero plateaus or regressions. This removed the previously observed fixed-checkpoint growth
 pattern while preserving new-user-turn safety and the existing `preserve_thinking=true`
 response-replay behavior.
+
+## PR #3 — `9e163eee` semantic port
+
+Upstream commit `9e163eee4b8acec21ab0ac765107b6a3f287b217` was integrated as RTX 5080-specific semantic port:
+
+```text
+4b62aca386a0a214049201ebeb2a422b0cb609ce
+```
+
+and merged through PR #3 as:
+
+```text
+33546d7d5be6d82eaac5e4a87a3f7e578f8a1a13
+```
+
+The port retained fork-specific Q4/Q4 routing, Q4 GDN `value_z` handling, A8 behavior, 4096-geometry routing and workspace-aware execution while adopting the upstream Q4/Q5 column-band routing mechanism.
+
+The exact 118,001-token workload was run three times on the merge lineage. The mean was 1378.263 tok/s prefill and 71.467 tok/s decode, with 44.74% MTP acceptance and 2.31 tok/round. This was within normal run-to-run variation relative to the strongest v1.2 reference.
+
+## PR #5 — rolling-tool reconciliation into the PR #3 lineage
+
+The validated v1.3 rolling-tool feature had existed on the release branch but was missing from the later `main` lineage. PR #5 reconciled that feature without removing the PR #3 routing work.
+
+The merge commit was:
+
+```text
+b44b1958c301ec6bf4d18973a97d7b42fa6733aa
+```
+
+That exact runtime tree was rebuilt and qualified with the historical 118,001-token workload at 131,072 context and 131,072 Q4 KV:
+
+```text
+PREFILL=1378.85 tok/s
+DECODE=71.44 tok/s
+MTP_ACCEPTANCE=44.74%
+MTP_LENGTH=2.31 tok/round
+RESULT=PASS_EQUIVALENT_WITHIN_NOISE
+```
+
+The source tree was restored cleanly after the temporary benchmark CLI patch, and the production v1.3 service was restored after the clean-GPU run.
+
+## PR #4 — documentation-only descendant
+
+PR #4 was merged after PR #5 as:
+
+```text
+c8439fbcb89a4daf74cf2692a9425930998c763f
+```
+
+The only change from `b44b1958` to `c8439fb` was documentation in `docs/BENCHMARKS.md`. For that reason, runtime performance qualification remains attributed to `b44b1958`; `c8439fb` is recorded as a documentation-only descendant rather than being described as if it were independently benchmarked.
