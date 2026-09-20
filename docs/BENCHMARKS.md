@@ -1,6 +1,6 @@
 # Benchmarks
 
-## Current recommended result: true 128K + Vision source
+## Vision-source regression — `7c10db07`
 
 The Vision-enabled source was regression-tested with the exact historical 118,001-token workload while keeping the full 131,072-token maximum context and KV capacity allocated.
 
@@ -136,7 +136,7 @@ Cached historical images remain present in the model prompt but do not consume t
 | Historical optimized | 1371.10 tok/s | — |
 | Historical B133 | 1377.66 tok/s | 70.24 tok/s |
 | Original final text release | 1377.81 tok/s | 71.51 tok/s |
-| Current Vision source | **1375.16 tok/s** | **71.52 tok/s** |
+| Vision source (`7c10db07`) | **1375.16 tok/s** | **71.52 tok/s** |
 
 ## Comparing results fairly
 
@@ -156,13 +156,19 @@ Full record: `docs/RELEASE_QWEN3.8_27B_RTX5080_V1.2.md`.
 
 ---
 
-## Qwen3.8-27B RTX 5080 v1.3 final validation
+## Qwen3.8-27B RTX 5080 v1.3 production validation — `ceb32f7d`
 
-Validated runtime code head: `a7c6bd78d55da1ab23b6d91fdcd1731b6dc69e4f`
+Validated production runtime code head: `ceb32f7d002edab224a83a2e2609f45fca4f8919`
 
-v1.3 preserves the validated **131,072 context / 131,072 Q4 KV / MTP-3 / Vision-2048** RTX 5080 profile while adding corrected Q4 strided-output handling and a server default thinking budget.
+v1.3 preserves the validated **131,072 context / 131,072 Q4 KV / MTP-3 / Vision-2048** RTX 5080 profile while adding corrected Q4 strided-output handling, server default thinking-budget support and configurable `stable-turn` / `rolling-tool` prefix checkpoints.
 
-Combined v1.3 live validation passed with a three-request MTP sanity average of **84.7 tok/s decode**, **40.47% MTP acceptance** and **2.213 tok/round**. Client `reasoning_budget=64` and server-default `reasoning_budget=2048` resolution both passed.
+The validated OpenClaw production profile uses:
+
+```text
+--prefix-checkpoint-policy rolling-tool
+```
+
+The production rolling-tool smoke test advanced restore checkpoints `19023 -> 21146 -> 24664 -> 26641` with 3 advances, 0 plateaus and 0 regressions. The three-request MTP sanity sample averaged **84.7 tok/s decode**, **40.47% MTP acceptance** and **2.213 tok/round**. Client `reasoning_budget=64` and server-default `reasoning_budget=2048` resolution both passed.
 
 The exact v1.2 118,001-token long-context and deterministic Vision/OOM validation remains preserved in the v1.2 release record.
 
@@ -219,3 +225,41 @@ planned slack:          46.39 MiB
 ```
 
 Production qualification result: **PASS**.
+
+---
+
+## Feature-complete mainline runtime qualification — `b44b1958`
+
+PR #5 reconciled the validated v1.3 rolling-tool checkpoint feature into the PR #3 / `9e163eee` lineage. The resulting runtime tree was:
+
+```text
+b44b1958c301ec6bf4d18973a97d7b42fa6733aa
+```
+
+That exact tree was rebuilt with ccache and rerun once against the historical 118,001-token acceptance workload:
+
+| Metric | Result |
+|---|---:|
+| Prompt tokens | 118001 |
+| Max context | 131072 |
+| KV capacity | 131072 |
+| Prefill chunk | 896 |
+| KV dtype | q4-group64 |
+| Speculation | MTP-3 |
+| Max new | 32 |
+| Thinking | disabled |
+| Sampling | greedy |
+| CUDA Graph | disabled |
+| Prefill | **1378.85 tok/s** |
+| Decode | **71.44 tok/s** |
+| MTP acceptance | **44.74%** |
+| MTP length | **2.31 tok/round** |
+| GPU workspace peak | **116.00 MiB** |
+| Free after startup | **44.56 MiB** |
+| Planned slack | **46.39 MiB** |
+
+Against the strongest v1.2 reference of **1380.61 tok/s prefill / 71.57 tok/s decode**, the `b44b1958` run is **-0.127% prefill and -0.182% decode**. MTP acceptance and acceptance length are unchanged. The result is classified as **equivalent within noise**.
+
+The benchmark used model artifact SHA256 `c4a7e9ab593a7f42d58208fa0065d67a82d61921107686cc9f6ed1ec6b050e21` and prompt SHA256 `078d726e07b6c610d3136751fb2bdfbf4965ebdd9d8afc1a07dedb9ac03fe0fd`.
+
+GitHub `main` later advanced to `c8439fbcb89a4daf74cf2692a9425930998c763f` through PR #4. The only change between `b44b1958` and `c8439fb` is documentation in this file, so the runtime qualification remains attached to `b44b1958` rather than being relabelled as a benchmark of the documentation-only descendant.

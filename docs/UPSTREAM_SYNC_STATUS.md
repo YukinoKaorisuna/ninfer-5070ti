@@ -6,7 +6,7 @@ The fork contains RTX 5080-specific work, true-128K memory-fit changes, mixed-Q4
 
 This file is the authoritative restart point for future upstream reviews.
 
-## Current upstream review checkpoint
+## Upstream review checkpoint — assessed at fork `f6088f85`
 
 - Upstream repository: `Neroued/ninfer`
 - Upstream branch: `master`
@@ -17,9 +17,22 @@ This file is the authoritative restart point for future upstream reviews.
 - Fork head at assessment: `f6088f856627045f280e5be8a76fba068b6979e4`
 - Fork checkpoint description: RTX 5080 128K Vision v1.3 validation
 
-**Future upstream review should start with commits after `9e163eee`.**
+**Discovery of new upstream work should start with commits after `9e163eee`.** The separately tracked candidate queue below may still contain commits at or before that checkpoint that were assessed but deliberately left for later integration.
 
 "Assessed through" means the upstream history reachable from that commit has been considered for relevance to this fork. It does **not** mean every upstream commit was merged. Some changes were already present under different SHAs, some were semantically backported, some were retuned for the RTX 5080, and some were intentionally deferred or skipped.
+
+## Integration state after that review
+
+The review checkpoint above is intentionally tied to the fork state that existed when the assessment was performed. Subsequent integration is recorded separately:
+
+| Milestone | Commit | Meaning |
+|---|---|---|
+| `9e163eee` semantic port | `4b62aca386a0a214049201ebeb2a422b0cb609ce` | RTX 5080-specific Q4/Q5 attention and GDN input-projection routing port. |
+| PR #3 merge | `33546d7d5be6d82eaac5e4a87a3f7e578f8a1a13` | Merged the `9e163eee` semantic port into `main`. |
+| PR #5 merge | `b44b1958c301ec6bf4d18973a97d7b42fa6733aa` | Reconciled the validated v1.3 rolling-tool prefix-checkpoint feature into the PR #3 lineage. |
+| PR #4 docs merge | `c8439fbcb89a4daf74cf2692a9425930998c763f` | Documentation-only descendant of `b44b1958`; no runtime source changed. |
+
+Runtime tree `b44b1958` was qualified with the exact 118,001-token workload at 131,072 context / 131,072 Q4 KV and produced 1378.85 tok/s prefill, 71.44 tok/s decode, 44.74% MTP acceptance and 2.31 tok/round. This qualification is attached to that exact runtime tree rather than described as a floating "current" result.
 
 ## Status vocabulary
 
@@ -36,7 +49,7 @@ This file is the authoritative restart point for future upstream reviews.
 
 ## Upstream-derived changes already integrated
 
-The current validated branch already contains a number of upstream fixes and optimisations. Several were applied as semantic backports, so their fork SHAs intentionally differ from upstream.
+The fork history contains a number of upstream fixes and optimisations. Several were applied as semantic backports, so their fork SHAs intentionally differ from upstream.
 
 | Upstream commit | Fork commit | Status | Notes |
 |---|---|---|---|
@@ -44,6 +57,7 @@ The current validated branch already contains a number of upstream fixes and opt
 | `641ef3e7` | `37800a4d` | `MERGED` | Skips NFC normalisation for text that is already pure ASCII. |
 | `9f0575bb` | `77683b0d` | `MERGED` | Restores required BF16 definitions for the Q4 top-k kernel build. |
 | `6d1da9ce` | `52776b66` + `0c3caf9a` | `MERGED_AND_RETUNED` | Backports the Q5 LinearAdd aggregate-cliff fix and then retunes the affected routing for RTX 5080. |
+| `9e163eee` | `4b62aca3` / merge `33546d7d` | `MERGED_AND_RETUNED` | Ports Q4/Q5 A16 attention/GDN input-projection column-band routing while preserving fork-specific Q4/Q4, Q4 value_z, A8, 4096-geometry and workspace-aware behavior. |
 | `4cece118` | `4f453463` | `MERGED` | Semantic backport fixing malformed generated UTF-8. |
 | `1d13c213` | `e5ce9863` | `MERGED` | Semantic backport binding the configured CUDA device across the engine lifecycle. |
 | — | `dd2cb034` | `MERGED` | Follow-up compile repair required by the CUDA-device lifecycle backport. |
@@ -58,11 +72,10 @@ The v1.1 integration checkpoint was validated on the RTX 5080 16 GB with Qwen3.8
 
 ## Upstream commits assessed but not yet integrated
 
-The following upstream work was identified during the 2026-09-20 review and should **not** be rediscovered from scratch during the next review.
+The following upstream work was identified during the 2026-09-20 review but was not integrated as part of that checkpoint. These entries form a candidate queue and should **not** be rediscovered from scratch.
 
 | Upstream commit | Status | Current assessment |
 |---|---|---|
-| `9e163eee` | `PORT_AND_RETUNE` | Q4/Q5 A16 fused attention/GDN input-projection routing. Highly relevant to the mixed Q4/Q5 Qwen3.8 path, but route boundaries should be benchmarked on RTX 5080 rather than copied blindly. |
 | `a9a0d10a` | `RECONCILE` | Q5 A16 LinearAdd T=1 and >512-column tail routing. Overlaps the fork's `52776b66` / `0c3caf9a` RTX 5080-specific Q5 work. Compare mechanisms and retain the best 5080 routing. |
 | `bb844c43` | `PORT_AND_RETUNE` | Q4 4096x5120 Linear dispatch tuning. Candidate schedules are relevant; crossover points require RTX 5080 measurement. |
 | `beedffa0` | `PORT_AND_RETUNE` | Q4 7168x5120 Linear dispatch tuning. Candidate schedules are relevant; crossover points require RTX 5080 measurement. |

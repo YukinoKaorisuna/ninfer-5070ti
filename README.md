@@ -2,7 +2,7 @@
 
 This repository documents a validated NInfer configuration for **Qwen3.8-27B** on one **RTX 5080 16 GB** with a genuine **131,072-token context/KV capacity**, Q4 KV, MTP-3 and Vision enabled.
 
-Vision is now the recommended/default path. The original text-only 128K release remains preserved as the historical baseline.
+The Vision-enabled serving profile introduced on the `7c10db07` lineage is the recommended/default path documented here. The original text-only 128K release remains preserved as the historical baseline.
 
 ## Recommended serving command
 
@@ -51,9 +51,9 @@ planned slack       10.08 MiB
 
 Use a clean GPU for both true-128K Vision profiles; 2048 is especially tight. See [`docs/VISION_128K.md`](docs/VISION_128K.md) for details.
 
-## Validated result
+## Vision-source validation — `7c10db07`
 
-The Vision source was regression-tested with the exact historical 118,001-token corpus:
+The Vision source represented by commit `7c10db07ac8c5803f921b83603b707750652873e` was regression-tested with the exact historical 118,001-token corpus:
 
 | Metric | Original text release | Vision source |
 |---|---:|---:|
@@ -65,6 +65,27 @@ The Vision source was regression-tested with the exact historical 118,001-token 
 | KV capacity | 131072 | 131072 |
 
 No meaningful text-performance regression was observed.
+
+## Feature-complete mainline qualification — `b44b1958`
+
+After the `9e163eee` semantic port and the v1.3 rolling-tool reconciliation were both present, runtime tree `b44b1958c301ec6bf4d18973a97d7b42fa6733aa` was qualified again with the exact historical 118,001-token workload:
+
+| Metric | `b44b1958` |
+|---|---:|
+| Prompt tokens | 118001 |
+| Max context | 131072 |
+| KV capacity | 131072 |
+| KV dtype | Q4 group64 |
+| Prefill chunk | 896 |
+| Speculation | MTP-3 |
+| Prefill | **1378.85 tok/s** |
+| Decode | **71.44 tok/s** |
+| MTP acceptance | **44.74%** |
+| MTP acceptance length | **2.31 tok/round** |
+
+Against the strongest v1.2 reference of 1380.61 tok/s prefill and 71.57 tok/s decode, this run was -0.127% and -0.182% respectively, within normal run-to-run variation.
+
+GitHub `main` later advanced to `c8439fbcb89a4daf74cf2692a9425930998c763f` through PR #4, which changed only `docs/BENCHMARKS.md`. Therefore `b44b1958` remains the exact runtime tree qualified by the benchmark above, while `c8439fb` is a documentation-only descendant.
 
 ## Vision changes
 
@@ -152,11 +173,13 @@ nvidia-smi --query-gpu=memory.total,memory.used,memory.free --format=csv,noheade
 
 This fork selectively incorporates upstream NInfer changes rather than tracking `Neroued/ninfer:master` commit-for-commit.
 
-Upstream has currently been **assessed through `9e163eee`** (`perf(ops): route the q4/q5 a16 input projections by column band`) on **2026-09-20**. The current validated fork baseline for that assessment is `f6088f85`.
+The upstream review performed against fork head `f6088f856627045f280e5be8a76fba068b6979e4` assessed upstream history through `9e163eee4b8acec21ab0ac765107b6a3f287b217` on 2026-09-20. That checkpoint is a historical review record, not a statement that `f6088f85` remains the latest validated fork tree.
+
+The `9e163eee` mechanism was subsequently integrated as RTX 5080-specific semantic port `4b62aca386a0a214049201ebeb2a422b0cb609ce` and merged by PR #3 as `33546d7d5be6d82eaac5e4a87a3f7e578f8a1a13`. The v1.3 rolling-tool feature was then reconciled into that lineage by PR #5, producing runtime-qualified tree `b44b1958c301ec6bf4d18973a97d7b42fa6733aa`.
 
 A GitHub "behind" count does not mean all reported commits still need merging: several upstream fixes are already present here as semantic backports or RTX 5080-specific retunes with different commit SHAs.
 
-See [`docs/UPSTREAM_SYNC_STATUS.md`](docs/UPSTREAM_SYNC_STATUS.md) for the authoritative upstream checkpoint, the upstream-to-fork integration ledger, changes already merged, reviewed-but-deferred candidates, and the restart procedure for the next upstream review.
+See [`docs/UPSTREAM_SYNC_STATUS.md`](docs/UPSTREAM_SYNC_STATUS.md) for the commit-scoped review checkpoint, integration ledger, remaining candidate queue and restart procedure for future upstream review.
 
 A result should not be described as “true 128K” unless both max context and KV capacity are actually **131072**.
 
