@@ -263,3 +263,81 @@ Against the strongest v1.2 reference of **1380.61 tok/s prefill / 71.57 tok/s de
 The benchmark used model artifact SHA256 `c4a7e9ab593a7f42d58208fa0065d67a82d61921107686cc9f6ed1ec6b050e21` and prompt SHA256 `078d726e07b6c610d3136751fb2bdfbf4965ebdd9d8afc1a07dedb9ac03fe0fd`.
 
 GitHub `main` later advanced to `c8439fbcb89a4daf74cf2692a9425930998c763f` through PR #4. The only change between `b44b1958` and `c8439fb` is documentation in this file, so the runtime qualification remains attached to `b44b1958` rather than being relabelled as a benchmark of the documentation-only descendant.
+
+---
+
+## Q5 A16 LinearAdd `a9a0d10a` semantic port — `00e8e47f`
+
+Upstream `a9a0d10a933713d3066110a3caa4663c482319da` was integrated as an
+RTX 5080-specific semantic port at:
+
+```text
+00e8e47fa6001067257f7ae6594c2deeabaed590
+```
+
+The port deliberately preserves the fork's existing 4096-row T=1
+residual-GEMV path, RTX 5080 C64 crossover bands, residual-GEMV
+infrastructure and shared Q5 rowsplit implementation. The new T=1 Split2
+and >512 narrow-tail mechanism applies to the two 5120-row Q5 A16
+LinearAdd shapes.
+
+### RTX 5080 operator A/B
+
+| Shape | T | Baseline | Candidate | Improvement |
+|---|---:|---:|---:|---:|
+| 5120x6144 | 1 | 19.080 us | 14.216 us | **25.49%** |
+| 5120x17408 | 1 | 53.622 us | 36.914 us | **31.16%** |
+| 5120x6144 | 513 | 519.193 us | 341.638 us | **34.20%** |
+| 5120x17408 | 513 | 1465.106 us | 949.533 us | **35.19%** |
+| 5120x6144 | 621 | 528.892 us | 464.936 us | **12.09%** |
+| 5120x17408 | 621 | 1489.453 us | 1373.820 us | **7.76%** |
+| 5120x6144 | 1025 | 872.084 us | 664.394 us | **23.82%** |
+| 5120x17408 | 1025 | 2453.607 us | 1855.929 us | **24.36%** |
+
+The unchanged/fallback widths remained flat. In particular, T=896 measured
++0.18% for 5120x6144 and effectively 0.00% for 5120x17408, both within
+measurement noise.
+
+Regression-guard widths:
+
+```text
+512\n705\n768\n896\n1024
+```
+
+### Exact 118,001-token whole-model qualification
+
+```text
+prompt tokens: 118001
+max context:   131072
+KV capacity:   131072
+prefill chunk: 896
+KV dtype:      q4-group64
+speculation:   MTP-3
+max-new:       32
+thinking:      disabled
+sampling:      greedy
+CUDA Graph:    disabled
+```
+
+| Metric | `b44b1958` reference | `00e8e47f` |
+|---|---:|---:|
+| Prefill | 1378.85 tok/s | **1376.30 tok/s** |
+| Decode | 71.44 tok/s | **71.53 tok/s** |
+| MTP acceptance | 44.74% | **44.74%** |
+| MTP length | 2.31 | **2.31** |
+| GPU workspace peak | 116.00 MiB | **116.00 MiB** |
+| Free after startup | 44.56 MiB | **44.56 MiB** |
+| Planned slack | 46.39 MiB | **46.39 MiB** |
+
+The deltas are **-0.185% prefill** and **+0.126% decode**. The full-model
+result therefore remains equivalent within normal run-to-run noise while
+the targeted operator cliffs are materially improved.
+
+Validation identities:
+
+```text
+MODEL_SHA256=c4a7e9ab593a7f42d58208fa0065d67a82d61921107686cc9f6ed1ec6b050e21
+PROMPT_SHA256=078d726e07b6c610d3136751fb2bdfbf4965ebdd9d8afc1a07dedb9ac03fe0fd
+```
+
+Qualification result: **PASS**.

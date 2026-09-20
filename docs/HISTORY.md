@@ -257,3 +257,41 @@ c8439fbcb89a4daf74cf2692a9425930998c763f
 ```
 
 The only change from `b44b1958` to `c8439fb` was documentation in `docs/BENCHMARKS.md`. For that reason, runtime performance qualification remains attributed to `b44b1958`; `c8439fb` is recorded as a documentation-only descendant rather than being described as if it were independently benchmarked.
+
+## `a9a0d10a` — Q5 A16 LinearAdd semantic port
+
+Upstream `a9a0d10a933713d3066110a3caa4663c482319da` retuned Q5 A16
+LinearAdd at T=1 and for partial >512-column waves. A direct cherry-pick
+was rejected because upstream also removed residual-GEMV infrastructure
+still required by the fork's 4096-row paths and used route boundaries that
+would have overwritten RTX 5080-specific C64 crossover tuning.
+
+The mechanism was therefore ported manually as:
+
+```text
+00e8e47fa6001067257f7ae6594c2deeabaed590
+```
+
+The port keeps 4096-row T=1 on residual GEMV, makes the historical 4096
+route policy explicit, retains the fork's C64 crossover bands, enables T=1
+Split2 only for the two 5120-row shapes, and adds >512 narrow-tail
+decomposition when the remainder is at most 192 columns.
+
+RTX 5080 operator A/B testing showed 25-31% gains at T=1, 34-35% gains at
+T=513, about 24% gains at T=1025 and useful gains at the observed T=621
+remainder, while T=896 and other fallback widths remained effectively
+unchanged.
+
+The committed tree then passed the exact 118,001-token / 131,072-context /
+131,072-Q4-KV workload at:
+
+```text
+PREFILL=1376.30 tok/s
+DECODE=71.53 tok/s
+MTP_ACCEPTANCE=44.74%
+MTP_LENGTH=2.31 tok/round
+RESULT=PASS_EQUIVALENT_WITHIN_NOISE
+```
+
+Relative to `b44b1958`, this is -0.185% prefill and +0.126% decode with
+unchanged memory usage and MTP behavior.
