@@ -415,10 +415,37 @@ int run_q4_q5() {
         quantized_weight::make_patterned_weight(QType::Q4G64_F16S, kParent, kHidden, 109U));
 
     int failures = 0;
-    for (const std::int32_t tokens : {1, 2, 16, 17, 21, 48, 129, 321, 621, 896}) {
+
+    // Q4/Q5 A16 route boundaries from the 9e163eee semantic port.
+    //
+    // Small-T:
+    //   6/7, 8/9, 12/13
+    //
+    // Grouped route boundaries:
+    //   32/33, 64/65, 104/105, 128/129, 192/193
+    //
+    // Also retain representative production-width cases.
+    for (const std::int32_t tokens : {
+             1, 2,
+             6, 7, 8, 9,
+             12, 13,
+             16, 17, 20, 21,
+             32, 33,
+             64, 65,
+             104, 105,
+             128, 129,
+             192, 193,
+             256, 321, 621, 896}) {
         failures += run_q4_q5_case(query_key, gate_value, tokens);
+    }
+
+    // Preserve the fork-specific Q4/Q4 regression coverage separately.
+    // These cases must continue to bypass the new Q4/Q5 grouped routes.
+    for (const std::int32_t tokens : {
+             1, 2, 16, 17, 21, 48, 129, 321, 621, 896}) {
         failures += run_q4_q5_case(query_key, gate_value_q4, tokens);
     }
+
     for (const std::int32_t tokens : {17, 129, 621, 896}) {
         failures += run_q4_q4_strided_output_case(tokens);
     }

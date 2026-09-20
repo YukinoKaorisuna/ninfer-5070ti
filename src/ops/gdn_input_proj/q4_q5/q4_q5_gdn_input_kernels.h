@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/tensor.h"
+#include "ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_plan.h"
 
 #include "ops/common/int8_proj_launch.h"
 
@@ -18,9 +19,11 @@ void q4_q5_gdn_input_independent_launch(const Tensor& x, const Weight& qk_weight
 
 void q4_q5_gdn_input_independent_prewarm();
 
-void q4_q5_gdn_input_grouped_mma_launch(const Tensor& x, const Weight& qk_weight,
-                                        const Weight& value_z_weight, Tensor& qkv, Tensor& z,
-                                        cudaStream_t stream);
+void q4_q5_gdn_input_grouped_mma_launch(
+    const Tensor& x, const Weight& qk_weight,
+    const Weight& value_z_weight, Tensor& qkv, Tensor& z,
+    Q4Q5GdnInputScheduleId schedule,
+    cudaStream_t stream);
 
 void q4_q5_gdn_input_conv_snapshot_launch(const Tensor& x, const Weight& qk_weight,
                                           const Weight& value_z_weight, const Tensor& conv_weight,

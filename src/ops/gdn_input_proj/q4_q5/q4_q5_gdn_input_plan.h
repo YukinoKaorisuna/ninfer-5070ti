@@ -14,7 +14,15 @@ namespace ninfer::ops::detail {
 
 enum class Q4Q5GdnInputScheduleId {
     IndependentDirectFixed,
+
+    // Existing fork route retained for 4096 and Q4 value/z preservation.
     GroupedMixedMmaR64C128,
+
+    // 5120 / Qwen3.8 Q4/Q5 A16 routes from upstream 9e163eee.
+    GroupedMixedMmaR32C32S2,
+    GroupedMixedMmaR32C64S4,
+    GroupedMixedMmaR64C128S2,
+
     Int8Jobs,
 };
 

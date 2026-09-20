@@ -77,9 +77,27 @@ int run_q4_q5() {
     DevicePackedWeight value_z_weight(
         quantized_weight::make_patterned_weight(QType::Q5G64_F16S, 12288, kHidden, 419U));
     int failures = 0;
-    for (const std::int32_t tokens : {1, 2, 16, 17}) {
+
+    // Q4/Q5 A16 route boundaries from the 9e163eee semantic port.
+    //
+    // Small-T:
+    //   6/7, 8/9, 12/13
+    //
+    // Grouped route boundaries:
+    //   32/33, 64/65
+    //
+    // Include representative larger production widths as well.
+    for (const std::int32_t tokens : {
+             1, 2,
+             6, 7, 8, 9,
+             12, 13,
+             16, 17,
+             32, 33,
+             64, 65,
+             128, 256, 896}) {
         failures += run_q4_q5_case(query_key, value_z_weight, tokens);
     }
+
     return failures;
 }
 

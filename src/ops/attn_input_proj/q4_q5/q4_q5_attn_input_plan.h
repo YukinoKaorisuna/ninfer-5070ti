@@ -14,8 +14,18 @@ namespace ninfer::ops::detail {
 
 enum class Q4Q5AttnInputScheduleId {
     ParentSplitFixed,
+
+    // Existing fork routes retained for the 4096 geometry.
     GroupedHomogeneousPairMmaR16C64S3,
     GroupedHomogeneousPairMmaR32C64S4,
+
+    // 5120 / Qwen3.8 A16 routes derived from upstream 9e163eee.
+    MixedR32C32S2,
+    MixedR32C64S3,
+    PairR32C64S3,
+    MixedR64C128S2,
+    PairR32C64S4,
+
     Int8Pairs,
 };
 

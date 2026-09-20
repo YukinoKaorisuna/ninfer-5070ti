@@ -2,11 +2,14 @@
 
 #include "core/device.h"
 #include "ops/common/math.h"
+#include "ops/linear/q4/q4_small_t_mma.cuh"
+#include "ops/linear/q4/q4_ksplit_strided_store.cuh"
 #include "ops/linear/q4/q4_rowsplit_gemm_simt.cuh"
 #include "ops/linear/q4/q4_launch.h"
 #include "ops/linear/q4/q4_rowsplit_gemv.cuh"
 #include "ops/linear/q5/q5_rowsplit_gemm_simt.cuh"
 #include "ops/linear/q5/q5_rowsplit_gemv.cuh"
+#include "ops/linear/q5/q5_rowsplit_rowblock_small_t.cuh"
 
 #include <cuda_bf16.h>
 
@@ -87,38 +90,134 @@ void launch_q4_simt_route(const Tensor& x, const Weight& weight, Tensor& q, Tens
     }
 }
 
+template <class Geometry, std::int32_t Capacity>
+void launch_q4_ksplit_exact(const Tensor& x, const Weight& weight,
+                            Tensor& q, Tensor& key,
+                            cudaStream_t stream) {
+    static_assert(Geometry::kHidden == 5120,
+                  "RTX 5080 Q4 K-split port is qualified only for the 5120 geometry");
+
+    constexpr std::int32_t kParentRows = Geometry::kParentRows;
+    constexpr std::int32_t kSplitRow   = Geometry::kSplitRow;
+    constexpr std::int32_t kHidden     = Geometry::kHidden;
+    constexpr std::int32_t kTileCols   = ((Capacity + 7) / 8) * 8;
+
+    using KGeometry = Q4LinearGeometry<kParentRows, kHidden>;
+    using Store = Q4KSplitStridedStore<true, kSplitRow>;
+
+    if (weight.padded_shape[1] != kHidden) {
+        throw std::invalid_argument(
+            "attention Q4 K-split requires padded K == hidden");
+    }
+
+    const Store store{
+        static_cast<__nv_bfloat16*>(q.data),
+        static_cast<std::int32_t>(q.nb[1] / sizeof(__nv_bfloat16)),
+        static_cast<__nv_bfloat16*>(key.data),
+        static_cast<std::int32_t>(key.nb[1] / sizeof(__nv_bfloat16)),
+        x.ne[1]
+    };
+
+    q4_small_t_mma_kernel<
+        KGeometry,
+        kTileCols,
+        Capacity,
+        Store,
+        Q4SmallTMmaIdentityRows>
+        <<<kParentRows / Q4DraftSmallTSchedule::kRowsPerCta,
+           Q4DraftSmallTSchedule::kThreads,
+           0,
+           stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales),
+            static_cast<__nv_bfloat16*>(q.data),
+            store,
+            {});
+
+    CUDA_CHECK(cudaGetLastError());
+}
+
+template <class Geometry>
+void launch_q4_ksplit_band(const Tensor& x, const Weight& weight,
+                           Tensor& q, Tensor& key,
+                           cudaStream_t stream) {
+    switch (x.ne[1]) {
+    case 7:
+        launch_q4_ksplit_exact<Geometry, 7>(x, weight, q, key, stream);
+        return;
+    case 8:
+        launch_q4_ksplit_exact<Geometry, 8>(x, weight, q, key, stream);
+        return;
+    case 9:
+        launch_q4_ksplit_exact<Geometry, 9>(x, weight, q, key, stream);
+        return;
+    case 10:
+        launch_q4_ksplit_exact<Geometry, 10>(x, weight, q, key, stream);
+        return;
+    case 11:
+        launch_q4_ksplit_exact<Geometry, 11>(x, weight, q, key, stream);
+        return;
+    case 12:
+        launch_q4_ksplit_exact<Geometry, 12>(x, weight, q, key, stream);
+        return;
+    default:
+        throw std::invalid_argument(
+            "attention Q4 K-split band requires T in [7,12]");
+    }
+}
+
 template <class Geometry>
 void launch_q4(const Tensor& x, const Weight& weight, Tensor& q, Tensor& key, cudaStream_t stream) {
     switch (x.ne[1]) {
     case 1:
         launch_q4_gemv<Geometry>(x, weight, q, key, stream);
         return;
+
     case 2:
     case 3:
     case 4:
     case 5:
     case 6:
+        launch_q4_simt_route<Geometry, Q4AttnSimtR8C4Schedule>(x, weight, q, key, stream);
+        return;
+
     case 7:
     case 9:
     case 10:
     case 11:
     case 12:
+        if constexpr (Geometry::kHidden == 5120) {
+            launch_q4_ksplit_band<Geometry>(x, weight, q, key, stream);
+        } else {
+            launch_q4_simt_route<Geometry, Q4AttnSimtR8C4Schedule>(
+                x, weight, q, key, stream);
+        }
+        return;
+
+    case 8:
+        if constexpr (Geometry::kHidden == 5120) {
+            launch_q4_ksplit_band<Geometry>(x, weight, q, key, stream);
+        } else {
+            launch_q4_simt_route<Geometry, Q4AttnSimtR8C8Schedule>(
+                x, weight, q, key, stream);
+        }
+        return;
+
     case 13:
     case 14:
     case 15:
-        launch_q4_simt_route<Geometry, Q4AttnSimtR8C4Schedule>(x, weight, q, key, stream);
+        launch_q4_simt_route<Geometry, Q4AttnSimtR8C4Schedule>(
+            x, weight, q, key, stream);
         return;
-    case 8:
+
     case 16:
-        launch_q4_simt_route<Geometry, Q4AttnSimtR8C8Schedule>(x, weight, q, key, stream);
+        launch_q4_simt_route<Geometry, Q4AttnSimtR8C8Schedule>(
+            x, weight, q, key, stream);
         return;
+
     default:
-        // Correctness-first Q4/Q4 fallback for wider token batches.
-        //
-        // The grouped attention pair kernels are qualified for the
-        // production Q4/Q5 pair, but are not safe when gate/value is
-        // also Q4. The generic Q4 RowSplit SIMT kernel already supports
-        // split output at the 6144-row seam and arbitrary positive T.
+        // Preserve the fork's correctness-first Q4/Q4 fallback.
         launch_q4_simt_route<
             Geometry,
             Q4AttnSimtR8C8Schedule>(
@@ -212,20 +311,80 @@ void launch_q5_simt(const Tensor& x, const Weight& weight, Tensor& gate, Tensor&
 }
 
 template <class Geometry>
+void launch_q5_rowblock(const Tensor& x, const Weight& weight,
+                        Tensor& gate, Tensor& value,
+                        cudaStream_t stream) {
+    static_assert(Geometry::kHidden == 5120,
+                  "RTX 5080 Q5 row-block port is qualified only for the 5120 geometry");
+
+    constexpr std::int32_t kParentRows = Geometry::kParentRows;
+    constexpr std::int32_t kSplitRow   = Geometry::kSplitRow;
+    constexpr std::int32_t kHidden     = Geometry::kHidden;
+    constexpr std::int32_t kFullSlabs  = Geometry::kFullSlabs;
+
+    constexpr int kColsPerTile  = 8;
+    constexpr int kRowsPerBlock = 8;
+    constexpr int kStages       = 2;
+    constexpr int kThreads      = kRowsPerBlock * 32;
+
+    const std::int32_t cols = x.ne[1];
+
+    const dim3 grid(
+        static_cast<unsigned>(div_up(kParentRows, kRowsPerBlock)),
+        static_cast<unsigned>(div_up(cols, kColsPerTile)),
+        1u);
+
+    q5_rowsplit_rowblock_small_t_kernel<
+        Q5RowSplitSimtSchedule,
+        kColsPerTile,
+        kRowsPerBlock,
+        kStages,
+        true,
+        kSplitRow>
+        <<<grid, kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.qhigh),
+            static_cast<const std::uint8_t*>(weight.scales),
+            static_cast<__nv_bfloat16*>(gate.data),
+            static_cast<__nv_bfloat16*>(value.data),
+            kParentRows,
+            static_cast<std::int32_t>(gate.nb[1] / sizeof(__nv_bfloat16)),
+            kHidden,
+            cols,
+            weight.padded_shape[1],
+            kFullSlabs);
+
+    CUDA_CHECK(cudaGetLastError());
+}
+
+template <class Geometry>
 void launch_q5(const Tensor& x, const Weight& weight, Tensor& gate, Tensor& value,
                cudaStream_t stream) {
     if (x.ne[1] == 1) {
         launch_q5_gemv<Geometry>(x, weight, gate, value, stream);
         return;
     }
+
     if (x.ne[1] <= 6) {
         launch_q5_split4_exact<Geometry>(x, weight, gate, value, stream);
         return;
     }
+
+    if constexpr (Geometry::kHidden == 5120) {
+        if (x.ne[1] <= 8) {
+            launch_q5_rowblock<Geometry>(x, weight, gate, value, stream);
+            return;
+        }
+    }
+
+    // Keep the existing path for T=9..16 for now. Stage 2B will move
+    // T>=13 to the new grouped routes after those mechanisms are added.
     if (x.ne[1] <= 16) {
         launch_q5_simt<Geometry, 4>(x, weight, gate, value, stream);
         return;
     }
+
     throw std::invalid_argument("attention Q5 split-output requires T in [1,16]");
 }
 
