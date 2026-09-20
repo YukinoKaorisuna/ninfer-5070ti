@@ -117,6 +117,9 @@ The exact true-128K qualification also identifies the operators worth prioritisi
 
 **Next performance priority:** profile and retune the fork-specific Q3/A8 LinearSwiGLU bulk-prefill path at the actual production widths, especially `T=896` and the final partial chunk, before spending effort on cold upstream Q4 shapes. Any candidate must still pass the exact 118,001-token true-128K qualification and preserve the 16 GB memory envelope.
 
+Historical evidence makes this priority especially strong. The E101 Q3/A8 redesign was previously the largest single prefill gain in the fork: a controlled long-context comparison recorded approximately 1421.1 tok/s with E101 enabled versus 761.7 tok/s on the prior A16 large-prefill path (+86.6%), with a later five-run mean of 1391.9 tok/s and 0.18% CV. The current Q3 implementation still uses the folded INT8 schedule `Q3Int8SwiGluSchedule<64,256,16,128,3,1>`; its source comment records that this initial schedule was inherited from the RTX 4090 route and that Blackwell-specific retuning was intended to follow correctness/performance gating. That makes a focused RTX 5080 schedule retune at the current `T=896` production chunk width a higher-value experiment than importing additional cold Q4 shape work.
+
+
 ## Why GitHub can still report many commits "behind"
 
 The fork and upstream histories diverged and some upstream commits were reapplied or adapted as new fork commits. Git therefore sees different commit identities even when equivalent code is already present.
