@@ -167,3 +167,43 @@ No force push was used and the upstream repositories were left untouched.
 ## Documentation phase
 
 All public documentation is intentionally layered after the frozen validated commit. The release tag therefore continues to identify the exact source that produced the final benchmark.
+
+
+## v1.3 rolling-tool checkpoint production validation
+
+Long OpenClaw tool loops exposed a prefix-reuse pathology in which
+`restore_turn_checkpoint` repeatedly restored the first assistant boundary while the prompt kept
+growing. The OpenClaw request payload was verified to remain exact-prefix append-only; the stale
+checkpoint was therefore traced to Qwen frontend checkpoint placement rather than client history
+ordering.
+
+A configurable checkpoint policy was backported to the v1.3 release line:
+
+```text
+--prefix-checkpoint-policy stable-turn|rolling-tool
+```
+
+`stable-turn` remains the general default. The validated OpenClaw production profile uses
+`rolling-tool`.
+
+Validated runtime commit:
+
+```text
+ceb32f7d002edab224a83a2e2609f45fca4f8919
+```
+
+Validated production server SHA256:
+
+```text
+3179bfbcb88a72c04b983f28c25c62db468fbc8ef267fe043899de30a4281c56
+```
+
+The production smoke test advanced the restored checkpoint:
+
+```text
+19023 -> 21146 -> 24664 -> 26641
+```
+
+with zero plateaus or regressions. This removed the previously observed fixed-checkpoint growth
+pattern while preserving new-user-turn safety and the existing `preserve_thinking=true`
+response-replay behavior.
