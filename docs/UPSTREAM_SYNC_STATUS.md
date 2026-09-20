@@ -32,6 +32,7 @@ The review checkpoint above is intentionally tied to the fork state that existed
 | PR #5 merge | `b44b1958c301ec6bf4d18973a97d7b42fa6733aa` | Reconciled the validated v1.3 rolling-tool prefix-checkpoint feature into the PR #3 lineage. |
 | PR #4 docs merge | `c8439fbcb89a4daf74cf2692a9425930998c763f` | Documentation-only descendant of `b44b1958`; no runtime source changed. |
 | `a9a0d10a` semantic port | `00e8e47fa6001067257f7ae6594c2deeabaed590` | RTX 5080-qualified Q5 A16 LinearAdd T=1 Split2 and >512 narrow-tail routing while preserving the fork's 4096-row GEMV and C64 crossover policy. |
+| PR #7 merge | `a074864142e6c3dee7bdb5e3b9fb8932e0fc0ac8` | Merged the qualified `a9a0d10a` semantic port and its commit-scoped validation record into `main`. |
 
 Runtime tree `b44b1958` was qualified with the exact 118,001-token workload at 131,072 context / 131,072 Q4 KV and produced 1378.85 tok/s prefill, 71.44 tok/s decode, 44.74% MTP acceptance and 2.31 tok/round. This qualification is attached to that exact runtime tree rather than described as a floating "current" result.
 
@@ -61,7 +62,7 @@ The fork history contains a number of upstream fixes and optimisations. Several 
 | `9f0575bb` | `77683b0d` | `MERGED` | Restores required BF16 definitions for the Q4 top-k kernel build. |
 | `6d1da9ce` | `52776b66` + `0c3caf9a` | `MERGED_AND_RETUNED` | Backports the Q5 LinearAdd aggregate-cliff fix and then retunes the affected routing for RTX 5080. |
 | `9e163eee` | `4b62aca3` / merge `33546d7d` | `MERGED_AND_RETUNED` | Ports Q4/Q5 A16 attention/GDN input-projection column-band routing while preserving fork-specific Q4/Q4, Q4 value_z, A8, 4096-geometry and workspace-aware behavior. |
-| `a9a0d10a` | `00e8e47f` | `MERGED_AND_RETUNED` | Ports Q5 A16 LinearAdd T=1 Split2 and >512 narrow-tail routing for the 5120-row shapes. Preserves 4096-row T=1 residual GEMV, RTX 5080 C64 crossover bands, residual-GEMV infrastructure and shared Q5 rowsplit behavior. RTX 5080 A/B showed 25-31% T=1 wins, 34-35% wins at T=513, 24% wins at T=1025, and no material regression at T=896. |
+| `a9a0d10a` | `00e8e47f` / merge `a0748641` | `MERGED_AND_RETUNED` | Ports Q5 A16 LinearAdd T=1 Split2 and >512 narrow-tail routing for the 5120-row shapes. Preserves 4096-row T=1 residual GEMV, RTX 5080 C64 crossover bands, residual-GEMV infrastructure and shared Q5 rowsplit behavior. RTX 5080 A/B showed 25-31% T=1 wins, 34-35% wins at T=513, 24% wins at T=1025, and no material regression at T=896. |
 | `4cece118` | `4f453463` | `MERGED` | Semantic backport fixing malformed generated UTF-8. |
 | `1d13c213` | `e5ce9863` | `MERGED` | Semantic backport binding the configured CUDA device across the engine lifecycle. |
 | — | `dd2cb034` | `MERGED` | Follow-up compile repair required by the CUDA-device lifecycle backport. |
