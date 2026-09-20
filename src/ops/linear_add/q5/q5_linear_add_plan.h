@@ -18,6 +18,7 @@ enum class Q5LinearAddScheduleId {
     MmaResidualR64C32S3,
     MmaResidualR64C32S4,
     MmaResidualR64C128,
+    MmaResidualR64C128Tail,
 };
 
 struct Q5LinearAddProblem {
