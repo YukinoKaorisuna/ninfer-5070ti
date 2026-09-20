@@ -30,6 +30,9 @@ int main() {
 
     const ServeOptions defaults = parse({"ninfer-serve", "model.ninfer"});
     failures += check(defaults.allow_prefix_reuse, "prefix reuse is not enabled by default");
+    failures += check(
+        defaults.prefix_checkpoint_policy == ninfer::PrefixCheckpointPolicy::StableTurn,
+        "prefix checkpoint policy is not stable-turn by default");
     failures +=
         check(!defaults.preserve_thinking, "thinking history is unexpectedly preserved by default");
     failures += check(!defaults.enable_vision, "Vision is not disabled by default");
@@ -58,6 +61,28 @@ int main() {
         "server defaults unexpectedly override registered model sampling");
     failures += check(resolve_public_model_id(defaults, "artifact-model") == "artifact-model",
                       "artifact model id was not selected by default");
+
+    const ServeOptions rolling_checkpoint =
+        parse({"ninfer-serve", "model.ninfer",
+               "--prefix-checkpoint-policy", "rolling-tool"});
+
+    failures += check(
+        rolling_checkpoint.prefix_checkpoint_policy ==
+            ninfer::PrefixCheckpointPolicy::RollingTool,
+        "--prefix-checkpoint-policy rolling-tool was not preserved");
+
+    bool invalid_checkpoint_policy_rejected = false;
+
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer",
+                     "--prefix-checkpoint-policy", "invalid"});
+    } catch (const std::invalid_argument&) {
+        invalid_checkpoint_policy_rejected = true;
+    }
+
+    failures += check(
+        invalid_checkpoint_policy_rejected,
+        "invalid --prefix-checkpoint-policy was accepted");
 
     const ServeOptions model_alias =
         parse({"ninfer-serve", "model.ninfer", "--model-id", "deployment-alias"});
