@@ -672,6 +672,30 @@ int test_rewrite_checkpoint_trace() {
                   open.rewrite_checkpoint->offset == first_header + assistant_header.size(),
               "tool loop did not retain its first assistant turn-closure boundary");
 
+    fi::ChatRenderOptions rolling;
+    rolling.prefix_checkpoint_policy = ninfer::PrefixCheckpointPolicy::RollingTool;
+
+    const fi::RenderedChat rolled    = render_chat(tool_loop, rolling);
+    const std::size_t rolling_header = rolled.text.rfind(assistant_header);
+
+    failures += check(
+        rolling_header != std::string::npos && rolled.rewrite_checkpoint &&
+            rolled.rewrite_checkpoint->kind ==
+                ninfer::targets::qwen3_6::RewriteCheckpointKind::TurnClosure &&
+            rolled.rewrite_checkpoint->offset == rolling_header + assistant_header.size() &&
+            rolled.rewrite_checkpoint->offset > open.rewrite_checkpoint->offset,
+        "rolling tool checkpoint did not advance to the current generation opener");
+
+    const fi::RenderedChat first_roll = render_chat(
+        {chat_message(ninfer::ChatRole::User, "question"), first,
+         chat_message(ninfer::ChatRole::Tool, "result one")},
+        rolling);
+
+    failures += check(
+        first_roll.rewrite_checkpoint &&
+            first_roll.rewrite_checkpoint->offset < rolled.rewrite_checkpoint->offset,
+        "rolling tool checkpoint did not advance with completed tool history");
+
     fi::ChatRenderOptions preserve;
     preserve.preserve_thinking         = true;
     const fi::RenderedChat preserved   = render_chat(tool_loop, preserve);

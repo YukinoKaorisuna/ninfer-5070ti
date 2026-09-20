@@ -216,11 +216,34 @@ Full record: `docs/RELEASE_QWEN3.8_27B_RTX5080_V1.2.md`.
 
 ## Qwen3.8-27B RTX 5080 v1.3 final validation
 
-Validated runtime code head: `a7c6bd78d55da1ab23b6d91fdcd1731b6dc69e4f`
+Validated production runtime code head: `ceb32f7d002edab224a83a2e2609f45fca4f8919`
 
-v1.3 preserves the validated **131,072 context / 131,072 Q4 KV / MTP-3 / Vision-2048** RTX 5080 profile while adding corrected Q4 strided-output handling and a server default thinking budget.
+```text
+NINFER_SERVE_SHA256=3179bfbcb88a72c04b983f28c25c62db468fbc8ef267fe043899de30a4281c56
+PREFIX_CHECKPOINT_POLICY=rolling-tool
+MAX_CONTEXT=131072
+KV_CAPACITY=131072
+KV_DTYPE=q4
+SPECULATION=mtp
+DRAFT_TOKENS=3
+VISION=on
+VISION_MAX_TOKENS=2048
+DEFAULT_THINKING_BUDGET=2048
+```
 
-Combined v1.3 live validation passed with a three-request MTP sanity average of **84.7 tok/s decode**, **40.47% MTP acceptance** and **2.213 tok/round**. Client `reasoning_budget=64` and server-default `reasoning_budget=2048` resolution both passed.
+v1.3 preserves the validated **131,072 context / 131,072 Q4 KV / MTP-3 / Vision-2048** RTX 5080 profile while adding corrected Q4 strided-output handling, server default thinking-budget support, and rolling tool checkpoints.
+
+Production OpenClaw validation:
+
+```text
+RESTORE_CACHE_SEQUENCE=19023,21146,24664,26641
+RESTORE_CACHE_ADVANCES=3
+RESTORE_CACHE_PLATEAUS=0
+RESTORE_CACHE_REGRESSIONS=0
+PRODUCTION_ROLLING_CHECKPOINT=PASS
+```
+
+All five continuation requests had an uncached prompt suffix below 4,096 tokens.
 
 The exact v1.2 118,001-token long-context and deterministic Vision/OOM validation remains preserved in the v1.2 release record.
 

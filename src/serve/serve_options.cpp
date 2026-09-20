@@ -75,6 +75,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--kv-dtype bf16|int8|q4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
+           "[--prefix-checkpoint-policy stable-turn|rolling-tool] "
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] [--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
            "[--frequency-penalty F] [--seed N] [--greedy]\n"
@@ -98,6 +99,8 @@ std::string serve_usage_text(const char* argv0) {
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of sizing headroom\n"
            "       --no-prefix-reuse disables compatible-prefix caching (enabled by default)\n"
+           "       --prefix-checkpoint-policy defaults to stable-turn; rolling-tool advances "
+           "the private turn checkpoint through completed tool history\n"
            "       --default-thinking-budget supplies a process default reasoning budget for "
            "thinking-enabled requests that omit reasoning_budget\n"
            "       --preserve-thinking retains closed-turn assistant reasoning in later prompts\n"
@@ -249,6 +252,18 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.use_cuda_graph = false;
         } else if (arg == "--no-prefix-reuse") {
             options.allow_prefix_reuse = false;
+        } else if (arg == "--prefix-checkpoint-policy") {
+            const std::string value = require_value("--prefix-checkpoint-policy");
+
+            if (value == "stable-turn") {
+                options.prefix_checkpoint_policy = PrefixCheckpointPolicy::StableTurn;
+            } else if (value == "rolling-tool") {
+                options.prefix_checkpoint_policy = PrefixCheckpointPolicy::RollingTool;
+            } else {
+                throw std::invalid_argument(
+                    "invalid prefix-checkpoint-policy: " + value +
+                    " (expected stable-turn or rolling-tool)");
+            }
         } else if (arg == "--lm-head-draft") {
             options.speculative.proposal_head = ProposalHead::Optimized;
         } else if (arg == "--no-thinking") {

@@ -21,6 +21,7 @@ struct FrontendOptions {
     std::size_t media_live_bytes           = kDefaultMediaLiveBytes;
     std::uint32_t media_preprocess_threads = 0;
     std::uint32_t vision_max_tokens         = 0;
+    PrefixCheckpointPolicy prefix_checkpoint_policy = PrefixCheckpointPolicy::StableTurn;
 };
 
 struct FrontendResources;

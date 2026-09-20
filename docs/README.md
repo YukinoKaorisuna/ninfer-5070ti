@@ -7,6 +7,7 @@ Start with the [project README](../README.md) to build NInfer, obtain an artifac
 | Document | Purpose |
 |---|---|
 | [True 128K + Vision on RTX 5080](VISION_128K.md) | recommended Vision serving profile, 1792/2048 settings, memory envelope and validation |
+| [Qwen3.8-27B RTX 5080 v1.3 release](RELEASE_QWEN3.8_27B_RTX5080_V1.3.md) | v1.3 runtime, reasoning-budget and rolling-tool checkpoint validation |
 | [Reproducibility](REPRODUCIBILITY.md) | exact 128K reproduction settings and hashes |
 | [Benchmarks](BENCHMARKS.md) | original vs Vision-source long-context results and multimodal measurements |
 | [Memory profile](MEMORY_PROFILE.md) | mixed quantization, GDN lifetime recovery and HostMapped Vision fit |
