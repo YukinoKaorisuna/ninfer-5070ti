@@ -33,10 +33,9 @@ RowSplitGroupedMmaJob make_job(const Weight& weight, std::int32_t weight_row_off
     };
 }
 
-template <std::int32_t kValueRows>
+template <class Schedule, std::int32_t kValueRows>
 void launch_slice(bool full, const Tensor& x, const Weight& qk_weight,
                   const Weight& value_z_weight, Tensor& qkv, Tensor& z, cudaStream_t stream) {
-    using Schedule                    = GemmCfg<64, 128, 64, 64, 16, 2, 1, false, true, true>;
     const RowSplitGroupedMmaJob qk    = make_job(qk_weight, 0, qk_weight.n, qkv, 0);
     const RowSplitGroupedMmaJob value = make_job(value_z_weight, 0, kValueRows, qkv, qk_weight.n);
     const RowSplitGroupedMmaJob output_gate =
@@ -62,33 +61,95 @@ void launch_slice(bool full, const Tensor& x, const Weight& qk_weight,
     CUDA_CHECK(cudaGetLastError());
 }
 
-void launch_slice_geometry(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
-                           Tensor& qkv, Tensor& z, cudaStream_t stream) {
-    const bool full = (x.ne[1] % 128) == 0;
+template <class Schedule>
+void launch_slice_geometry(const Tensor& x,
+                           const Weight& qk_weight,
+                           const Weight& value_z_weight,
+                           Tensor& qkv, Tensor& z,
+                           cudaStream_t stream) {
+    const bool full = (x.ne[1] % Schedule::BN) == 0;
+
     switch (x.ne[0]) {
     case 5120:
-        launch_slice<6144>(full, x, qk_weight, value_z_weight, qkv, z, stream);
+        launch_slice<Schedule, 6144>(
+            full, x, qk_weight, value_z_weight, qkv, z, stream);
         return;
+
     case 4096:
-        launch_slice<4096>(full, x, qk_weight, value_z_weight, qkv, z, stream);
+        launch_slice<Schedule, 4096>(
+            full, x, qk_weight, value_z_weight, qkv, z, stream);
         return;
+
     default:
-        throw std::invalid_argument("GDN Q4/Q5 grouped MMA: unsupported input width");
+        throw std::invalid_argument(
+            "GDN Q4/Q5 grouped MMA: unsupported input width");
     }
+}
+
+template <class Schedule>
+void launch_grouped(const Tensor& x,
+                    const Weight& qk_weight,
+                    const Weight& value_z_weight,
+                    Tensor& qkv, Tensor& z,
+                    cudaStream_t stream) {
+    constexpr std::int32_t kTileCols = Schedule::BN;
+
+    for_each_token_slice(
+        x.ne[1],
+        kTileCols,
+        [&](std::int32_t offset, std::int32_t count) {
+            const Tensor x_slice = x.slice(1, offset, count);
+            Tensor qkv_slice = qkv.slice(1, offset, count);
+            Tensor z_slice = z.slice(1, offset, count);
+
+            launch_slice_geometry<Schedule>(
+                x_slice,
+                qk_weight,
+                value_z_weight,
+                qkv_slice,
+                z_slice,
+                stream);
+        });
 }
 
 } // namespace
 
-void q4_q5_gdn_input_grouped_mma_launch(const Tensor& x, const Weight& qk_weight,
-                                        const Weight& value_z_weight, Tensor& qkv, Tensor& z,
-                                        cudaStream_t stream) {
-    constexpr std::int32_t kTileCols = 128;
-    for_each_token_slice(x.ne[1], kTileCols, [&](std::int32_t offset, std::int32_t count) {
-        const Tensor x_slice = x.slice(1, offset, count);
-        Tensor qkv_slice     = qkv.slice(1, offset, count);
-        Tensor z_slice       = z.slice(1, offset, count);
-        launch_slice_geometry(x_slice, qk_weight, value_z_weight, qkv_slice, z_slice, stream);
-    });
+void q4_q5_gdn_input_grouped_mma_launch(
+    const Tensor& x,
+    const Weight& qk_weight,
+    const Weight& value_z_weight,
+    Tensor& qkv,
+    Tensor& z,
+    Q4Q5GdnInputScheduleId schedule,
+    cudaStream_t stream) {
+
+    switch (schedule) {
+    case Q4Q5GdnInputScheduleId::GroupedMixedMmaR32C32S2:
+        launch_grouped<
+            GemmCfg<32, 32, 64, 16, 16, 2, 1, false, true, true>>(
+                x, qk_weight, value_z_weight, qkv, z, stream);
+        return;
+
+    case Q4Q5GdnInputScheduleId::GroupedMixedMmaR32C64S4:
+        launch_grouped<
+            GemmCfg<32, 64, 64, 16, 16, 4, 1, false, true, true>>(
+                x, qk_weight, value_z_weight, qkv, z, stream);
+        return;
+
+    case Q4Q5GdnInputScheduleId::GroupedMixedMmaR64C128:
+    case Q4Q5GdnInputScheduleId::GroupedMixedMmaR64C128S2:
+        launch_grouped<
+            GemmCfg<64, 128, 64, 64, 16, 2, 1, false, true, true>>(
+                x, qk_weight, value_z_weight, qkv, z, stream);
+        return;
+
+    case Q4Q5GdnInputScheduleId::IndependentDirectFixed:
+    case Q4Q5GdnInputScheduleId::Int8Jobs:
+        break;
+    }
+
+    throw std::logic_error(
+        "Q4/Q5 GDN input: grouped MMA schedule is unknown");
 }
 
 } // namespace ninfer::ops::detail

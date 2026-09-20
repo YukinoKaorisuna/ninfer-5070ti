@@ -27,7 +27,14 @@ struct RouteSpec {
     Q4Q5GdnInputScheduleId schedule;
 };
 
-constexpr std::array<RouteSpec, 2> kA16Routes{{
+constexpr std::array<RouteSpec, 4> kA16Routes5120{{
+    {{1, 12}, Q4Q5GdnInputScheduleId::IndependentDirectFixed},
+    {{13, 32}, Q4Q5GdnInputScheduleId::GroupedMixedMmaR32C32S2},
+    {{33, 64}, Q4Q5GdnInputScheduleId::GroupedMixedMmaR32C64S4},
+    {{65, kAnyCols}, Q4Q5GdnInputScheduleId::GroupedMixedMmaR64C128S2},
+}};
+
+constexpr std::array<RouteSpec, 2> kA16Routes4096{{
     {{1, 16}, Q4Q5GdnInputScheduleId::IndependentDirectFixed},
     {{17, kAnyCols}, Q4Q5GdnInputScheduleId::GroupedMixedMmaR64C128},
 }};
@@ -55,13 +62,24 @@ constexpr bool catalog_is_closed(const std::array<RouteSpec, N>& routes) noexcep
            expected == static_cast<std::int64_t>(kAnyCols) + 1;
 }
 
-static_assert(catalog_is_closed(kA16Routes) && catalog_is_closed(kA8Routes),
+static_assert(catalog_is_closed(kA16Routes5120) &&
+                  catalog_is_closed(kA16Routes4096) &&
+                  catalog_is_closed(kA8Routes),
               "GDN input routes must be exact and closed");
 
 template <class Visit>
-auto visit_routes(LinearPolicy policy, Visit&& visit) {
-    if (policy == LinearPolicy::AllowA8) { return visit(kA8Routes); }
-    return visit(kA16Routes);
+auto visit_routes(const Q4Q5GdnInputProblem& problem,
+                  LinearPolicy policy,
+                  Visit&& visit) {
+    if (policy == LinearPolicy::AllowA8) {
+        return visit(kA8Routes);
+    }
+
+    if (problem.input_rows == 4096) {
+        return visit(kA16Routes4096);
+    }
+
+    return visit(kA16Routes5120);
 }
 
 template <class Allocator>
@@ -97,6 +115,12 @@ const char* q4_q5_gdn_input_schedule_name(Q4Q5GdnInputScheduleId schedule) noexc
         return "gdn_input_proj.q4_q5.independent_direct_fixed";
     case Q4Q5GdnInputScheduleId::GroupedMixedMmaR64C128:
         return "gdn_input_proj.q4_q5.grouped_mixed.mma.r64.c128";
+    case Q4Q5GdnInputScheduleId::GroupedMixedMmaR32C32S2:
+        return "gdn_input_proj.q4_q5.grouped_mixed.mma.r32.c32.s2";
+    case Q4Q5GdnInputScheduleId::GroupedMixedMmaR32C64S4:
+        return "gdn_input_proj.q4_q5.grouped_mixed.mma.r32.c64.s4";
+    case Q4Q5GdnInputScheduleId::GroupedMixedMmaR64C128S2:
+        return "gdn_input_proj.q4_q5.grouped_mixed.mma.r64.c128.s2";
     case Q4Q5GdnInputScheduleId::Int8Jobs:
         return "gdn_input_proj.q4_q5.int8.jobs";
     }
@@ -124,7 +148,7 @@ Q4Q5GdnInputPlan q4_q5_gdn_input_resolve_plan(const Q4Q5GdnInputProblem& problem
             "Q4/Q5 GDN input: exact problem or column count is not admitted");
     }
 
-    return visit_routes(policy, [&](const auto& routes) -> Q4Q5GdnInputPlan {
+    return visit_routes(problem, policy, [&](const auto& routes) -> Q4Q5GdnInputPlan {
         for (const RouteSpec& route : routes) {
             if (!route.cols.contains(problem.cols)) { continue; }
             if (route.schedule == Q4Q5GdnInputScheduleId::Int8Jobs) {
@@ -178,6 +202,29 @@ void q4_q5_gdn_input_execute_plan(const Q4Q5GdnInputPlan& plan, const Tensor& x,
         throw std::invalid_argument("Q4/Q5 GDN input: plan does not match exact problem");
     }
 
+    // Preserve the fork's existing Q4 value/z path exactly.
+    // Upstream 9e163eee was qualified for the Q4/Q5 A16 parent pair;
+    // the mixed-Q4 production artifact must not silently acquire new
+    // Q4/Q4 GDN routing without separate RTX 5080 qualification.
+    if (value_z_weight.qtype == QType::Q4G64_F16S &&
+        policy != LinearPolicy::AllowA8) {
+        if (x.ne[1] <= 16) {
+            Tensor qk = qkv.slice(0, 0, problem.qk_rows);
+            Tensor value = qkv.slice(0, problem.qk_rows, problem.z_rows);
+
+            q4_q5_gdn_input_independent_launch(
+                x, qk_weight, value_z_weight,
+                qk, value, z, stream);
+        } else {
+            q4_q5_gdn_input_grouped_mma_launch(
+                x, qk_weight, value_z_weight,
+                qkv, z,
+                Q4Q5GdnInputScheduleId::GroupedMixedMmaR64C128,
+                stream);
+        }
+        return;
+    }
+
     switch (plan.schedule) {
     case Q4Q5GdnInputScheduleId::Int8Jobs: {
         if (ws == nullptr) {
@@ -196,7 +243,12 @@ void q4_q5_gdn_input_execute_plan(const Q4Q5GdnInputPlan& plan, const Tensor& x,
         return;
     }
     case Q4Q5GdnInputScheduleId::GroupedMixedMmaR64C128:
-        q4_q5_gdn_input_grouped_mma_launch(x, qk_weight, value_z_weight, qkv, z, stream);
+    case Q4Q5GdnInputScheduleId::GroupedMixedMmaR32C32S2:
+    case Q4Q5GdnInputScheduleId::GroupedMixedMmaR32C64S4:
+    case Q4Q5GdnInputScheduleId::GroupedMixedMmaR64C128S2:
+        q4_q5_gdn_input_grouped_mma_launch(
+            x, qk_weight, value_z_weight,
+            qkv, z, plan.schedule, stream);
         return;
     }
     throw std::logic_error("Q4/Q5 GDN input: unknown schedule");

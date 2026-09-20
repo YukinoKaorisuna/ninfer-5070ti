@@ -27,7 +27,20 @@ struct RouteSpec {
     Q4Q5AttnInputScheduleId schedule;
 };
 
-constexpr std::array<RouteSpec, 3> kA16Routes{{
+constexpr std::array<RouteSpec, 6> kA16Routes5120{{
+    {{1, 12}, Q4Q5AttnInputScheduleId::ParentSplitFixed},
+    {{13, 32}, Q4Q5AttnInputScheduleId::MixedR32C32S2},
+    {{33, 64}, Q4Q5AttnInputScheduleId::MixedR32C64S3},
+    {{65, 104}, Q4Q5AttnInputScheduleId::PairR32C64S3},
+    {{105, 128}, Q4Q5AttnInputScheduleId::MixedR64C128S2},
+    {{129, 192}, Q4Q5AttnInputScheduleId::PairR32C64S4},
+}};
+
+constexpr std::array<RouteSpec, 1> kA16Routes5120Tail{{
+    {{193, kAnyCols}, Q4Q5AttnInputScheduleId::MixedR64C128S2},
+}};
+
+constexpr std::array<RouteSpec, 3> kA16Routes4096{{
     {{1, 16}, Q4Q5AttnInputScheduleId::ParentSplitFixed},
     {{17, 20}, Q4Q5AttnInputScheduleId::GroupedHomogeneousPairMmaR16C64S3},
     {{21, kAnyCols}, Q4Q5AttnInputScheduleId::GroupedHomogeneousPairMmaR32C64S4},
@@ -61,13 +74,49 @@ constexpr bool catalog_is_closed(const std::array<RouteSpec, N>& routes) noexcep
            expected == static_cast<std::int64_t>(kAnyCols) + 1;
 }
 
-static_assert(catalog_is_closed(kA16Routes) && catalog_is_closed(kA8Routes),
+static_assert(catalog_is_closed(kA16Routes4096) &&
+                  catalog_is_closed(kA8Routes),
               "attention input routes must be exact and closed");
 
+constexpr bool catalog_5120_is_closed() noexcept {
+    if (kA16Routes5120.front().cols.first != 1) return false;
+
+    for (std::size_t i = 0; i + 1 < kA16Routes5120.size(); ++i) {
+        if (kA16Routes5120[i].cols.last + 1 !=
+            kA16Routes5120[i + 1].cols.first) {
+            return false;
+        }
+    }
+
+    return kA16Routes5120.back().cols.last == 192 &&
+           kA16Routes5120Tail.front().cols.first == 193 &&
+           kA16Routes5120Tail.back().cols.last == kAnyCols;
+}
+
+static_assert(catalog_5120_is_closed(),
+              "5120 attention input routes must be exact and closed");
+
 template <class Visit>
-auto visit_routes(LinearPolicy policy, Visit&& visit) {
-    if (policy == LinearPolicy::AllowA8) { return visit(kA8Routes); }
-    return visit(kA16Routes);
+auto visit_routes(const Q4Q5AttnInputProblem& problem,
+                  LinearPolicy policy,
+                  Visit&& visit) {
+    if (policy == LinearPolicy::AllowA8) {
+        return visit(kA8Routes);
+    }
+
+    if (problem.input_rows == 4096) {
+        return visit(kA16Routes4096);
+    }
+
+    // 5120 is non-monotonic in 105..192, so expose the two catalog
+    // pieces to one visitor while retaining a compile-time closed map.
+    for (const RouteSpec& route : kA16Routes5120) {
+        if (route.cols.contains(problem.cols)) {
+            return visit(std::array<RouteSpec, 1>{{route}});
+        }
+    }
+
+    return visit(kA16Routes5120Tail);
 }
 
 template <class Allocator>
@@ -103,6 +152,16 @@ const char* q4_q5_attn_input_schedule_name(Q4Q5AttnInputScheduleId schedule) noe
         return "attn_input_proj.q4_q5.grouped_homogeneous_pair.mma.r16.c64.s3";
     case Q4Q5AttnInputScheduleId::GroupedHomogeneousPairMmaR32C64S4:
         return "attn_input_proj.q4_q5.grouped_homogeneous_pair.mma.r32.c64.s4";
+    case Q4Q5AttnInputScheduleId::MixedR32C32S2:
+        return "attn_input_proj.q4_q5.mixed.r32.c32.s2";
+    case Q4Q5AttnInputScheduleId::MixedR32C64S3:
+        return "attn_input_proj.q4_q5.mixed.r32.c64.s3";
+    case Q4Q5AttnInputScheduleId::PairR32C64S3:
+        return "attn_input_proj.q4_q5.pair.r32.c64.s3";
+    case Q4Q5AttnInputScheduleId::MixedR64C128S2:
+        return "attn_input_proj.q4_q5.mixed.r64.c128.s2";
+    case Q4Q5AttnInputScheduleId::PairR32C64S4:
+        return "attn_input_proj.q4_q5.pair.r32.c64.s4";
     case Q4Q5AttnInputScheduleId::Int8Pairs:
         return "attn_input_proj.q4_q5.int8.pairs";
     }
@@ -120,7 +179,7 @@ Q4Q5AttnInputPlan q4_q5_attn_input_resolve_plan(const Q4Q5AttnInputProblem& prob
             "Q4/Q5 attention input: exact problem or column count is not admitted");
     }
 
-    return visit_routes(policy, [&](const auto& routes) -> Q4Q5AttnInputPlan {
+    return visit_routes(problem, policy, [&](const auto& routes) -> Q4Q5AttnInputPlan {
         for (const RouteSpec& route : routes) {
             if (!route.cols.contains(problem.cols)) { continue; }
             if (route.schedule == Q4Q5AttnInputScheduleId::Int8Pairs) {
@@ -208,8 +267,39 @@ void q4_q5_attn_input_execute_plan(const Q4Q5AttnInputPlan& plan, const Tensor& 
                                                        gate, k, v, stream);
         return;
     case Q4Q5AttnInputScheduleId::GroupedHomogeneousPairMmaR32C64S4:
-        q4_q5_attn_input_grouped_mma_r32_c64_s4_launch(x, query_key_weight, gate_value_weight, q,
-                                                       gate, k, v, stream);
+        q4_q5_attn_input_grouped_mma_r32_c64_s4_launch(
+            x, query_key_weight, gate_value_weight,
+            q, gate, k, v, stream);
+        return;
+
+    case Q4Q5AttnInputScheduleId::MixedR32C32S2:
+        q4_q5_attn_input_mixed_r32_c32_s2_launch(
+            x, query_key_weight, gate_value_weight,
+            q, gate, k, v, stream);
+        return;
+
+    case Q4Q5AttnInputScheduleId::MixedR32C64S3:
+        q4_q5_attn_input_mixed_r32_c64_s3_launch(
+            x, query_key_weight, gate_value_weight,
+            q, gate, k, v, stream);
+        return;
+
+    case Q4Q5AttnInputScheduleId::PairR32C64S3:
+        q4_q5_attn_input_pair_r32_c64_s3_launch(
+            x, query_key_weight, gate_value_weight,
+            q, gate, k, v, stream);
+        return;
+
+    case Q4Q5AttnInputScheduleId::MixedR64C128S2:
+        q4_q5_attn_input_mixed_r64_c128_s2_launch(
+            x, query_key_weight, gate_value_weight,
+            q, gate, k, v, stream);
+        return;
+
+    case Q4Q5AttnInputScheduleId::PairR32C64S4:
+        q4_q5_attn_input_grouped_mma_r32_c64_s4_launch(
+            x, query_key_weight, gate_value_weight,
+            q, gate, k, v, stream);
         return;
     }
     throw std::logic_error("Q4/Q5 attention input: unknown schedule");
