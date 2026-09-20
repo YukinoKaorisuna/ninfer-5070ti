@@ -1,8 +1,8 @@
 # Validated Release Manifest
 
-This file records both the immutable original text-only 128K release and the later validated Vision-enabled source that is now recommended on `main`.
+This file records immutable and subsequently validated milestones by exact commit, binary and artifact identity. Validation claims are attached to the source tree that was actually tested rather than to a floating branch label.
 
-## Current recommended Vision source
+## Vision source milestone — `7c10db07`
 
 ```text
 repository: toddballinger/ninfer-5080
@@ -13,6 +13,45 @@ merged to main via PR #1
 ```
 
 The Vision source adds independent Vision budgeting, earlier GDN temporary release, HostMapped Vision weights and cache-aware historical-media accounting.
+
+## Feature-complete mainline runtime milestone — `b44b1958`
+
+The runtime tree qualified after both the PR #3 `9e163eee` semantic port and PR #5 rolling-tool reconciliation is:
+
+```text
+runtime commit: b44b1958c301ec6bf4d18973a97d7b42fa6733aa
+9e163eee semantic port: 4b62aca386a0a214049201ebeb2a422b0cb609ce
+PR #3 merge: 33546d7d5be6d82eaac5e4a87a3f7e578f8a1a13
+PR #5 merge / qualified runtime: b44b1958c301ec6bf4d18973a97d7b42fa6733aa
+```
+
+Exact post-reconciliation 118,001-token qualification:
+
+```text
+PROMPT_SHA256=078d726e07b6c610d3136751fb2bdfbf4965ebdd9d8afc1a07dedb9ac03fe0fd
+MODEL_SHA256=c4a7e9ab593a7f42d58208fa0065d67a82d61921107686cc9f6ed1ec6b050e21
+PROMPT_TOKENS=118001
+MAX_CONTEXT=131072
+KV_CAPACITY=131072
+PREFILL_CHUNK=896
+KV_DTYPE=q4-group64
+SPECULATION=mtp
+DRAFT_TOKENS=3
+MAX_NEW=32
+THINKING=off
+GREEDY=on
+CUDA_GRAPHS=off
+PREFILL_TOK_S=1378.85
+DECODE_TOK_S=71.44
+MTP_ACCEPTANCE_RATE=44.74%
+MTP_ACCEPTANCE_LENGTH=2.31
+GPU_WORKSPACE_PEAK=116.00_MiB
+FREE_AFTER_STARTUP=44.56_MiB
+PLANNED_SLACK=46.39_MiB
+RESULT=PASS_EQUIVALENT_WITHIN_NOISE
+```
+
+PR #4 later advanced GitHub `main` to `c8439fbcb89a4daf74cf2692a9425930998c763f` with a documentation-only change to `docs/BENCHMARKS.md`. No runtime source changed, so the qualification above remains attached to `b44b1958`.
 
 ## Original immutable text-only release
 
