@@ -1,33 +1,51 @@
 # NInfer documentation
 
-Start with the [project README](../README.md) to build NInfer, obtain an artifact, and run the CLI or HTTP server.
+Start with the [project README](../README.md) for the validated RTX 5080 profile, official artifact, serving settings and release status.
 
 ## RTX 5080 true-128K project guides
 
 | Document | Purpose |
 |---|---|
-| [True 128K + Vision on RTX 5080](VISION_128K.md) | recommended Vision serving profile, 1792/2048 settings, memory envelope and validation |
-| [Qwen3.8-27B RTX 5080 v1.3 release](RELEASE_QWEN3.8_27B_RTX5080_V1.3.md) | v1.3 runtime, reasoning-budget and rolling-tool checkpoint validation |
-| [Reproducibility](REPRODUCIBILITY.md) | exact 128K reproduction settings and hashes |
-| [Benchmarks](BENCHMARKS.md) | original vs Vision-source long-context results and multimodal measurements |
-| [Memory profile](MEMORY_PROFILE.md) | mixed quantization, GDN lifetime recovery and HostMapped Vision fit |
-| [Validated manifest](VALIDATED_MANIFEST.md) | source, model and binary hashes plus acceptance status |
+| [Qwen3.8-27B RTX 5080 v1.3 release](RELEASE_QWEN3.8_27B_RTX5080_V1.3.md) | validated v1.3 production runtime, thinking-budget and rolling-tool checkpoint behavior |
+| [Validated manifest](VALIDATED_MANIFEST.md) | immutable model/binary identities and commit-scoped qualification records |
+| [True 128K + Vision on RTX 5080](VISION_128K.md) | 1792/2048 Vision profiles, memory envelope and multimodal validation |
+| [Reproducibility](REPRODUCIBILITY.md) | exact model revisions, build path, hashes and runtime settings |
+| [Benchmarks](BENCHMARKS.md) | long-context, multimodal and runtime comparison results |
+| [Memory profile](MEMORY_PROFILE.md) | mixed quantization, workspace recovery and HostMapped Vision fit |
+| [Upstream sync status](UPSTREAM_SYNC_STATUS.md) | selective semantic-port ledger, production-relevance policy and pending upstream work |
 | [Technical deep dive](TECHNICAL_DEEP_DIVE.md) | architecture and optimization details |
-| [Failures and lessons](FAILURES_AND_LESSONS.md) | dead ends and recovery work |
+| [Failures and lessons](FAILURES_AND_LESSONS.md) | dead ends, regressions and recovery work |
 | [History](HISTORY.md) | chronological engineering journey |
+| [Publishing and sharing](PUBLISHING_AND_SHARING.md) | official distribution locations and public-release guidance |
+
+## Official RTX 5080 artifact
+
+The project-maintained public artifact is:
+
+**[ninfer-5080/Qwen3.8-27B-RTX5080](https://huggingface.co/ninfer-5080/Qwen3.8-27B-RTX5080)**
+
+```text
+file:   qwen3_8_27b.ninfer
+bytes:  16461267456
+SHA256: c4a7e9ab593a7f42d58208fa0065d67a82d61921107686cc9f6ed1ec6b050e21
+```
+
+This is the canonical validated artifact for the RTX 5080 true-128K profile. Runtime releases may advance independently while continuing to use the same model artifact.
 
 ## General user guides
 
 | Document | Purpose |
 |---|---|
-| [CLI](cli.md) | text, chat-history, image/video input, output streams, sampling, MTP, and common runtime options |
+| [CLI](cli.md) | text, chat-history, image/video input, output streams, sampling, MTP and common runtime options |
 | [HTTP serving](serving.md) | OpenAI Responses/Chat Completions, Anthropic Messages, state, streaming, token counting, authentication, tools and multimodal input |
-| [Performance](performance.md) | performance results and reproduction commands |
-| [CLI examples](../examples/cli/) | committed text, multimodal, thinking, long-decode, and long-context inputs |
+| [Performance](performance.md) | general performance results and reproduction commands |
+| [CLI examples](../examples/cli/) | committed text, multimodal, thinking, long-decode and long-context inputs |
 
-The executable `--help` output is the exact source for command-line option spelling and defaults.
+The executable `--help` output remains the exact source for command-line option spelling and defaults.
 
-## Model artifacts
+## Other upstream/community model artifacts
+
+These are separate from the project-maintained RTX 5080 artifact above:
 
 | Model | Weights | Download | Versioned model card source |
 |---|---|---|---|
@@ -46,7 +64,7 @@ The executable `--help` output is the exact source for command-line option spell
 
 ## Maintainer references
 
-The active references under [`maintainer/`](maintainer/) record current architecture, model, artifact, and maintenance contracts. These files are not additional user workflows or installed API documentation.
+The active references under [`maintainer/`](maintainer/) record current architecture, model, artifact and maintenance contracts. These files are not additional user workflows or installed API documentation.
 
 Runtime and Op references:
 
@@ -70,4 +88,4 @@ Artifact and model references:
 
 Pending implementation work:
 
-- [Softmax Attention organization and migration](maintainer/softmax-attention.md) describes the single target state for an unfinished source and public-contract cutover; it is not the current implementation map.
+- [Softmax Attention organization and migration](maintainer/softmax-attention.md) describes the single target state for an unfinished source/public-contract cutover; it is not the current implementation map.
