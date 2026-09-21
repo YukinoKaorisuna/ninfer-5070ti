@@ -348,3 +348,47 @@ All five continuation requests had an uncached prompt suffix below 4,096 tokens.
 The exact v1.2 118,001-token long-context and deterministic Vision/OOM validation remains preserved in the v1.2 release record.
 
 Full record: `docs/RELEASE_QWEN3.8_27B_RTX5080_V1.3.md`.
+
+---
+
+## Official Hugging Face publication — 2026-09-21
+
+The project-maintained public artifact was published to:
+
+```text
+Hugging Face repository:
+ninfer-5080/Qwen3.8-27B-RTX5080
+
+artifact:
+qwen3_8_27b.ninfer
+
+bytes:
+16461267456
+
+SHA256:
+c4a7e9ab593a7f42d58208fa0065d67a82d61921107686cc9f6ed1ec6b050e21
+```
+
+The publication was gated immediately before upload against the validated local artifact and the v1.3 production server binary.
+
+```text
+MODEL_VALIDATION=PASS
+MODEL_SIZE=16461267456
+MODEL_SHA256=c4a7e9ab593a7f42d58208fa0065d67a82d61921107686cc9f6ed1ec6b050e21
+
+SERVER_VALIDATION=PASS
+NINFER_SERVE_SHA256=3179bfbcb88a72c04b983f28c25c62db468fbc8ef267fe043899de30a4281c56
+```
+
+The uploaded model commit was:
+
+```text
+4120bd9a68cf2d2829c5f6b83ace8c9280b4b823
+```
+
+The Hugging Face repository also contains a model card and checksum record. A temporary write-access test file used before the release was removed after publication.
+
+This publication establishes the project-owned Hugging Face repository as the canonical distribution location for the validated RTX 5080 artifact. The existing model SHA remains unchanged; later runtime work should not be described as requiring a new model artifact unless the artifact identity itself changes.
+
+Automated CPU-only conversion/publication is being integrated separately. Any future workflow claiming byte-identical reproduction should enforce the exact expected byte size and SHA-256 before publishing.
+
