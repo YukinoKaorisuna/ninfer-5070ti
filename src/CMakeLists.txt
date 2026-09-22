@@ -66,6 +66,7 @@ add_library(ninfer_ops STATIC
   ops/launcher/add_bias.cu
   ops/launcher/argmax.cu
   ops/launcher/cast.cu
+  ops/launcher/constrained_choice.cu
   ops/launcher/causal_conv1d.cu
   ops/launcher/embed_gather.cu
   ops/launcher/gdn_gating.cu
@@ -264,6 +265,7 @@ add_library(ninfer_ops STATIC
   ops/wrapper/add_bias.cpp
   ops/wrapper/argmax.cpp
   ops/wrapper/cast.cpp
+  ops/wrapper/constrained_choice.cpp
   ops/wrapper/causal_conv1d_silu.cpp
   ops/wrapper/dynamic_grouped_conv.cpp
   ops/wrapper/embedding.cpp

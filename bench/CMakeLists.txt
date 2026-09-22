@@ -29,6 +29,8 @@ ninfer_add_op_bench(ninfer_rope_bench SOURCES ops/rope_bench.cu)
 ninfer_add_op_bench(ninfer_rmsnorm_rope_bench SOURCES ops/rmsnorm_rope_bench.cu)
 ninfer_add_op_bench(ninfer_candidate_selector_bench
   SOURCES ops/candidate_selector_bench.cu)
+ninfer_add_op_bench(ninfer_constrained_choice_bench
+  SOURCES ops/constrained_choice_bench.cu)
 ninfer_add_op_bench(ninfer_add_bias_bench SOURCES ops/add_bias_bench.cu)
 ninfer_add_op_bench(ninfer_gelu_bench SOURCES ops/gelu_bench.cu)
 ninfer_add_op_bench(ninfer_layer_norm_bench SOURCES ops/layer_norm_bench.cu)

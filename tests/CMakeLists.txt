@@ -231,6 +231,9 @@ ninfer_add_op_test(ninfer_context_kv_materialize_test
 ninfer_add_op_test(ninfer_candidate_selector_test
   SOURCES ops/test_candidate_selector.cpp
   LIBRARIES ninfer_ops)
+ninfer_add_op_test(ninfer_constrained_choice_test
+  SOURCES ops/test_constrained_choice.cpp
+  LIBRARIES ninfer_ops)
 ninfer_add_op_test(ninfer_prepare_masked_block_test
   SOURCES ops/test_prepare_masked_block.cpp
   LIBRARIES ninfer_ops)
