@@ -40,7 +40,10 @@ GPU residency is frozen when the Engine starts:
 - a speculative backend with the full proposal head omits the optimized proposal head;
 - Vision is disabled by default, omitting its weights, Vision scratch phase, and frozen
   request-transient allocation;
-- `--vision` loads those allocations and enables image/video input.
+- `--vision` loads those allocations and enables image/video input;
+- `--embed-cpu` keeps the token embedding table in pinned host RAM; the GPU reads the needed rows
+  over PCIe (UVA), freeing the table's device footprint. It is orthogonal to the Vision flags and
+  works with every execution route, including the speculative backends.
 
 The complete `.ninfer` inventory is still validated. These choices are not lazy loading: a
 text-only Engine rejects media and cannot enable Vision later. DFlash and Vision are mutually
@@ -145,6 +148,7 @@ measured recommendation rather than a semantic limit.
 | `--draft-tokens N` | MTP `1..5`; DFlash `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--vision` | enable image/video input and load Vision GPU allocations | off |
+| `--embed-cpu` | keep the token embedding table in pinned host RAM; the GPU reads the needed rows over PCIe; works with all routes including `--spec` | off |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
 | `--no-thinking` | disable thinking in prompt rendering | thinking on |
 | `--reasoning-effort low\|medium\|xhigh` | select an effort exposed by the loaded chat template | template default |
