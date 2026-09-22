@@ -12,7 +12,21 @@ download an artifact using the [project README](../README.md) before following t
   --max-new 256
 ```
 
-Exactly one of `--prompt` and `--messages` is required.
+Exactly one of `--prompt`, `--prompt-file`, and `--messages` is required.
+
+`--prompt-file <path>` reads raw prompt text directly from disk rather than
+placing the complete prompt in a command-line argument. This is useful for
+long-context workloads that can exceed operating-system command-line argument
+limits.
+
+For example:
+
+```bash
+./build/apps/ninfer models/qwen3_8_27b.ninfer \
+  --prompt-file bench/fixtures/qwen38_118001_prompt.txt \
+  --max-context 131072 \
+  --max-new 32
+```
 
 Answer content is streamed to stdout. Reasoning, model loading (including the registered target and
 canonical `weights_id`), timings, throughput, GPU memory, and speculative-decoding statistics are
@@ -143,6 +157,9 @@ measured recommendation rather than a semantic limit.
 | `--kv-dtype bf16\|int8` | KV-cache storage | `bf16` |
 | `--spec mtp\|dflash` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash `1..15` | unset |
+| `--prompt <text>` | raw prompt text supplied on the command line | mutually exclusive with `--prompt-file` and `--messages` |
+| `--prompt-file <path>` | raw prompt text read directly from a file | mutually exclusive with `--prompt` and `--messages` |
+| `--messages <path>` | structured message/tool JSON input | mutually exclusive with `--prompt` and `--prompt-file` |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--vision` | enable image/video input and load Vision GPU allocations | off |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |

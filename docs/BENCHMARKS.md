@@ -341,3 +341,40 @@ PROMPT_SHA256=078d726e07b6c610d3136751fb2bdfbf4965ebdd9d8afc1a07dedb9ac03fe0fd
 ```
 
 Qualification result: **PASS**.
+Canonical 118,001-token qualification fixture
+
+The repository includes the exact synthetic fixture used for the historical
+118,001-token RTX 5080 long-context qualification:
+
+bench/fixtures/qwen38_118001_prompt.txt
+
+Identity:
+
+bytes: 491625
+SHA256: 078d726e07b6c610d3136751fb2bdfbf4965ebdd9d8afc1a07dedb9ac03fe0fd
+prepared prompt tokens: 118001
+
+The fixture consists of deterministic repeated Greek-alphabet text and contains
+no private user data, credentials, or external corpus material.
+
+Run the canonical qualification with:
+
+tools/qualify_qwen38_118k.sh /path/to/qwen3_8_27b.ninfer
+
+The harness verifies both the fixture SHA-256 and the canonical validated model
+artifact SHA-256 before execution.
+
+The qualification configuration is:
+
+max context:   131072
+KV capacity:   131072
+prefill chunk: 896
+KV dtype:      q4-group64
+speculation:   MTP-3
+max new:       32
+thinking:      disabled
+sampling:      greedy
+CUDA Graph:    disabled
+
+Additional NInfer CLI options can be appended after the model path to compare a
+runtime feature against the same immutable fixture and configuration.
