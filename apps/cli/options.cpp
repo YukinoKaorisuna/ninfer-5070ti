@@ -4,6 +4,8 @@
 #include <cerrno>
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 #include <string_view>
@@ -75,7 +77,7 @@ ReasoningEffort parse_reasoning_effort(std::string_view text) {
 
 std::string usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
-           " <model.ninfer> (--prompt <text>|--messages <messages.json>)\n"
+           " <model.ninfer> (--prompt <text>|--prompt-file <path>|--messages <messages.json>)\n"
            "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
            "       [--device N]\n"
            "       [--kv-dtype bf16|int8|q4] [--spec mtp|dflash|dflash2 --draft-tokens N]\n"
@@ -117,6 +119,18 @@ Options parse_options(int argc, char** argv) {
 
         if (arg == "--prompt") {
             options.prompt = value(arg);
+        } else if (arg == "--prompt-file") {
+            const std::string path = value(arg);
+            std::ifstream file(path, std::ios::binary);
+
+            if (!file) {
+                throw std::invalid_argument(
+                    "cannot open prompt file: " + path);
+            }
+
+            options.prompt.assign(
+                std::istreambuf_iterator<char>(file),
+                std::istreambuf_iterator<char>());
         } else if (arg == "--messages") {
             options.messages_path = value(arg);
         } else if (arg == "--max-new") {
