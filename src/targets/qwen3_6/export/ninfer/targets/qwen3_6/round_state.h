@@ -97,6 +97,12 @@ struct OrdinaryDecodeStateLayout {
     LayoutRegion egress;
     TensorRegion logits;
     TensorRegion hidden;
+
+    // M1 constrained-decision scratch. These tensors are persistent so
+    // decision scoring does not consume additional transient workspace.
+    TensorRegion decision_candidate_ids;
+    TensorRegion decision_probabilities;
+    TensorRegion decision_winners;
 };
 
 struct MtpPrefillStateLayout {
@@ -177,6 +183,10 @@ struct OrdinaryDecodeState {
     Tensor sampled_tokens;
     Tensor logits;
     Tensor hidden;
+
+    Tensor decision_candidate_ids;
+    Tensor decision_probabilities;
+    Tensor decision_winners;
 
     OrdinaryDecodeState() = default;
     OrdinaryDecodeState(DeviceSpan backing, const OrdinaryDecodeStateLayout& layout,

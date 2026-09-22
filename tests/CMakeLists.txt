@@ -110,6 +110,21 @@ ninfer_add_test(ninfer_qwen3_6_27b_prefix_real_test
   SOURCES targets/qwen3_6_27b/test_engine_prefix_real.cpp
   LIBRARIES ninfer_engine)
 set_tests_properties(ninfer_qwen3_6_27b_prefix_real_test PROPERTIES SKIP_RETURN_CODE 77)
+ninfer_add_test(ninfer_qwen3_8_27b_constrained_decision_real_test
+  SOURCES targets/qwen3_6_27b/test_constrained_decision_real.cpp
+  LIBRARIES ninfer_engine)
+target_include_directories(
+  ninfer_qwen3_8_27b_constrained_decision_real_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_5_9b/export
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_27b/export
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_35b_a3b/export)
+target_link_libraries(
+  ninfer_qwen3_8_27b_constrained_decision_real_test PRIVATE
+  CUDA::cudart)
+set_tests_properties(
+  ninfer_qwen3_8_27b_constrained_decision_real_test
+  PROPERTIES SKIP_RETURN_CODE 77)
 ninfer_add_test(ninfer_qwen3_6_27b_load_plan_test
   SOURCES targets/qwen3_6_27b/test_load_plan.cpp
   NEEDS_SOURCE_DIR

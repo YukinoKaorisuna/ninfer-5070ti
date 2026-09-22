@@ -26,6 +26,7 @@
 namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS {
 
 using PreparedPromptData    = qwen3_6::PreparedPromptData;
+using DecisionProbeResult   = qwen3_6::DecisionProbeResult;
 using RewriteCheckpointKind = qwen3_6::RewriteCheckpointKind;
 using RewriteCheckpointSpec = qwen3_6::RewriteCheckpointSpec;
 
@@ -235,6 +236,14 @@ public:
     [[nodiscard]] GenerationTimings generation_timings_lane(std::uint32_t lane) const noexcept;
     [[nodiscard]] SpeculativeStats speculative_stats_lane(std::uint32_t lane) const noexcept;
 
+    // M1-B target-private constrained decision probe.
+    // Executes a suffix against a retained frontier and restores that frontier
+    // before returning.
+    [[nodiscard]] DecisionProbeResult
+    decision_probe_lane(std::uint32_t lane,
+                        std::span<const TokenId> suffix_tokens,
+                        std::span<const TokenId> candidate_tokens);
+
     [[nodiscard]] MemorySummary memory_summary() const noexcept;
 
     void reset_memory_peaks() noexcept;
@@ -292,6 +301,10 @@ public:
 
     PinnedHostBuffer round_host;
     std::optional<PinnedHostBuffer> rewrite_checkpoint_state_host;
+
+    // Separate from rewrite_checkpoint_state_host: constrained decisions must
+    // never overwrite the retained rolling/stable prefix checkpoint.
+    std::optional<PinnedHostBuffer> decision_frontier_state_host;
     std::optional<PinnedHostBuffer> dflash_rewrite_checkpoint_host;
     std::size_t dflash_rewrite_checkpoint_stride = 0;
     TokenId* host_tokens = nullptr;

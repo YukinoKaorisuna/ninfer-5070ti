@@ -142,3 +142,32 @@ M3:
 - calibration evaluation
 - OpenClaw routing integration
 - policy thresholds / abstention
+
+## M1-B decision frontier implementation
+
+Runtime reconnaissance established that M1-B does not require a second sequence
+lane.
+
+A retained sequence already owns the complete attention KV prefix while its
+linear-attention state occupies the stable state slot associated with that lane.
+
+M1-B therefore uses a reversible same-lane frontier:
+
+1. Capture the current linear/GDN state to a decision-specific pinned-host
+   snapshot.
+2. Re-bind the retained sequence's existing KV allocation.
+3. Temporarily enlarge KV page entitlement when a suffix crosses a page boundary.
+4. Execute explicit suffix tokens without sampling.
+5. Score the final next-token logits with `constrained_choice`.
+6. Restore the linear/GDN state from the host snapshot.
+7. Trim KV back to the original frontier.
+8. Restore the original page entitlement and unbind the retained allocation.
+
+No attention-prefix KV is copied.
+
+The ordinary decode path is reused but the decision traversal stops before
+sampling and does not publish continuation hidden into the retained sequence.
+
+The existing rewrite-checkpoint host allocation is deliberately not reused.
+Decision execution has a separate lazy pinned-host snapshot so ordinary prefix
+checkpoint policy remains unaffected.

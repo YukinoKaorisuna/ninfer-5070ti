@@ -65,6 +65,18 @@ RoundStateLayout begin_round_state_layout(LayoutBuilder& builder, const RoundSta
             add_tensor(builder, DType::BF16,
                        {spec.hidden, checked_i32(spec.batch_capacity, "RoundState batch capacity")},
                        "ordinary decode hidden");
+
+        const auto decision_batch =
+            checked_i32(spec.batch_capacity, "RoundState decision batch capacity");
+        ordinary.decision_candidate_ids =
+            add_tensor(builder, DType::I32, {16, decision_batch},
+                       "ordinary decision candidate ids");
+        ordinary.decision_probabilities =
+            add_tensor(builder, DType::FP32, {16, decision_batch},
+                       "ordinary decision probabilities");
+        ordinary.decision_winners =
+            add_tensor(builder, DType::I32, {decision_batch},
+                       "ordinary decision winners");
     }
     layout.token      = add_tensor(builder, DType::I32, {1}, "step token");
     layout.pos        = add_tensor(builder, DType::I32, {1}, "step position");
@@ -110,6 +122,10 @@ OrdinaryDecodeState::OrdinaryDecodeState(DeviceSpan backing,
                             DType::I32, {count});
     logits         = layout.logits.bind(backing);
     hidden         = layout.hidden.bind(backing);
+
+    decision_candidate_ids = layout.decision_candidate_ids.bind(backing);
+    decision_probabilities = layout.decision_probabilities.bind(backing);
+    decision_winners       = layout.decision_winners.bind(backing);
 }
 
 void complete_round_state_layout(LayoutBuilder& builder, RoundStateLayout& layout) {

@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <vector>
 
 namespace ninfer {
 struct DeviceContext;
@@ -19,6 +20,20 @@ namespace ninfer::targets::qwen3_6 {
 enum class TextPhase {
     Prefill,
     Verify,
+};
+
+struct DecisionProbeResult {
+    std::vector<float> probabilities;
+    std::int32_t winner_index = -1;
+    TokenId winner_token      = -1;
+
+    std::uint32_t frontier      = 0;
+    std::uint32_t suffix_tokens = 0;
+
+    double capture_seconds = 0.0;
+    double suffix_seconds  = 0.0;
+    double score_seconds   = 0.0;
+    double restore_seconds = 0.0;
 };
 
 struct GraphExecutionProfile {
@@ -173,6 +188,11 @@ public:
     void evict_retained_lane(std::uint32_t lane) noexcept;
     [[nodiscard]] GenerationTimings generation_timings_lane(std::uint32_t lane) const noexcept;
     [[nodiscard]] SpeculativeStats speculative_stats_lane(std::uint32_t lane) const noexcept;
+
+    [[nodiscard]] DecisionProbeResult
+    decision_probe_lane(std::uint32_t lane,
+                        std::span<const TokenId> suffix_tokens,
+                        std::span<const TokenId> candidate_tokens);
 
     [[nodiscard]] MemorySummary memory_summary() const noexcept;
     void reset_memory_peaks() noexcept;
