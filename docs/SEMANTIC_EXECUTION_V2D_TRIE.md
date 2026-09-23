@@ -1,10 +1,10 @@
 # V2-D Multi-token FiniteChoice Trie
 
-Status: Accepted for implementation
+Status: V2-D1 implemented and real-Qwen qualified; V2-D2 planned
 
 ## Objective
 
-V2-D removes the current one-token divergent-branch restriction for
+V2-D removes the former one-token divergent-branch restriction for
 FiniteChoice while preserving the governing semantic-execution rule:
 
 > Keep semantic constraints. Eliminate representational generation.
@@ -27,6 +27,24 @@ V2-D does not change:
 Model-facing candidate strings remain presentation metadata.
 
 Trie structure is a private compiled-backend representation.
+
+## Current runtime requirements
+
+V2-D1 finite-decision execution currently requires the ordinary target backend:
+
+    EngineOptions::speculative.backend == SpeculativeBackend::None
+
+The Engine rejects finite-decision compilation/execution on MTP/DFlash
+configurations rather than silently changing the configured speculative mode.
+MTP remains complementary for future/open-ended generation; it is not the
+current finite-choice probe backend.
+
+The current implementation adds the C++ Engine API only. It does not add an
+HTTP
+`/v1/decision` endpoint or change OpenAI/Anthropic protocol adapters.
+
+The implementation is in the shared Qwen3.6-family runtime. Real-artifact D1
+qualification in this branch is specifically Qwen3.8-27B on RTX 5080.
 
 ## Whole-path tokenization
 
@@ -334,10 +352,14 @@ V2-D1 reuses:
 V2-D1 does not require changes to:
 
 - constrained_choice CUDA kernels;
-- MTP;
-- Vision;
+- MTP implementation;
+- Vision implementation;
 - ordinary sampling;
 - production protocol adapters.
+
+This means D1 does not mutate those subsystems; it does not mean finite-choice
+probes can execute through an MTP/DFlash-configured Engine. They currently
+require `SpeculativeBackend::None`.
 
 ## V2-D1 qualification
 
@@ -352,12 +374,17 @@ It must demonstrate:
 
 - whole-path tokenization;
 - exact-prefix candidate rejection;
-- duplicate token-path rejection;
+- duplicate token-path rejection using byte-distinct presentation strings
+  which normalize/tokenize to the same complete model path;
 - candidate probability sum approximately 1;
 - semantic winner maps correctly;
 - deterministic tails create no semantic scoring events;
 - one-token V2-A regression passes;
 - V2-B dependency regression passes;
+- a multi-token trie executes correctly as a dependency-selected variant;
+- asynchronous DecisionHandle execution passes;
+- the DecisionFieldInput convenience API can lower multi-token enum values to
+  the same trie path;
 - V2-C1/C2 regression passes;
 - zero ordinary committed decode;
 - exact retained-frontier restoration;

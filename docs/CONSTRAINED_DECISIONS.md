@@ -9,16 +9,51 @@ explicitly allowed values and assembles the typed result outside the model.
 
 The initial target is Qwen3.8-27B on RTX 5080 16 GB.
 
+## Current implementation status
+
+The constrained-decision stack is implemented through **V2-D1**.
+
+The sections below retain the original M1/V2 milestone history because they
+explain how the architecture evolved. Historical one-token-only statements are
+not the current product contract.
+
+For the current C++ API, result semantics, examples, backend limits, dependency
+topology, and deployment requirements, use
+[Constrained Decisions: current API and usage](CONSTRAINED_DECISIONS_USAGE.md).
+
+Current implementation highlights:
+
+- Boolean/Enum convenience requests and the generic semantic API use one
+  whole-path compiler;
+- multi-token finite choices lower to private V2-D1 token tries;
+- one-root direct dependency fan-out and V2-C shared-prefix sibling execution
+  are implemented;
+- finite-decision execution currently requires
+  `SpeculativeBackend::None`;
+- the current implementation does **not** add an HTTP `/v1/decision` route
+  or protocol adapter;
+- real-artifact qualification is Qwen3.8-27B; the implementation lives in the
+  shared Qwen3.6-family runtime.
+
 ## Design principles
 
 1. Do not allocate persistent model state per candidate.
 2. Reuse the existing sequence, KV, prefix-checkpoint, and GDN replay machinery.
 3. Candidates are output-logit choices, not independent model sequences.
-4. M1 supports one-token labels only.
-5. MTP and Vision are excluded from M1.
-6. Existing generation behavior must remain unchanged.
+4. M1 originally qualified one-token labels; V2-D1 now supports multi-token
+   finite choices through private token tries.
+5. Finite-decision execution currently uses the ordinary target backend
+   (`SpeculativeBackend::None`). MTP remains available to ordinary/open-ended
+   generation, but is not the current finite-decision execution backend.
+6. Vision remains an input-context concern; D1's real-artifact qualification
+   used Vision disabled and does not claim an additional Vision decision path.
+7. Existing generation behavior must remain unchanged.
 
 ## M1 architecture
+
+> Historical milestone description. The one-token representation below was the
+> original M1 execution form; V2-D1 now also supports private multi-token trie
+> variants.
 
 A request consists of:
 
@@ -26,7 +61,8 @@ A request consists of:
 - one or more fields;
 - each field has a short suffix/question;
 - each field has 2-16 allowed values;
-- allowed values are represented internally by one-token labels.
+- allowed values were represented internally by one-token labels in M1; the
+  current semantic compiler may instead lower a field to a multi-token trie.
 
 Execution:
 
@@ -90,7 +126,9 @@ No public server route yet.
 
 ## M1-C: product API
 
-Add typed decision structures to the Engine API and `/v1/decision`.
+The typed C++ Engine decision structures were implemented. The proposed
+`/v1/decision` server route was **not** implemented and is not part of the
+current protocol surface.
 
 Initial field types:
 
@@ -117,6 +155,10 @@ Response should include:
 
 ## Benchmark
 
+> Status: the low-level `constrained_choice` microbenchmark is implemented.
+> The end-to-end constrained-decision versus normal-generation benchmark
+> described below remains planned and is not current qualification evidence.
+
 Compare constrained decision latency with normal JSON generation for equivalent
 boolean/enum decisions.
 
@@ -132,16 +174,17 @@ Record:
 
 ## Later work
 
-M2:
-- multi-token candidate tries
-- batched contexts
-- numeric grids
-- restricted-row LM-head evaluation
+This original M1 roadmap is historical. Multi-token candidate tries were
+subsequently implemented as V2-D1.
 
-M3:
-- calibration evaluation
-- OpenClaw routing integration
-- policy thresholds / abstention
+Still-open work includes:
+
+- V2-D2 shared trie traversal / probe coalescing;
+- restricted-row LM-head projection;
+- deeper/multiple-parent semantic dependency topologies;
+- bounded integer/numeric execution backends;
+- protocol/harness adapters;
+- calibrated confidence evaluation and policy thresholds.
 
 ## M1-B decision frontier implementation
 
@@ -193,30 +236,26 @@ Enum fields carry 2-16 caller-visible string values.
 The Qwen frontend tokenizes each complete `suffix + candidate` path before
 submission to the executor. It computes the longest common token prefix across
 all candidate paths and uses that shared prefix as the executable field suffix.
-In M1 every candidate path must then diverge by exactly one valid token, and
-distinct values must produce distinct candidate token IDs.
+In the original M1-C2 backend every candidate path then had to diverge by
+exactly one valid token. V2-D1 removes that restriction: the same whole-path
+compiler now lowers multi-token finite choices to a private trie.
 
 Joint path tokenization is required because BPE tokenization can change at the
 boundary between the suffix and candidate text. Independently tokenizing those
 strings is not generally equivalent to tokenizing the actual continuation.
-Multi-token divergences are deferred to the M2 trie path.
+Multi-token divergences are implemented by the V2-D1 trie path.
 
 Suffixes may contain multiple tokens.
 
-Typed requests are translated into the existing `DecisionFieldSpec` raw-token
-representation, so M1-C2 does not change scheduler admission, retained-frontier
-execution, constrained scoring, or state restoration.
+Typed requests now lower through the generic semantic compiler. Depth-1
+choices remain compatible with `DecisionFieldSpec`; multi-token choices use
+the private `DecisionExecutionVariant + DecisionTriePlan` representation.
 
-The result preserves:
-
-- candidate string values
-- candidate token IDs
-- restricted-choice probabilities
-- winner index
-- winner token
-- selected string value
-
-Multi-token candidate values remain M2 work.
+The result preserves caller-visible candidate values and restricted-choice
+probabilities. For depth-1 choices, `candidate_tokens` and `winner_token`
+remain populated. For trie results, `candidate_token_paths` contains the
+complete model-facing paths and `winner_token == -1`; `winner_index` and
+`selected_value` are authoritative.
 
 
 
@@ -655,68 +694,51 @@ For the current milestone, compiled plans remain bound to the Engine instance
 that created them. Model/tokenizer fingerprints and cross-Engine compiled-plan
 caching are deferred optimizations.
 
-### V2 staged implementation
+### V2 implementation status
 
-The next implementation series should proceed in deliberately separated steps.
+The semantic-execution series has advanced beyond the original staging plan:
 
-#### V2-A: semantic graph
+#### V2-A: semantic graph — implemented
 
-Introduce the model-agnostic semantic node graph and preserve legacy bool/enum
-APIs through compatibility lowering.
+Introduced `SemanticValue`, stable `SemanticNodeId`,
+`StructuredDecisionSchema`, model presentation separation, compiled plans,
+and compatibility lowering from Boolean/Enum inputs.
 
-V2-A must not require changes to:
+#### V2-B: dependency-aware execution — implemented
 
-- CUDA constrained-choice kernels;
-- decision frontier mechanics;
-- executor execution semantics;
-- ordinary generation;
-- MTP;
-- Vision.
+Added explicit semantic dependencies, parent-selected conditioning variants,
+and replay-from-retained-frontier execution.
 
-Initial graph compilation may lower finite nodes back into the existing
-`DecisionFieldSpec` execution representation.
+#### V2-C1/C2: dependency waves — implemented
 
-#### V2-B: dependency-aware execution
+Added one-root fan-out correctness and temporary shared-frontier execution for
+compatible depth-1 sibling variants.
 
-Introduce an ephemeral working frontier and sequential execution nodes so a
-later node can be conditioned on an earlier selected value.
+#### V2-D1: multi-token finite choices — implemented and qualified
 
-Preserve the caller's retained frontier.
+Whole-path candidate tokenization now lowers multi-token finite choices to a
+private trie. Only ambiguous nodes are scored; deterministic unary traversal is
+conditioning work rather than an additional semantic likelihood event.
 
-#### V2-C: parallel execution waves
+#### V2-D2: shared trie traversal — planned
 
-Identify independent finite nodes and evaluate them together when the target
-runtime can do so efficiently.
+Reduce D1's repeated full-suffix replay by reusing temporary trie frontiers
+without changing semantic probabilities or the public schema.
 
-Dependency edges determine later waves.
+#### Restricted-row LM head — planned
 
-#### V2-D: deterministic conditioning and result assembly
+Avoid complete-vocabulary projection when a finite node only needs a small
+number of output rows.
 
-Allow known structure to advance model context where required without asking
-the model to choose deterministic representation tokens.
+#### Open-ended generation leaves — planned
 
-Keep application-visible semantic output separate from model-conditioning
-syntax.
+Allow a future semantic graph to hand control to ordinary/MTP generation for
+genuinely open-ended values.
 
-#### V2-E: multi-token finite choices
+#### Adapters and broader plan caching — planned
 
-Generalize finite choices to token tries / finite paths.
-
-#### V2-F: restricted-row LM head
-
-Avoid complete-vocabulary output projection when only a small set of output
-rows is required by a finite node.
-
-#### V2-G: open-ended generation leaves
-
-Allow a semantic graph to hand control to ordinary generation or MTP for
-genuinely open-ended values, then return to structured execution where
-supported.
-
-#### V2-H: adapters and compiled-plan caching
-
-Add protocol/harness adapters and later introduce cache identities based on
-semantic schema, model/tokenizer identity and compiler version.
+Protocol/harness adapters and model/tokenizer/compiler keyed plan caching remain
+outside the current core implementation.
 
 ### Performance principles
 

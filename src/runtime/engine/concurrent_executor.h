@@ -1484,6 +1484,14 @@ private:
             return true;
 
         } catch (...) {
+            // Decision probes normally restore the retained frontier before
+            // returning. If any decision execution path nevertheless throws,
+            // discard the lane rather than allowing a potentially partial
+            // temporary frontier/state snapshot to participate in later
+            // prefix reuse.
+            instance_.program->abort_lane(
+                lane);
+
             complete_error(
                 request,
                 std::current_exception());

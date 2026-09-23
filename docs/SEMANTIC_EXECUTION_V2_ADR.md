@@ -1,5 +1,11 @@
 # ADR: Semantic Execution V2 Intermediate Representation
 
+> **Status:** accepted architecture record. V2-A, V2-B, V2-C1/C2, and V2-D1
+> have now been implemented. Sections describing those items as future review
+> gates are retained as decision history, not current operational guidance.
+> See [Constrained Decisions: current API and usage](CONSTRAINED_DECISIONS_USAGE.md)
+> for the implemented contract and limits.
+
 Status: Accepted for V2-A design
 
 ## Context

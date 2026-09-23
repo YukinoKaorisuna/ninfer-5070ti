@@ -1,5 +1,10 @@
 # V2-C Dependency Waves and Shared Conditioning
 
+> **Status:** V2-C1/C2 implemented. Shared-frontier waves currently optimize
+> compatible depth-1 sibling variants. V2-D1 trie-containing groups use the
+> correctness-first sequential trie path; shared trie traversal is V2-D2 work.
+> See [Constrained Decisions: current API and usage](CONSTRAINED_DECISIONS_USAGE.md).
+
 Status: Accepted for implementation
 
 ## Objective

@@ -430,13 +430,16 @@ enum class DecisionFieldType : std::uint8_t {
     Enum,
 };
 
-// Product-facing M1 input.
+// Convenience product-facing finite-choice input.
 //
-// Boolean fields use the canonical values "false" and "true" and therefore do
-// not require caller-provided choices.
+// Boolean fields use the canonical semantic/model-facing values "false" and
+// "true" and therefore do not require caller-provided choices.
 //
-// Enum values are both the caller-visible values and the internal M1 labels.
-// M1-C2 requires every value to tokenize to exactly one model token.
+// Enum values are both caller-visible semantic values and model-facing
+// candidate text. The Engine tokenizes each complete suffix + candidate path
+// and may lower the field to either a depth-1 choice or a multi-token trie.
+// Use StructuredDecisionSchema + DecisionModelPresentation when semantic values
+// and model-facing candidate text must differ or dependencies are required.
 struct DecisionFieldInput {
     std::string name;
     DecisionFieldType type = DecisionFieldType::Enum;
@@ -492,8 +495,9 @@ struct SemanticNodeId {
                                      SemanticNodeId) noexcept = default;
 };
 
-// Semantic finite domain. Backend limits such as K <= 16 and one-token
-// divergence deliberately do not belong to this type.
+// Semantic finite domain. Backend limits such as K <= 16, executable-prefix
+// requirements, and target-runtime constraints deliberately do not belong to
+// this type.
 struct FiniteChoice {
     std::string label;
     std::vector<SemanticValue> choices;
@@ -514,8 +518,10 @@ struct DependencyConditioningPresentation {
     std::vector<std::string> selected_choice_texts;
 };
 
-// Opaque semantic graph. V2-A contains independent FiniteChoice nodes only;
-// dependency/conditional APIs are added in later milestones.
+// Opaque semantic graph. The current compiled backend supports independent
+// FiniteChoice nodes plus one-root direct fan-out dependencies. The semantic
+// graph itself validates acyclic dependency edges independently of those
+// backend topology limits.
 class StructuredDecisionSchema {
 public:
     StructuredDecisionSchema();
@@ -577,10 +583,13 @@ private:
     friend class Engine;
 };
 
-// Internal/already-tokenized finite-choice form consumed by the executor.
+// Low-level/already-tokenized depth-1 finite-choice form consumed by the
+// executor. This remains public for parity tests, diagnostics, and callers that
+// already own token IDs; multi-token trie lowering is private to compiled
+// semantic plans.
 //
-// candidate_values is optional for raw-token callers. Typed M1-C2 callers
-// populate it so the result can map winner_index back to the original value.
+// candidate_values is optional for raw-token callers. When populated it maps
+// winner_index back to a caller-visible value.
 struct DecisionFieldSpec {
     std::string name;
     std::vector<TokenId> suffix_tokens;
@@ -597,19 +606,26 @@ struct DecisionFieldResult {
     std::vector<std::string> candidate_values;
     std::string selected_value;
 
+    // Depth-1 candidate token IDs. Empty for a multi-token trie result.
     std::vector<TokenId> candidate_tokens;
-    // Complete model-facing token path for each semantic candidate when the
-    // compiled backend uses a multi-token finite-choice trie. Empty for the
-    // legacy/depth-1 one-token representation.
+    // Complete model-facing continuation path for each semantic candidate when
+    // the compiled backend uses a multi-token finite-choice trie. Empty for a
+    // depth-1 result.
     std::vector<std::vector<TokenId>> candidate_token_paths;
     std::vector<float> probabilities;
     std::int32_t winner_index = -1;
+    // Authoritative only for depth-1 results. Multi-token trie results use -1
+    // because no singular token identifies the selected semantic candidate.
     TokenId winner_token      = -1;
 
     std::uint32_t frontier      = 0;
+    // Logical deterministic extension required by the field. For a D1 trie
+    // this is the maximum full ambiguity-probe suffix length.
     std::uint32_t suffix_tokens = 0;
-    // Actual deterministic target traversal charged to this field.
-    // May be smaller than suffix_tokens when a sibling wave shares a prefix.
+    // Actual deterministic traversal attributed to this field. It may be
+    // smaller than suffix_tokens when a sibling wave shares a prefix, or
+    // larger for a D1 trie because it sums independently replayed ambiguity
+    // probe suffixes.
     std::uint32_t executed_suffix_tokens = 0;
 
     double capture_seconds = 0.0;

@@ -1,5 +1,10 @@
 # V2-B Semantic Dependency Execution
 
+> **Status:** historical V2-B design record; implemented and extended by V2-C
+> fan-out/shared waves and V2-D1 multi-token trie variants. The current compiled
+> backend supports one semantic root with direct one-parent children. See
+> [Constrained Decisions: current API and usage](CONSTRAINED_DECISIONS_USAGE.md).
+
 Status: Accepted for implementation
 
 ## Scope

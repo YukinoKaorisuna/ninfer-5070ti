@@ -1198,7 +1198,7 @@ ProgramImplCore::decision_probe_lane(
 
     if (speculative_backend != SpeculativeBackend::None || !io.ordinary) {
         throw std::logic_error(
-            "constrained decision M1-B requires the ordinary target backend");
+            "constrained decision execution requires the ordinary target backend (SpeculativeBackend::None)");
     }
 
     if (lane >= max_concurrency) {
@@ -1527,7 +1527,7 @@ ProgramImplCore::decision_probe_wave_lane(
         !io.ordinary) {
 
         throw std::logic_error(
-            "shared decision wave requires the ordinary target backend");
+            "shared decision wave requires the ordinary target backend (SpeculativeBackend::None)");
     }
 
     if (lane >= max_concurrency) {

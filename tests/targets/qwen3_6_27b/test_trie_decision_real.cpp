@@ -11,15 +11,19 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace {
 
 using ninfer::CompiledDecisionPlan;
+using ninfer::DecisionFieldInput;
 using ninfer::DecisionFieldResult;
+using ninfer::DecisionHandle;
 using ninfer::DecisionModelPresentation;
 using ninfer::DecisionResult;
+using ninfer::DependencyConditioningPresentation;
 using ninfer::FiniteChoice;
 using ninfer::FiniteChoicePresentation;
 using ninfer::SemanticNodeId;
@@ -473,24 +477,297 @@ bool exact_prefix_rejected(
 bool duplicate_path_rejected(
     ninfer::Engine& engine) {
 
+    // These first two strings are byte-distinct (NFC versus NFD) but the
+    // Qwen tokenizer normalizes them to the same model-facing token path.
+    // A third divergent candidate keeps the global common prefix shorter than
+    // the duplicate paths so rejection occurs in trie construction rather
+    // than presentation-text or exact-prefix validation.
+    const std::string nfc =
+        "caf\xc3\xa9 route";
+    const std::string nfd =
+        "cafe\xcc\x81 route";
+
     try {
         Definition definition =
             make_definition(
                 " qualification: ",
                 {
-                    "duplicate model text",
-                    "duplicate model text",
+                    nfc,
+                    nfd,
+                    "remote route",
                 });
 
         (void)engine.compile_decision_plan(
             definition.schema,
             definition.presentation);
 
-    } catch (const std::invalid_argument&) {
-        return true;
+    } catch (const std::invalid_argument& error) {
+        const std::string message =
+            error.what();
+
+        if (message.find(
+                "duplicate complete token paths") !=
+            std::string::npos) {
+
+            std::cout
+                << "V2D_DUPLICATE_PATH_FIXTURE=NFC_NFD_NORMALIZATION\n";
+
+            return true;
+        }
     }
 
     return false;
+}
+
+bool validate_trie_field(
+    const DecisionFieldResult& field,
+    std::string_view expected_name,
+    std::size_t candidate_count,
+    std::uint32_t expected_frontier) {
+
+    if (field.name != expected_name ||
+        field.frontier != expected_frontier ||
+        field.candidate_values.size() != candidate_count ||
+        field.candidate_token_paths.size() != candidate_count ||
+        !field.candidate_tokens.empty() ||
+        field.probabilities.size() != candidate_count ||
+        field.winner_token != -1 ||
+        field.winner_index < 0 ||
+        static_cast<std::size_t>(field.winner_index) >= candidate_count ||
+        field.selected_value !=
+            field.candidate_values[
+                static_cast<std::size_t>(
+                    field.winner_index)]) {
+
+        return false;
+    }
+
+    double probability_sum = 0.0;
+
+    return valid_probability_vector(
+        field,
+        &probability_sum);
+}
+
+bool validate_dependent_trie_async(
+    ninfer::Engine& engine,
+    const std::vector<std::string>& candidate_texts) {
+
+    StructuredDecisionSchema schema;
+    DecisionModelPresentation presentation;
+
+    FiniteChoice root;
+    root.label = "v2d_root";
+
+    FiniteChoice child;
+    child.label = "v2d_child";
+
+    for (std::size_t i = 0;
+         i < candidate_texts.size();
+         ++i) {
+
+        root.choices.push_back(
+            SemanticValue::string(
+                "root-semantic-" +
+                std::to_string(i)));
+
+        child.choices.push_back(
+            SemanticValue::string(
+                "child-semantic-" +
+                std::to_string(i)));
+    }
+
+    const SemanticNodeId root_id =
+        schema.add_finite_choice(
+            std::move(root));
+
+    const SemanticNodeId child_id =
+        schema.add_finite_choice(
+            std::move(child));
+
+    schema.add_dependency(
+        root_id,
+        child_id);
+
+    presentation.set_finite_choice(
+        root_id,
+        FiniteChoicePresentation{
+            " route: ",
+            candidate_texts,
+        });
+
+    presentation.set_finite_choice(
+        child_id,
+        FiniteChoicePresentation{
+            " route: ",
+            candidate_texts,
+        });
+
+    const std::vector<std::string> conditioning = {
+        " parent outcome alpha; ",
+        " parent outcome beta; ",
+        " parent outcome gamma; ",
+        " parent outcome delta; ",
+    };
+
+    if (conditioning.size() != candidate_texts.size()) {
+        return false;
+    }
+
+    presentation.set_dependency_conditioning(
+        root_id,
+        child_id,
+        DependencyConditioningPresentation{
+            conditioning,
+        });
+
+    const CompiledDecisionPlan plan =
+        engine.compile_decision_plan(
+            schema,
+            presentation);
+
+    DecisionHandle handle =
+        engine.submit_decision(
+            engine.prepare_tokens(
+                std::vector<TokenId>(
+                    63,
+                    198),
+                true),
+            plan);
+
+    if (!handle) {
+        return false;
+    }
+
+    const DecisionResult result =
+        handle.wait();
+
+    if (result.fields.size() != 2 ||
+        !validate_trie_field(
+            result.fields[0],
+            "v2d_root",
+            candidate_texts.size(),
+            63) ||
+        !validate_trie_field(
+            result.fields[1],
+            "v2d_child",
+            candidate_texts.size(),
+            63)) {
+
+        return false;
+    }
+
+    const DecisionFieldResult& root_result =
+        result.fields[0];
+
+    const DecisionFieldResult& child_result =
+        result.fields[1];
+
+    const std::size_t parent_choice =
+        static_cast<std::size_t>(
+            root_result.winner_index);
+
+    Definition expected_child =
+        make_definition(
+            conditioning[parent_choice] +
+                " route: ",
+            candidate_texts);
+
+    const CompiledDecisionPlan expected_plan =
+        engine.compile_decision_plan(
+            expected_child.schema,
+            expected_child.presentation);
+
+    const DecisionResult expected =
+        engine.decide(
+            engine.prepare_tokens(
+                std::vector<TokenId>(
+                    63,
+                    198),
+                true),
+            expected_plan);
+
+    if (expected.fields.size() != 1 ||
+        !validate_trie_field(
+            expected.fields[0],
+            "v2d_route",
+            candidate_texts.size(),
+            63)) {
+
+        return false;
+    }
+
+    const DecisionFieldResult& expected_field =
+        expected.fields[0];
+
+    if (child_result.candidate_token_paths !=
+            expected_field.candidate_token_paths ||
+        child_result.winner_index !=
+            expected_field.winner_index ||
+        !probabilities_equal(
+            child_result.probabilities,
+            expected_field.probabilities)) {
+
+        return false;
+    }
+
+    std::cout
+        << "V2D_DEPENDENT_TRIE_ROOT=PASS\n";
+    std::cout
+        << "V2D_DEPENDENT_TRIE_CHILD=PASS\n";
+    std::cout
+        << "V2D_DEPENDENT_TRIE_VARIANT_SELECTION=PASS\n";
+    std::cout
+        << "V2D_ASYNC_DECISION_HANDLE=PASS\n";
+
+    return true;
+}
+
+bool validate_typed_multitoken_input(
+    ninfer::Engine& engine,
+    const std::vector<std::string>& candidate_texts) {
+
+    DecisionFieldInput field;
+    field.name = "typed_multitoken";
+    field.type = ninfer::DecisionFieldType::Enum;
+    field.suffix = " route: ";
+    field.values = candidate_texts;
+
+    std::vector<DecisionFieldInput> fields;
+    fields.push_back(
+        std::move(field));
+
+    const DecisionResult result =
+        engine.decide(
+            engine.prepare_tokens(
+                std::vector<TokenId>(
+                    63,
+                    198),
+                true),
+            std::move(fields));
+
+    if (result.fields.size() != 1) {
+        return false;
+    }
+
+    const DecisionFieldResult& resolved =
+        result.fields.front();
+
+    if (!validate_trie_field(
+            resolved,
+            "typed_multitoken",
+            candidate_texts.size(),
+            63) ||
+        resolved.candidate_values !=
+            candidate_texts) {
+
+        return false;
+    }
+
+    std::cout
+        << "V2D_TYPED_MULTITOKEN_INPUT=PASS\n";
+
+    return true;
 }
 
 int run(const char* artifact) {
@@ -749,6 +1026,26 @@ int run(const char* artifact) {
 
             std::cerr
                 << "FAIL: repeated D1 execution changed semantic result\n";
+
+            return 1;
+        }
+
+        if (!validate_dependent_trie_async(
+                engine,
+                candidate_texts)) {
+
+            std::cerr
+                << "FAIL: dependent trie / async DecisionHandle qualification failed\n";
+
+            return 1;
+        }
+
+        if (!validate_typed_multitoken_input(
+                engine,
+                candidate_texts)) {
+
+            std::cerr
+                << "FAIL: typed multi-token convenience path qualification failed\n";
 
             return 1;
         }

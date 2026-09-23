@@ -1,5 +1,11 @@
 # V2-A Semantic Execution C++ API
 
+> **Status:** historical V2-A design record; implemented. Later V2-B/C/D1
+> milestones supersede this document's statements about independent-only
+> graphs and one-token backend restrictions. See
+> [Constrained Decisions: current API and usage](CONSTRAINED_DECISIONS_USAGE.md)
+> for the current contract.
+
 Status: Accepted for implementation
 
 ## Scope

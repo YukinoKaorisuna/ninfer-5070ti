@@ -191,6 +191,7 @@ Start with:
 - [Benchmarks](docs/BENCHMARKS.md) — long-context and multimodal results
 - [Memory profile](docs/MEMORY_PROFILE.md) — how the 16 GB fit is achieved
 - [Upstream sync status](docs/UPSTREAM_SYNC_STATUS.md) — selective semantic-port ledger and review policy
+- [Constrained decisions](docs/CONSTRAINED_DECISIONS_USAGE.md) — current C++ finite-decision API, multi-token tries, dependencies and backend limits
 - [Technical deep dive](docs/TECHNICAL_DEEP_DIVE.md) — architecture and optimization details
 - [Publishing and sharing](docs/PUBLISHING_AND_SHARING.md) — public-release guidance
 

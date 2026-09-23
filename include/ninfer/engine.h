@@ -138,7 +138,10 @@ public:
 
     // Compile model-agnostic decision semantics once against the active
     // target/tokenizer. The resulting plan is immutable, cheap to copy and
-    // reusable across requests handled by this Engine/model.
+    // reusable across requests handled by this exact Engine instance.
+    //
+    // Current finite-decision execution requires
+    // EngineOptions::speculative.backend == SpeculativeBackend::None.
     [[nodiscard]] CompiledDecisionPlan
     compile_decision_plan(
         const StructuredDecisionSchema& schema,
@@ -157,11 +160,10 @@ public:
         const CompiledDecisionPlan& plan,
         const CancellationView& cancellation = {});
 
-    // Submit finite constrained fields against one shared prompt frontier.
-    //
-    // M1-C1 requires caller-provided token IDs. Each field must contain a
-    // non-empty suffix and 2..16 unique candidate token IDs.
-    // Typed product-facing decision path.
+    // Convenience typed finite-choice path. Boolean fields use canonical
+    // false/true candidates; Enum values are both semantic values and
+    // model-facing candidate text. Whole-path tokenization may lower a field
+    // to a depth-1 choice or a multi-token trie.
     [[nodiscard]] DecisionHandle
     submit_decision(PreparedPrompt prompt, std::vector<DecisionFieldInput> fields,
                     std::chrono::steady_clock::time_point pending_deadline = {});
@@ -169,8 +171,9 @@ public:
     DecisionResult decide(PreparedPrompt prompt, std::vector<DecisionFieldInput> fields,
                           const CancellationView& cancellation = {});
 
-    // Raw-token path retained for parity tests, diagnostics and lower-level
-    // callers. Typed product requests should use DecisionFieldInput.
+    // Raw depth-1 token path retained for parity tests, diagnostics and
+    // lower-level callers that already own token IDs. Product code should
+    // prefer DecisionFieldInput or a compiled semantic plan.
     [[nodiscard]] DecisionHandle
     submit_decision(PreparedPrompt prompt, std::vector<DecisionFieldSpec> fields,
                     std::chrono::steady_clock::time_point pending_deadline = {});

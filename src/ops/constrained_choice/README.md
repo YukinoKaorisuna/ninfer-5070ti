@@ -1,21 +1,30 @@
 # constrained_choice
 
-M1-A implementation target.
+`constrained_choice` is the finite-choice scorer used by constrained semantic
+decision execution.
 
-This op gathers a small finite set of token logits from the model's existing
-full-vocabulary BF16 output and computes a softmax only across those choices.
+It consumes the model's existing full-vocabulary BF16 logits, gathers only the
+explicit legal token IDs, and computes a softmax over that finite domain.
 
-It intentionally does not modify the LM head or generation runtime yet.
+Current contract:
 
-Files to add next:
+- batch `B`: 1..8;
+- candidate count `K`: 2..16;
+- candidate IDs: I32 `[K,B]`;
+- probabilities: FP32 `[K,B]`;
+- winners: I32 `[B]`;
+- equal maxima select the lowest candidate index.
 
-- constrained_choice.cu
-- launcher wiring
-- public wrapper validation
-- numerical test
-- microbenchmark
+The wrapper validates tensor shape/type/aliasing. Decision runtime callers also
+validate candidate token domains and uniqueness before the CUDA operation is
+launched.
 
-Initial supported geometry:
+The operation is used by both reversible single-field decision probes and
+V2-C shared-frontier sibling waves. V2-D multi-token tries reuse the same op at
+each ambiguity node; deterministic unary trie traversal is not scored.
 
-- B: 1..8
-- K: 2..16
+The current implementation still consumes a full-vocabulary LM-head result.
+Restricted-row LM-head projection is a separate future optimization.
+
+Numerical coverage lives in `tests/ops/test_constrained_choice.cpp`; the
+microbenchmark lives in `bench/ops/constrained_choice_bench.cu`.

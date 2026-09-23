@@ -5,7 +5,6 @@
 #include "runtime/contract/sampling.h"
 #include "runtime/contract/types.h"
 #include "runtime/engine/concurrent_executor.h"
-#include "runtime/engine/decision_execution.h"
 #include "targets/registry.h"
 
 #include <algorithm>
@@ -36,6 +35,14 @@ runtime::ResolvedRequestOptions resolve_request_options(const ModelSamplingDefau
 std::string context_capacity_error(std::uint32_t prompt_tokens, std::uint32_t max_context) {
     return "prepared prompt has " + std::to_string(prompt_tokens) +
            " tokens, exceeding Engine max_context " + std::to_string(max_context);
+}
+
+void require_decision_execution_backend(const EngineOptions& options) {
+    if (options.speculative.backend != SpeculativeBackend::None) {
+        throw std::invalid_argument(
+            "finite decision execution currently requires "
+            "EngineOptions::speculative.backend == SpeculativeBackend::None");
+    }
 }
 
 } // namespace
@@ -1607,6 +1614,9 @@ Engine::compile_decision_plan(
             "Engine is moved from");
     }
 
+    require_decision_execution_backend(
+        impl_->options);
+
     if (schema.impl_ == nullptr) {
         throw std::invalid_argument(
             "StructuredDecisionSchema is moved from");
@@ -2257,6 +2267,9 @@ Engine::submit_decision(
             "PreparedPrompt is empty");
     }
 
+    require_decision_execution_backend(
+        impl_->options);
+
     if (plan.impl_ == nullptr ||
         plan.impl_->program.empty()) {
 
@@ -2448,6 +2461,9 @@ Engine::submit_decision(PreparedPrompt prompt, std::vector<DecisionFieldSpec> fi
         throw std::invalid_argument(
             "PreparedPrompt is empty");
     }
+
+    require_decision_execution_backend(
+        impl_->options);
 
     runtime::DecisionExecutionProgram program =
         make_independent_decision_program(
