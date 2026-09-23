@@ -97,8 +97,8 @@ make_dependency_definition() {
     definition.presentation.set_finite_choice(
         definition.root,
         FiniteChoicePresentation{
-            " approved: ",
-            {"false", "true"},
+            " route: ",
+            {"local", "remote"},
         });
 
     definition.presentation.set_finite_choice(
@@ -330,6 +330,27 @@ run(const char* artifact) {
 
         return 1;
     }
+
+    if (root.selected_value != "false" &&
+        root.selected_value != "true") {
+
+        std::cerr
+            << "FAIL: Boolean semantic result leaked model presentation text\n";
+
+        return 1;
+    }
+
+    if (root.selected_value == "local" ||
+        root.selected_value == "remote") {
+
+        std::cerr
+            << "FAIL: model presentation leaked into semantic result\n";
+
+        return 1;
+    }
+
+    std::cout
+        << "V2B_SEMANTIC_PRESENTATION_SEPARATION=PASS\n";
 
     if (root.winner_index < 0 ||
         static_cast<std::size_t>(

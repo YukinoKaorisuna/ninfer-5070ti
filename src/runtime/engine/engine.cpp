@@ -1359,9 +1359,37 @@ Engine::compile_decision_plan(
                     "decision presentation choices must produce distinct one-token branches");
             }
 
-            raw.candidate_values.push_back(
-                candidate_texts[
-                    choice_index]);
+            // Result metadata represents semantic meaning, not the text
+            // used to present that choice to the model.
+            if (is_canonical_boolean_choice(choice)) {
+                raw.candidate_values.push_back(
+                    choice.choices[choice_index].boolean_value()
+                        ? "true"
+                        : "false");
+
+            } else {
+                bool all_strings = true;
+
+                for (const SemanticValue& value :
+                     choice.choices) {
+
+                    if (value.kind() !=
+                        SemanticValueKind::String) {
+
+                        all_strings = false;
+                        break;
+                    }
+                }
+
+                if (!all_strings) {
+                    throw std::invalid_argument(
+                        "current DecisionResult backend supports Boolean(false,true) or String finite-choice semantic values");
+                }
+
+                raw.candidate_values.push_back(
+                    choice.choices[choice_index]
+                        .string_value());
+            }
 
             raw.candidate_tokens.push_back(
                 token);
