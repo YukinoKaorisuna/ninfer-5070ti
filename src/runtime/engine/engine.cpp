@@ -359,20 +359,66 @@ GenerationResult Engine::generate(PreparedPrompt prompt, RequestOptions options,
     return submit(std::move(prompt), std::move(options)).wait(sink, cancellation);
 }
 
-DecisionHandle
-Engine::submit_decision(PreparedPrompt prompt, std::vector<DecisionFieldInput> fields,
-                        std::chrono::steady_clock::time_point pending_deadline) {
+class CompiledDecisionPlan::Impl {
+public:
+    Impl(std::weak_ptr<const void> engine_identity,
+         std::vector<DecisionFieldSpec> compiled_fields)
+        : owner_engine(std::move(engine_identity)),
+          fields(std::move(compiled_fields)) {}
+
+    // Weak shared-ownership identity prevents the plan from retaining the
+    // Engine/model while avoiding raw-address identity reuse.
+    std::weak_ptr<const void> owner_engine;
+    std::vector<DecisionFieldSpec> fields;
+};
+
+CompiledDecisionPlan::CompiledDecisionPlan() noexcept = default;
+CompiledDecisionPlan::~CompiledDecisionPlan() = default;
+
+CompiledDecisionPlan::CompiledDecisionPlan(
+    const CompiledDecisionPlan&) noexcept = default;
+
+CompiledDecisionPlan&
+CompiledDecisionPlan::operator=(
+    const CompiledDecisionPlan&) noexcept = default;
+
+CompiledDecisionPlan::CompiledDecisionPlan(
+    CompiledDecisionPlan&&) noexcept = default;
+
+CompiledDecisionPlan&
+CompiledDecisionPlan::operator=(
+    CompiledDecisionPlan&&) noexcept = default;
+
+CompiledDecisionPlan::CompiledDecisionPlan(
+    std::shared_ptr<const Impl> impl) noexcept
+    : impl_(std::move(impl)) {}
+
+CompiledDecisionPlan::operator bool() const noexcept {
+    return impl_ != nullptr;
+}
+
+bool CompiledDecisionPlan::empty() const noexcept {
+    return impl_ == nullptr || impl_->fields.empty();
+}
+
+std::size_t CompiledDecisionPlan::field_count() const noexcept {
+    return impl_ != nullptr ? impl_->fields.size() : 0;
+}
+
+CompiledDecisionPlan
+Engine::compile_decision_plan(
+    StructuredDecisionSchema schema) const {
+
     if (impl_ == nullptr) {
         throw std::logic_error("Engine is moved from");
     }
 
-    if (prompt.impl_ == nullptr) {
-        throw std::invalid_argument("PreparedPrompt is empty");
-    }
+    std::vector<DecisionFieldInput>& fields =
+        schema.fields;
 
     if (fields.empty() || fields.size() > 8) {
         throw std::invalid_argument(
-            "decision request requires 1..8 fields");
+            "decision schema requires 1..8 fields");
     }
 
     const auto tokenize = [&](std::string_view value) {
@@ -567,19 +613,104 @@ Engine::submit_decision(PreparedPrompt prompt, std::vector<DecisionFieldInput> f
             std::move(raw));
     }
 
+
+    return CompiledDecisionPlan(
+        std::make_shared<const CompiledDecisionPlan::Impl>(
+            std::weak_ptr<const void>(
+                std::shared_ptr<const void>(impl_)),
+            std::move(tokenized)));
+}
+
+DecisionHandle
+Engine::submit_decision(
+    PreparedPrompt prompt,
+    const CompiledDecisionPlan& plan,
+    std::chrono::steady_clock::time_point pending_deadline) {
+
+    if (impl_ == nullptr) {
+        throw std::logic_error("Engine is moved from");
+    }
+
+    if (plan.impl_ == nullptr ||
+        plan.impl_->fields.empty()) {
+        throw std::invalid_argument(
+            "CompiledDecisionPlan is empty");
+    }
+
+    const std::shared_ptr<const void> plan_owner =
+        plan.impl_->owner_engine.lock();
+
+    const std::shared_ptr<const void> current_owner =
+        impl_;
+
+    const bool same_engine_identity =
+        plan_owner &&
+        !plan_owner.owner_before(current_owner) &&
+        !current_owner.owner_before(plan_owner);
+
+    if (!same_engine_identity) {
+        throw std::invalid_argument(
+            "CompiledDecisionPlan belongs to a different or expired Engine instance");
+    }
+
+    // V1 copies the compact compiled field metadata into the request.
+    // Tokenization/schema compilation is not repeated. A future executor
+    // revision may retain shared immutable plan storage if this copy becomes
+    // measurable.
     return submit_decision(
         std::move(prompt),
-        std::move(tokenized),
+        plan.impl_->fields,
         pending_deadline);
 }
 
 DecisionResult
-Engine::decide(PreparedPrompt prompt, std::vector<DecisionFieldInput> fields,
-               const CancellationView& cancellation) {
+Engine::decide(
+    PreparedPrompt prompt,
+    const CompiledDecisionPlan& plan,
+    const CancellationView& cancellation) {
+
     return submit_decision(
                std::move(prompt),
-               std::move(fields))
+               plan)
         .wait(cancellation);
+}
+
+DecisionHandle
+Engine::submit_decision(
+    PreparedPrompt prompt,
+    std::vector<DecisionFieldInput> fields,
+    std::chrono::steady_clock::time_point pending_deadline) {
+
+    StructuredDecisionSchema schema;
+    schema.fields = std::move(fields);
+
+    CompiledDecisionPlan plan =
+        compile_decision_plan(
+            std::move(schema));
+
+    return submit_decision(
+        std::move(prompt),
+        plan,
+        pending_deadline);
+}
+
+DecisionResult
+Engine::decide(
+    PreparedPrompt prompt,
+    std::vector<DecisionFieldInput> fields,
+    const CancellationView& cancellation) {
+
+    StructuredDecisionSchema schema;
+    schema.fields = std::move(fields);
+
+    CompiledDecisionPlan plan =
+        compile_decision_plan(
+            std::move(schema));
+
+    return decide(
+        std::move(prompt),
+        plan,
+        cancellation);
 }
 
 DecisionHandle

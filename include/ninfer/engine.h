@@ -77,6 +77,32 @@ private:
     friend class Engine;
 };
 
+class CompiledDecisionPlan {
+public:
+    CompiledDecisionPlan() noexcept;
+    ~CompiledDecisionPlan();
+
+    CompiledDecisionPlan(const CompiledDecisionPlan&) noexcept;
+    CompiledDecisionPlan& operator=(const CompiledDecisionPlan&) noexcept;
+
+    CompiledDecisionPlan(CompiledDecisionPlan&&) noexcept;
+    CompiledDecisionPlan& operator=(CompiledDecisionPlan&&) noexcept;
+
+    [[nodiscard]] explicit operator bool() const noexcept;
+    [[nodiscard]] bool empty() const noexcept;
+    [[nodiscard]] std::size_t field_count() const noexcept;
+
+private:
+    class Impl;
+
+    explicit CompiledDecisionPlan(
+        std::shared_ptr<const Impl> impl) noexcept;
+
+    std::shared_ptr<const Impl> impl_;
+
+    friend class Engine;
+};
+
 class Engine {
 public:
     explicit Engine(EngineOptions options);
@@ -109,6 +135,25 @@ public:
     GenerationResult generate(PreparedPrompt prompt, RequestOptions options,
                               OutputSink* sink                     = nullptr,
                               const CancellationView& cancellation = {});
+
+    // Compile model-agnostic decision semantics once against the active
+    // target/tokenizer. The resulting plan is immutable, cheap to copy and
+    // reusable across requests handled by this Engine/model.
+    [[nodiscard]] CompiledDecisionPlan
+    compile_decision_plan(StructuredDecisionSchema schema) const;
+
+    // Execute an already-compiled structured decision plan.
+    [[nodiscard]] DecisionHandle
+    submit_decision(
+        PreparedPrompt prompt,
+        const CompiledDecisionPlan& plan,
+        std::chrono::steady_clock::time_point pending_deadline = {});
+
+    DecisionResult
+    decide(
+        PreparedPrompt prompt,
+        const CompiledDecisionPlan& plan,
+        const CancellationView& cancellation = {});
 
     // Submit finite constrained fields against one shared prompt frontier.
     //

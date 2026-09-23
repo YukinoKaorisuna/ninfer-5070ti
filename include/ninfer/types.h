@@ -439,6 +439,14 @@ struct DecisionFieldInput {
     std::vector<std::string> values;
 };
 
+// Model-agnostic structured finite-decision schema.
+//
+// This deliberately contains caller/schema semantics rather than token IDs.
+// Engine compilation resolves it against the active target/tokenizer.
+struct StructuredDecisionSchema {
+    std::vector<DecisionFieldInput> fields;
+};
+
 // Internal/already-tokenized finite-choice form consumed by the executor.
 //
 // candidate_values is optional for raw-token callers. Typed M1-C2 callers

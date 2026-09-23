@@ -217,3 +217,109 @@ The result preserves:
 - selected string value
 
 Multi-token candidate values remain M2 work.
+
+
+
+## Harness-agnostic architecture
+
+Harness neutrality is a core architectural invariant of constrained decisions.
+
+The NInfer structured-decision core must not depend on a particular agent
+harness, protocol, API dialect, or tool-call representation.
+
+Possible callers include OpenClaw, Pi, Hermes-style harnesses, DeepSeek
+Harness, MCP-based systems, OpenAI-compatible clients, Anthropic-compatible
+clients, custom agent runtimes, and direct NInfer API callers.
+
+Those systems are adapters into the generic NInfer decision contract. They are
+not part of the decision execution model itself.
+
+Required layering:
+
+    harness / protocol / application
+                    |
+                    v
+           adapter / translator
+                    |
+                    v
+       StructuredDecisionSchema
+                    |
+                    v
+       compile_decision_plan()
+                    |
+                    v
+        CompiledDecisionPlan
+                    |
+                    v
+       decision execution runtime
+                    |
+                    v
+       structured decision result
+
+The structured-decision core must remain independent of OpenClaw-specific,
+Pi-specific, Hermes-specific, and DeepSeek Harness-specific concepts, as well
+as OpenAI function-call syntax, Anthropic tool_use syntax, MCP transport
+details, JSON punctuation, protocol framing, and any one server endpoint.
+
+Protocol and harness adapters translate their native representations into
+StructuredDecisionSchema and translate generic results back into whatever
+representation the caller requires.
+
+For tool calling, JSON is an output representation rather than the core
+execution abstraction. Deterministic braces, commas, quotes, property names,
+and other known syntax should eventually be assembled outside the model.
+
+The same compiled-decision machinery must remain usable for non-tool decisions
+such as agent routing, specialist selection, retry / stop / escalate,
+approvals, policy decisions, validation, workflow branching, bounded
+configuration choices, and ordinary boolean and enum decisions.
+
+Adding support for a new harness must require an adapter, not changes to the
+constrained-decision GPU/runtime architecture.
+
+## CompiledDecisionPlan architecture
+
+The structured decision API is separated into three layers.
+
+### StructuredDecisionSchema
+
+`StructuredDecisionSchema` is model agnostic. It represents caller/schema
+semantics such as boolean and enum fields without exposing tokenizer state or
+token IDs.
+
+### CompiledDecisionPlan
+
+`Engine::compile_decision_plan()` resolves a structured schema against the
+Engine's active target and tokenizer.
+
+The compiled plan is immutable and reusable across requests. It stores the
+model-resolved finite execution metadata required by the current constrained
+runtime.
+
+Compilation performs operations such as:
+
+- canonical boolean expansion;
+- enum validation;
+- joint suffix-plus-choice tokenization;
+- longest-common-token-prefix extraction;
+- candidate branch resolution;
+- current backend compatibility validation.
+
+Compilation does not execute the model.
+
+### DecisionFieldSpec
+
+`DecisionFieldSpec` remains the low-level execution primitive consumed by the
+current executor/runtime. It is not the long-term schema abstraction.
+
+This separation allows future schema nodes such as optional fields, numeric
+grids, tries and free-generation leaves to compile to different execution
+forms without exposing those details to callers.
+
+Tool-call protocol parsing remains outside the Engine. OpenAI, Anthropic,
+Responses and other server adapters translate their tool schemas into the
+generic structured schema before compilation.
+
+The current constrained-choice candidate ceiling is an execution-backend
+qualification limit and is deliberately not part of the long-term structured
+schema abstraction.
