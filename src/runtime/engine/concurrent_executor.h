@@ -10,6 +10,7 @@
 #include "runtime/contract/types.h"
 #include "runtime/engine/admission_policy.h"
 #include "runtime/engine/request_memory.h"
+#include "runtime/engine/decision_execution.h"
 #include "runtime/generation/generation_budget.h"
 #include "targets/qwen3_6/export/ninfer/targets/qwen3_6/frontend.h"
 
@@ -17,6 +18,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -24,6 +26,7 @@
 #include <exception>
 #include <future>
 #include <memory>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -747,7 +750,7 @@ private:
 
         const auto selected_field =
             [&](std::size_t node_index)
-                -> const DecisionFieldSpec& {
+                -> const DecisionExecutionVariant& {
 
             const DecisionExecutionNode& node =
                 request->decision_program
@@ -879,6 +882,268 @@ private:
                     field_result));
         };
 
+        const auto append_trie_result =
+            [&](const DecisionExecutionVariant& field)
+                -> bool {
+
+            if (!field.trie_plan.has_value()) {
+                throw std::logic_error(
+                    "trie decision execution requested without a trie plan");
+            }
+
+            const DecisionTriePlan& trie =
+                *field.trie_plan;
+
+            const std::size_t candidate_count =
+                trie.candidate_token_paths.size();
+
+            if (candidate_count < 2 ||
+                candidate_count > 16 ||
+                field.candidate_values.size() !=
+                    candidate_count) {
+
+                throw std::logic_error(
+                    "trie decision metadata is inconsistent");
+            }
+
+            DecisionFieldResult field_result;
+
+            field_result.name =
+                field.name;
+
+            field_result.type =
+                field.type;
+
+            field_result.candidate_values =
+                field.candidate_values;
+
+            field_result.candidate_token_paths =
+                trie.candidate_token_paths;
+
+            // There is no truthful singular token for a general
+            // multi-token semantic candidate.
+            field_result.winner_token = -1;
+
+            std::vector<double> probability_products(
+                candidate_count,
+                1.0);
+
+            bool frontier_initialized = false;
+
+            std::uint64_t executed_suffix_tokens = 0;
+
+            for (const DecisionTrieProbe& trie_probe :
+                 trie.probes) {
+
+                // Each D1 probe restores the retained frontier before
+                // returning, so cancellation is safe between probes.
+                if (request->cancelled.load(
+                        std::memory_order_acquire)) {
+
+                    return false;
+                }
+
+                auto scored =
+                    instance_.program->
+                        decision_probe_lane(
+                            lane,
+                            trie_probe.suffix_tokens,
+                            trie_probe.candidate_tokens);
+
+                if (scored.probabilities.size() !=
+                    trie_probe.candidate_tokens.size()) {
+
+                    throw std::logic_error(
+                        "trie probe returned the wrong probability count");
+                }
+
+                if (trie_probe
+                        .descendant_candidate_indices
+                        .size() !=
+                    trie_probe
+                        .candidate_tokens
+                        .size()) {
+
+                    throw std::logic_error(
+                        "trie probe descendant mapping is inconsistent");
+                }
+
+                if (scored.suffix_tokens !=
+                    trie_probe.suffix_tokens.size()) {
+
+                    throw std::logic_error(
+                        "trie probe reported an unexpected suffix length");
+                }
+
+                if (!frontier_initialized) {
+                    field_result.frontier =
+                        scored.frontier;
+
+                    frontier_initialized = true;
+
+                } else if (
+                    field_result.frontier !=
+                    scored.frontier) {
+
+                    throw std::logic_error(
+                        "trie probes disagreed on retained frontier");
+                }
+
+                field_result.suffix_tokens =
+                    std::max(
+                        field_result.suffix_tokens,
+                        scored.suffix_tokens);
+
+                executed_suffix_tokens +=
+                    static_cast<std::uint64_t>(
+                        scored.suffix_tokens);
+
+                field_result.capture_seconds +=
+                    scored.capture_seconds;
+
+                field_result.suffix_seconds +=
+                    scored.suffix_seconds;
+
+                field_result.score_seconds +=
+                    scored.score_seconds;
+
+                field_result.restore_seconds +=
+                    scored.restore_seconds;
+
+                for (std::size_t edge_index = 0;
+                     edge_index <
+                         scored.probabilities.size();
+                     ++edge_index) {
+
+                    const double branch_probability =
+                        static_cast<double>(
+                            scored.probabilities[
+                                edge_index]);
+
+                    if (!std::isfinite(
+                            branch_probability) ||
+                        branch_probability < 0.0) {
+
+                        throw std::logic_error(
+                            "trie probe returned an invalid probability");
+                    }
+
+                    for (const std::uint32_t candidate_index :
+                         trie_probe
+                             .descendant_candidate_indices[
+                                 edge_index]) {
+
+                        if (candidate_index >=
+                            candidate_count) {
+
+                            throw std::logic_error(
+                                "trie descendant candidate index is out of range");
+                        }
+
+                        probability_products[
+                            candidate_index] *=
+                                branch_probability;
+                    }
+                }
+
+                consume_service_work(
+                    request,
+                    static_cast<std::uint64_t>(
+                        scored.suffix_tokens));
+
+                if (request->cancelled.load(
+                        std::memory_order_acquire)) {
+
+                    return false;
+                }
+            }
+
+            if (!frontier_initialized) {
+                throw std::logic_error(
+                    "trie decision executed no ambiguity probes");
+            }
+
+            if (executed_suffix_tokens >
+                static_cast<std::uint64_t>(
+                    std::numeric_limits<
+                        std::uint32_t>::max())) {
+
+                throw std::overflow_error(
+                    "trie executed suffix accounting overflow");
+            }
+
+            field_result.executed_suffix_tokens =
+                static_cast<std::uint32_t>(
+                    executed_suffix_tokens);
+
+            double probability_sum = 0.0;
+
+            for (const double probability :
+                 probability_products) {
+
+                if (!std::isfinite(probability) ||
+                    probability < 0.0) {
+
+                    throw std::logic_error(
+                        "trie semantic probability is invalid");
+                }
+
+                probability_sum += probability;
+            }
+
+            if (!std::isfinite(probability_sum) ||
+                probability_sum <= 0.0) {
+
+                throw std::logic_error(
+                    "trie semantic probability sum is invalid");
+            }
+
+            field_result.probabilities.reserve(
+                candidate_count);
+
+            for (const double probability :
+                 probability_products) {
+
+                field_result.probabilities.push_back(
+                    static_cast<float>(
+                        probability /
+                        probability_sum));
+            }
+
+            // Strict greater-than preserves the lowest semantic
+            // candidate index on an exact tie.
+            std::size_t winner_index = 0;
+
+            for (std::size_t candidate_index = 1;
+                 candidate_index < candidate_count;
+                 ++candidate_index) {
+
+                if (probability_products[
+                        candidate_index] >
+                    probability_products[
+                        winner_index]) {
+
+                    winner_index =
+                        candidate_index;
+                }
+            }
+
+            field_result.winner_index =
+                static_cast<std::int32_t>(
+                    winner_index);
+
+            field_result.selected_value =
+                field_result
+                    .candidate_values[
+                        winner_index];
+
+            result.fields.push_back(
+                std::move(
+                    field_result));
+
+            return true;
+        };
+
         try {
             std::size_t node_index = 0;
 
@@ -933,7 +1198,26 @@ private:
                     const std::size_t sibling_count =
                         group_end - node_index;
 
-                    if (sibling_count >= 2) {
+                    bool sibling_group_has_trie =
+                        false;
+
+                    for (std::size_t index =
+                             node_index;
+                         index < group_end;
+                         ++index) {
+
+                        if (selected_field(index)
+                                .trie_plan
+                                .has_value()) {
+
+                            sibling_group_has_trie =
+                                true;
+                            break;
+                        }
+                    }
+
+                    if (sibling_count >= 2 &&
+                        !sibling_group_has_trie) {
                         std::vector<
                             const DecisionFieldSpec*>
                             selected;
@@ -1147,9 +1431,23 @@ private:
                     continue;
                 }
 
-                const DecisionFieldSpec& field =
+                const DecisionExecutionVariant& field =
                     selected_field(
                         node_index);
+
+                if (field.trie_plan.has_value()) {
+                    if (!append_trie_result(
+                            field)) {
+
+                        complete_cancelled(
+                            request);
+
+                        return true;
+                    }
+
+                    ++node_index;
+                    continue;
+                }
 
                 auto probe =
                     instance_.program->

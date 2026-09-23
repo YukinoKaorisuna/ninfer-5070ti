@@ -598,6 +598,10 @@ struct DecisionFieldResult {
     std::string selected_value;
 
     std::vector<TokenId> candidate_tokens;
+    // Complete model-facing token path for each semantic candidate when the
+    // compiled backend uses a multi-token finite-choice trie. Empty for the
+    // legacy/depth-1 one-token representation.
+    std::vector<std::vector<TokenId>> candidate_token_paths;
     std::vector<float> probabilities;
     std::int32_t winner_index = -1;
     TokenId winner_token      = -1;

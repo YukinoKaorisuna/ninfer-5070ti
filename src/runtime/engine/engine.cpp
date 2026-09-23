@@ -5,10 +5,12 @@
 #include "runtime/contract/sampling.h"
 #include "runtime/contract/types.h"
 #include "runtime/engine/concurrent_executor.h"
+#include "runtime/engine/decision_execution.h"
 #include "targets/registry.h"
 
 #include <algorithm>
 #include <limits>
+#include <functional>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -928,6 +930,482 @@ validate_decision_field_variant(
     }
 }
 
+
+runtime::DecisionTriePlan
+build_decision_trie_plan(
+    const std::vector<std::vector<TokenId>>& paths,
+    std::size_t common_prefix_tokens) {
+
+    if (paths.size() < 2 || paths.size() > 16) {
+        throw std::invalid_argument(
+            "decision trie requires 2..16 semantic candidate paths");
+    }
+
+    struct TempNode {
+        std::int32_t terminal_candidate = -1;
+        std::vector<std::pair<TokenId, std::size_t>> children;
+    };
+
+    std::vector<TempNode> nodes(1);
+
+    const auto child_for_token =
+        [&](std::size_t node_index,
+            TokenId token) -> std::optional<std::size_t> {
+
+        for (const auto& [edge_token, child] :
+             nodes[node_index].children) {
+
+            if (edge_token == token) {
+                return child;
+            }
+        }
+
+        return std::nullopt;
+    };
+
+    for (std::size_t candidate_index = 0;
+         candidate_index < paths.size();
+         ++candidate_index) {
+
+        const auto& path =
+            paths[candidate_index];
+
+        if (path.size() <= common_prefix_tokens) {
+            throw std::invalid_argument(
+                "decision finite-choice candidate is an exact token prefix of another candidate");
+        }
+
+        std::size_t node_index = 0;
+
+        for (std::size_t token_index =
+                 common_prefix_tokens;
+             token_index < path.size();
+             ++token_index) {
+
+            if (nodes[node_index]
+                    .terminal_candidate >= 0) {
+
+                throw std::invalid_argument(
+                    "decision finite-choice candidate is an exact token prefix of another candidate");
+            }
+
+            const TokenId token =
+                path[token_index];
+
+            if (token < 0) {
+                throw std::invalid_argument(
+                    "decision trie token must be non-negative");
+            }
+
+            std::optional<std::size_t> child =
+                child_for_token(
+                    node_index,
+                    token);
+
+            if (!child.has_value()) {
+                const std::size_t new_child =
+                    nodes.size();
+
+                nodes.emplace_back();
+
+                nodes[node_index]
+                    .children
+                    .push_back(
+                        {token, new_child});
+
+                child = new_child;
+            }
+
+            node_index =
+                *child;
+        }
+
+        if (nodes[node_index]
+                .terminal_candidate >= 0) {
+
+            throw std::invalid_argument(
+                "decision finite-choice candidates produced duplicate complete token paths");
+        }
+
+        if (!nodes[node_index]
+                 .children.empty()) {
+
+            throw std::invalid_argument(
+                "decision finite-choice candidate is an exact token prefix of another candidate");
+        }
+
+        nodes[node_index]
+            .terminal_candidate =
+                static_cast<std::int32_t>(
+                    candidate_index);
+    }
+
+    runtime::DecisionTriePlan plan;
+    plan.candidate_token_paths = paths;
+
+    const auto descendant_candidates =
+        [&](std::size_t start_node) {
+
+        std::vector<std::uint32_t> descendants;
+        std::vector<std::size_t> stack{start_node};
+
+        while (!stack.empty()) {
+            const std::size_t node_index =
+                stack.back();
+
+            stack.pop_back();
+
+            const TempNode& node =
+                nodes[node_index];
+
+            if (node.terminal_candidate >= 0) {
+                descendants.push_back(
+                    static_cast<std::uint32_t>(
+                        node.terminal_candidate));
+            }
+
+            for (const auto& [edge_token, child] :
+                 node.children) {
+
+                (void)edge_token;
+                stack.push_back(child);
+            }
+        }
+
+        std::sort(
+            descendants.begin(),
+            descendants.end());
+
+        return descendants;
+    };
+
+    std::function<void(
+        std::size_t,
+        std::vector<TokenId>)>
+        lower_node;
+
+    lower_node =
+        [&](std::size_t node_index,
+            std::vector<TokenId> suffix) {
+
+        const TempNode& node =
+            nodes[node_index];
+
+        if (node.children.size() >= 2) {
+            runtime::DecisionTrieProbe probe;
+
+            probe.suffix_tokens =
+                suffix;
+
+            probe.candidate_tokens.reserve(
+                node.children.size());
+
+            probe.descendant_candidate_indices.reserve(
+                node.children.size());
+
+            for (const auto& [edge_token, child] :
+                 node.children) {
+
+                probe.candidate_tokens.push_back(
+                    edge_token);
+
+                probe.descendant_candidate_indices.push_back(
+                    descendant_candidates(
+                        child));
+            }
+
+            plan.probes.push_back(
+                std::move(probe));
+        }
+
+        for (const auto& [edge_token, child] :
+             node.children) {
+
+            std::vector<TokenId> child_suffix =
+                suffix;
+
+            child_suffix.push_back(
+                edge_token);
+
+            lower_node(
+                child,
+                std::move(child_suffix));
+        }
+    };
+
+    std::vector<TokenId> root_suffix(
+        paths.front().begin(),
+        paths.front().begin() +
+            static_cast<std::ptrdiff_t>(
+                common_prefix_tokens));
+
+    lower_node(
+        0,
+        std::move(root_suffix));
+
+    if (plan.probes.empty()) {
+        throw std::logic_error(
+            "multi-token finite-choice trie produced no ambiguous probes");
+    }
+
+    if (plan.probes.size() >
+        paths.size() - 1) {
+
+        throw std::logic_error(
+            "finite-choice trie exceeds K-1 ambiguity bound");
+    }
+
+    return plan;
+}
+
+
+void
+validate_decision_execution_variant(
+    const runtime::DecisionExecutionVariant& field) {
+
+    if (!field.trie_plan.has_value()) {
+        validate_decision_field_variant(
+            field);
+
+        return;
+    }
+
+    if (field.name.empty()) {
+        throw std::invalid_argument(
+            "decision field name must not be empty");
+    }
+
+    if (field.suffix_tokens.empty()) {
+        throw std::invalid_argument(
+            "decision trie field suffix must not be empty");
+    }
+
+    for (const TokenId token :
+         field.suffix_tokens) {
+
+        if (token < 0) {
+            throw std::invalid_argument(
+                "decision trie suffix token must be non-negative");
+        }
+    }
+
+    if (!field.candidate_tokens.empty()) {
+        throw std::invalid_argument(
+            "decision trie variant must not expose one-token candidate metadata");
+    }
+
+    const runtime::DecisionTriePlan& trie =
+        *field.trie_plan;
+
+    const std::size_t candidate_count =
+        trie.candidate_token_paths.size();
+
+    if (candidate_count < 2 ||
+        candidate_count > 16) {
+
+        throw std::invalid_argument(
+            "decision trie requires 2..16 candidate paths");
+    }
+
+    if (field.candidate_values.size() !=
+        candidate_count) {
+
+        throw std::invalid_argument(
+            "decision trie candidate value/path metadata size mismatch");
+    }
+
+    for (std::size_t i = 0;
+         i < candidate_count;
+         ++i) {
+
+        const auto& path =
+            trie.candidate_token_paths[i];
+
+        if (path.empty()) {
+            throw std::invalid_argument(
+                "decision trie candidate path must not be empty");
+        }
+
+        if (path.size() <
+            field.suffix_tokens.size() ||
+            !std::equal(
+                field.suffix_tokens.begin(),
+                field.suffix_tokens.end(),
+                path.begin())) {
+
+            throw std::invalid_argument(
+                "decision trie candidate path does not retain the compiled global prefix");
+        }
+
+        for (const TokenId token :
+             path) {
+
+            if (token < 0) {
+                throw std::invalid_argument(
+                    "decision trie candidate token must be non-negative");
+            }
+        }
+
+        for (std::size_t j = 0;
+             j < i;
+             ++j) {
+
+            const auto& prior =
+                trie.candidate_token_paths[j];
+
+            if (path == prior) {
+                throw std::invalid_argument(
+                    "decision trie candidate paths must be unique");
+            }
+
+            const std::size_t shared =
+                std::min(
+                    path.size(),
+                    prior.size());
+
+            if (std::equal(
+                    path.begin(),
+                    path.begin() +
+                        static_cast<std::ptrdiff_t>(
+                            shared),
+                    prior.begin())) {
+
+                throw std::invalid_argument(
+                    "decision trie does not permit an exact-prefix semantic candidate");
+            }
+        }
+    }
+
+    if (trie.probes.empty() ||
+        trie.probes.size() >
+            candidate_count - 1) {
+
+        throw std::invalid_argument(
+            "decision trie ambiguity probe count is invalid");
+    }
+
+    for (const auto& probe :
+         trie.probes) {
+
+        if (probe.suffix_tokens.empty()) {
+            throw std::invalid_argument(
+                "decision trie probe suffix must not be empty");
+        }
+
+        if (probe.candidate_tokens.size() < 2 ||
+            probe.candidate_tokens.size() > 16) {
+
+            throw std::invalid_argument(
+                "decision trie probe requires 2..16 outgoing tokens");
+        }
+
+        if (probe.descendant_candidate_indices.size() !=
+            probe.candidate_tokens.size()) {
+
+            throw std::invalid_argument(
+                "decision trie probe descendant mapping size mismatch");
+        }
+
+        for (std::size_t edge = 0;
+             edge < probe.candidate_tokens.size();
+             ++edge) {
+
+            if (probe.candidate_tokens[edge] < 0) {
+                throw std::invalid_argument(
+                    "decision trie probe token must be non-negative");
+            }
+
+            for (std::size_t prior = 0;
+                 prior < edge;
+                 ++prior) {
+
+                if (probe.candidate_tokens[edge] ==
+                    probe.candidate_tokens[prior]) {
+
+                    throw std::invalid_argument(
+                        "decision trie probe tokens must be unique");
+                }
+            }
+
+            if (probe.descendant_candidate_indices[edge]
+                    .empty()) {
+
+                throw std::invalid_argument(
+                    "decision trie probe edge has no semantic descendants");
+            }
+
+            for (const std::uint32_t index :
+                 probe.descendant_candidate_indices[edge]) {
+
+                if (index >= candidate_count) {
+                    throw std::invalid_argument(
+                        "decision trie descendant candidate index is out of range");
+                }
+            }
+        }
+    }
+}
+
+
+std::size_t
+decision_variant_candidate_count(
+    const runtime::DecisionExecutionVariant& variant) {
+
+    if (variant.trie_plan.has_value()) {
+        return variant.trie_plan
+            ->candidate_token_paths
+            .size();
+    }
+
+    return variant.candidate_tokens.size();
+}
+
+
+std::uint64_t
+decision_variant_service_work(
+    const runtime::DecisionExecutionVariant& variant) {
+
+    if (!variant.trie_plan.has_value()) {
+        return static_cast<std::uint64_t>(
+            variant.suffix_tokens.size());
+    }
+
+    std::uint64_t work = 0;
+
+    for (const auto& probe :
+         variant.trie_plan->probes) {
+
+        work += static_cast<std::uint64_t>(
+            probe.suffix_tokens.size());
+    }
+
+    return work;
+}
+
+
+std::size_t
+decision_variant_max_suffix_tokens(
+    const runtime::DecisionExecutionVariant& variant) {
+
+    if (!variant.trie_plan.has_value()) {
+        return variant.suffix_tokens.size();
+    }
+
+    std::size_t maximum = 0;
+
+    for (const auto& probe :
+         variant.trie_plan->probes) {
+
+        maximum =
+            std::max(
+                maximum,
+                probe.suffix_tokens.size());
+    }
+
+    return maximum;
+}
+
+
 DecisionProgramProjection
 validate_and_project_decision_program(
     const runtime::DecisionExecutionProgram& program) {
@@ -971,8 +1449,7 @@ validate_and_project_decision_program(
             }
 
             const std::size_t parent_choices =
-                parent.variants.front()
-                    .candidate_tokens.size();
+                decision_variant_candidate_count(parent.variants.front());
 
             if (node.variants.size() !=
                 parent_choices) {
@@ -986,7 +1463,7 @@ validate_and_project_decision_program(
                 "independent decision node must contain exactly one execution variant");
         }
 
-        const DecisionFieldSpec& first =
+        const runtime::DecisionExecutionVariant& first =
             node.variants.front();
 
         for (std::size_t prior = 0;
@@ -1003,19 +1480,19 @@ validate_and_project_decision_program(
         }
 
         std::size_t max_suffix = 0;
+        std::uint64_t max_service_work = 0;
 
-        for (const DecisionFieldSpec& variant :
+        for (const runtime::DecisionExecutionVariant& variant :
              node.variants) {
 
-            validate_decision_field_variant(
-                variant);
+            validate_decision_execution_variant(variant);
 
             if (variant.name != first.name ||
                 variant.type != first.type ||
                 variant.candidate_values !=
                     first.candidate_values ||
-                variant.candidate_tokens.size() !=
-                    first.candidate_tokens.size()) {
+                decision_variant_candidate_count(variant) !=
+                    decision_variant_candidate_count(first)) {
 
                 throw std::invalid_argument(
                     "decision execution variants disagree on field metadata");
@@ -1024,12 +1501,16 @@ validate_and_project_decision_program(
             max_suffix =
                 std::max(
                     max_suffix,
-                    variant.suffix_tokens.size());
+                    decision_variant_max_suffix_tokens(variant));
+
+            max_service_work =
+                std::max(
+                    max_service_work,
+                    decision_variant_service_work(variant));
         }
 
         projection.service_work +=
-            static_cast<std::uint64_t>(
-                max_suffix);
+            max_service_work;
 
         projection.max_frontier_extension =
             std::max(
@@ -1208,7 +1689,7 @@ Engine::compile_decision_plan(
         [&](const FiniteChoice& choice,
             std::string_view continuation_prefix,
             const std::vector<std::string>& candidate_texts)
-            -> DecisionFieldSpec {
+            -> runtime::DecisionExecutionVariant {
 
         if (choice.label.empty()) {
             throw std::invalid_argument(
@@ -1246,7 +1727,7 @@ Engine::compile_decision_plan(
             }
         }
 
-        DecisionFieldSpec raw;
+        runtime::DecisionExecutionVariant raw;
 
         raw.name = choice.label;
 
@@ -1330,6 +1811,15 @@ Engine::compile_decision_plan(
         raw.candidate_tokens.reserve(
             candidate_texts.size());
 
+        const bool one_token_branches =
+            std::all_of(
+                paths.begin(),
+                paths.end(),
+                [common](const auto& path) {
+                    return path.size() ==
+                        common + 1;
+                });
+
         for (std::size_t choice_index = 0;
              choice_index <
                  candidate_texts.size();
@@ -1338,18 +1828,17 @@ Engine::compile_decision_plan(
             const std::vector<TokenId>& path_tokens =
                 paths[choice_index];
 
-            if (path_tokens.size() !=
-                common + 1) {
-
+            if (path_tokens.size() <= common) {
                 throw std::invalid_argument(
-                    "decision finite choice requires a multi-token branch after whole-path tokenization in the current backend: " +
+                    "decision finite-choice candidate is an exact token prefix of another candidate: " +
                     candidate_texts[choice_index]);
             }
 
             const TokenId token =
                 path_tokens[common];
 
-            if (std::find(
+            if (one_token_branches &&
+                std::find(
                     raw.candidate_tokens.begin(),
                     raw.candidate_tokens.end(),
                     token) !=
@@ -1391,8 +1880,17 @@ Engine::compile_decision_plan(
                         .string_value());
             }
 
-            raw.candidate_tokens.push_back(
-                token);
+            if (one_token_branches) {
+                raw.candidate_tokens.push_back(
+                    token);
+            }
+        }
+
+        if (!one_token_branches) {
+            raw.trie_plan =
+                build_decision_trie_plan(
+                    paths,
+                    common);
         }
 
         return raw;

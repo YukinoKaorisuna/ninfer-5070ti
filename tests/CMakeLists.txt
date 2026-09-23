@@ -149,6 +149,13 @@ ninfer_add_test(ninfer_qwen3_8_27b_dependency_decision_real_test
 ninfer_add_test(ninfer_qwen3_8_27b_dependency_wave_real_test
   SOURCES targets/qwen3_6_27b/test_dependency_wave_real.cpp
   LIBRARIES ninfer_engine)
+
+ninfer_add_test(ninfer_qwen3_8_27b_trie_decision_real_test
+  SOURCES targets/qwen3_6_27b/test_trie_decision_real.cpp
+  LIBRARIES ninfer_engine)
+set_tests_properties(
+  ninfer_qwen3_8_27b_trie_decision_real_test
+  PROPERTIES SKIP_RETURN_CODE 77)
 set_tests_properties(
   ninfer_qwen3_8_27b_compiled_decision_plan_real_test
   PROPERTIES SKIP_RETURN_CODE 77)
