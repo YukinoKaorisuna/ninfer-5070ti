@@ -6,6 +6,7 @@
 #include "runtime/engine/concurrent_executor.h"
 #include "targets/registry.h"
 
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -126,6 +127,60 @@ GenerationResult GenerationHandle::wait(OutputSink* sink, const CancellationView
     if (impl_ == nullptr) { throw std::logic_error("GenerationHandle is empty"); }
     std::unique_ptr<Impl> impl = std::move(impl_);
     return impl->wait(sink, cancellation);
+}
+
+class DecisionHandle::Impl {
+public:
+    class Concept {
+    public:
+        virtual ~Concept() = default;
+        virtual DecisionResult wait(const CancellationView& cancellation) = 0;
+    };
+
+    template <class Submission>
+    class Model final : public Concept {
+    public:
+        Model(std::shared_ptr<void> keep_alive, Submission submission)
+            : keep_alive_(std::move(keep_alive)), submission_(std::move(submission)) {}
+
+        DecisionResult wait(const CancellationView& cancellation) override {
+            return submission_.wait(cancellation);
+        }
+
+    private:
+        std::shared_ptr<void> keep_alive_;
+        Submission submission_;
+    };
+
+    template <class Submission>
+    Impl(std::shared_ptr<void> keep_alive, Submission submission)
+        : state_(std::make_unique<Model<Submission>>(std::move(keep_alive),
+                                                     std::move(submission))) {}
+
+    DecisionResult wait(const CancellationView& cancellation) {
+        return state_->wait(cancellation);
+    }
+
+private:
+    std::unique_ptr<Concept> state_;
+};
+
+DecisionHandle::DecisionHandle() noexcept                          = default;
+DecisionHandle::~DecisionHandle()                                  = default;
+DecisionHandle::DecisionHandle(DecisionHandle&&) noexcept          = default;
+DecisionHandle& DecisionHandle::operator=(DecisionHandle&&) noexcept = default;
+
+DecisionHandle::DecisionHandle(std::unique_ptr<Impl> impl) noexcept
+    : impl_(std::move(impl)) {}
+
+DecisionHandle::operator bool() const noexcept {
+    return impl_ != nullptr;
+}
+
+DecisionResult DecisionHandle::wait(const CancellationView& cancellation) {
+    if (impl_ == nullptr) { throw std::logic_error("DecisionHandle is empty"); }
+    std::unique_ptr<Impl> impl = std::move(impl_);
+    return impl->wait(cancellation);
 }
 
 class Engine::Impl {
@@ -301,6 +356,127 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
 GenerationResult Engine::generate(PreparedPrompt prompt, RequestOptions options, OutputSink* sink,
                                   const CancellationView& cancellation) {
     return submit(std::move(prompt), std::move(options)).wait(sink, cancellation);
+}
+
+DecisionHandle
+Engine::submit_decision(PreparedPrompt prompt, std::vector<DecisionFieldSpec> fields,
+                        std::chrono::steady_clock::time_point pending_deadline) {
+    if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
+    if (prompt.impl_ == nullptr) { throw std::invalid_argument("PreparedPrompt is empty"); }
+    if (fields.empty() || fields.size() > 8) {
+        throw std::invalid_argument("decision request requires 1..8 fields");
+    }
+
+    std::uint64_t projected_work = 0;
+    for (std::size_t field_index = 0; field_index < fields.size(); ++field_index) {
+        const DecisionFieldSpec& field = fields[field_index];
+        if (field.name.empty()) {
+            throw std::invalid_argument("decision field name must not be empty");
+        }
+
+        for (std::size_t prior = 0; prior < field_index; ++prior) {
+            if (fields[prior].name == field.name) {
+                throw std::invalid_argument("decision field names must be unique");
+            }
+        }
+
+        if (field.suffix_tokens.empty()) {
+            throw std::invalid_argument("decision field suffix must not be empty");
+        }
+
+        for (const TokenId token : field.suffix_tokens) {
+            if (token < 0) {
+                throw std::invalid_argument(
+                    "decision suffix token must be non-negative");
+            }
+        }
+        if (field.candidate_tokens.size() < 2 || field.candidate_tokens.size() > 16) {
+            throw std::invalid_argument("decision field requires 2..16 candidate tokens");
+        }
+        for (std::size_t i = 0; i < field.candidate_tokens.size(); ++i) {
+            if (field.candidate_tokens[i] < 0) {
+                throw std::invalid_argument("decision candidate token must be non-negative");
+            }
+            for (std::size_t j = i + 1; j < field.candidate_tokens.size(); ++j) {
+                if (field.candidate_tokens[i] == field.candidate_tokens[j]) {
+                    throw std::invalid_argument("decision candidate tokens must be unique");
+                }
+            }
+        }
+        projected_work += field.suffix_tokens.size();
+    }
+
+    // The ordinary runtime charges one service-work quantum when prefill
+    // completes because that round also produces generation's first sampled
+    // token. Decision mode intentionally discards that sampled token, but the
+    // GPU work still occurred. Reserve that prefill-output quantum in addition
+    // to every suffix token evaluated by the finite decision probes.
+    constexpr std::uint64_t kDecisionPrefillOutputWork = 1;
+
+    if (projected_work == 0 ||
+        projected_work >
+            static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) -
+                kDecisionPrefillOutputWork) {
+        throw std::invalid_argument("decision projected work is outside supported bounds");
+    }
+
+    const std::uint64_t scheduler_work =
+        projected_work + kDecisionPrefillOutputWork;
+
+    const PromptSummary prompt_summary = prompt.impl_->summary;
+    if (prompt_summary.prompt_tokens > impl_->options.max_context ||
+        projected_work >
+            static_cast<std::uint64_t>(impl_->options.max_context - prompt_summary.prompt_tokens)) {
+        throw RequestError(
+            RequestErrorKind::ContextLengthExceeded,
+            context_capacity_error(
+                static_cast<std::uint32_t>(
+                    prompt_summary.prompt_tokens +
+                    std::min<std::uint64_t>(
+                        projected_work,
+                        std::numeric_limits<std::uint32_t>::max())),
+                impl_->options.max_context));
+    }
+
+    RequestOptions planning;
+    planning.execution.requested_output_tokens =
+        static_cast<std::uint32_t>(scheduler_work);
+    planning.execution.allow_prefix_reuse = true;
+
+    runtime::ResolvedRequestOptions resolved =
+        resolve_request_options(impl_->sampling_defaults,
+                                prompt.impl_->sampling_mode,
+                                std::move(planning));
+
+    const double prepare_seconds = prompt.impl_->prepare.seconds;
+
+    return std::visit(
+        [&](auto& executor) -> DecisionHandle {
+            using Executor = std::remove_cvref_t<decltype(executor)>;
+            if constexpr (std::is_same_v<Executor, std::monostate>) {
+                throw std::logic_error("concurrent Engine executor is unavailable");
+            } else {
+                auto submission = executor->submit_decision(
+                    std::move(prompt.impl_->value),
+                    prompt_summary,
+                    prepare_seconds,
+                    std::move(resolved),
+                    std::move(fields),
+                    pending_deadline);
+
+                return DecisionHandle(
+                    std::make_unique<DecisionHandle::Impl>(
+                        impl_,
+                        std::move(submission)));
+            }
+        },
+        impl_->executor);
+}
+
+DecisionResult
+Engine::decide(PreparedPrompt prompt, std::vector<DecisionFieldSpec> fields,
+               const CancellationView& cancellation) {
+    return submit_decision(std::move(prompt), std::move(fields)).wait(cancellation);
 }
 
 const EngineOptions& Engine::options() const {

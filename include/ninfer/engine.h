@@ -54,6 +54,29 @@ private:
     friend class Engine;
 };
 
+class DecisionHandle {
+public:
+    DecisionHandle() noexcept;
+    ~DecisionHandle();
+
+    DecisionHandle(DecisionHandle&&) noexcept;
+    DecisionHandle& operator=(DecisionHandle&&) noexcept;
+
+    DecisionHandle(const DecisionHandle&)            = delete;
+    DecisionHandle& operator=(const DecisionHandle&) = delete;
+
+    [[nodiscard]] explicit operator bool() const noexcept;
+
+    DecisionResult wait(const CancellationView& cancellation = {});
+
+private:
+    class Impl;
+    explicit DecisionHandle(std::unique_ptr<Impl> impl) noexcept;
+    std::unique_ptr<Impl> impl_;
+
+    friend class Engine;
+};
+
 class Engine {
 public:
     explicit Engine(EngineOptions options);
@@ -86,6 +109,17 @@ public:
     GenerationResult generate(PreparedPrompt prompt, RequestOptions options,
                               OutputSink* sink                     = nullptr,
                               const CancellationView& cancellation = {});
+
+    // Submit finite constrained fields against one shared prompt frontier.
+    //
+    // M1-C1 requires caller-provided token IDs. Each field must contain a
+    // non-empty suffix and 2..16 unique candidate token IDs.
+    [[nodiscard]] DecisionHandle
+    submit_decision(PreparedPrompt prompt, std::vector<DecisionFieldSpec> fields,
+                    std::chrono::steady_clock::time_point pending_deadline = {});
+
+    DecisionResult decide(PreparedPrompt prompt, std::vector<DecisionFieldSpec> fields,
+                          const CancellationView& cancellation = {});
 
     [[nodiscard]] const EngineOptions& options() const;
     [[nodiscard]] LoadSummary load_summary() const;

@@ -1177,6 +1177,25 @@ ProgramImplCore::decision_probe_lane(
     std::span<const TokenId> suffix_tokens,
     std::span<const TokenId> candidate_tokens) {
 
+    // M1-C1 raw-token domain hardening.
+    // decision_probe_lane indexes embeddings/logits directly, so reject
+    // malformed internal token IDs before any CUDA access.
+    for (const TokenId token : suffix_tokens) {
+        if (token < 0 ||
+            static_cast<std::uint32_t>(token) >= TextConfig::token_domain) {
+            throw std::out_of_range(
+                "decision suffix token is outside the model token domain");
+        }
+    }
+
+    for (const TokenId token : candidate_tokens) {
+        if (token < 0 ||
+            static_cast<std::uint32_t>(token) >= TextConfig::token_domain) {
+            throw std::out_of_range(
+                "decision candidate token is outside the model token domain");
+        }
+    }
+
     if (speculative_backend != SpeculativeBackend::None || !io.ordinary) {
         throw std::logic_error(
             "constrained decision M1-B requires the ordinary target backend");

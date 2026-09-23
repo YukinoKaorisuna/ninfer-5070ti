@@ -135,6 +135,56 @@ public:
         friend class ConcurrentExecutor;
     };
 
+    class DecisionSubmission {
+    public:
+        DecisionSubmission() noexcept = default;
+
+        ~DecisionSubmission() { reset(); }
+
+        DecisionSubmission(DecisionSubmission&& other) noexcept
+            : owner_(std::exchange(other.owner_, nullptr)),
+              request_(std::move(other.request_)) {}
+
+        DecisionSubmission& operator=(DecisionSubmission&& other) noexcept {
+            if (this != &other) {
+                reset();
+                owner_   = std::exchange(other.owner_, nullptr);
+                request_ = std::move(other.request_);
+            }
+            return *this;
+        }
+
+        DecisionSubmission(const DecisionSubmission&)            = delete;
+        DecisionSubmission& operator=(const DecisionSubmission&) = delete;
+
+        DecisionResult wait(const CancellationView& cancellation) {
+            if (owner_ == nullptr || request_ == nullptr) {
+                throw std::logic_error("concurrent decision submission is empty");
+            }
+            ConcurrentExecutor* owner = std::exchange(owner_, nullptr);
+            return owner->wait_for_decision(
+                std::exchange(request_, nullptr),
+                cancellation);
+        }
+
+    private:
+        DecisionSubmission(ConcurrentExecutor& owner,
+                           std::shared_ptr<Request> request) noexcept
+            : owner_(&owner), request_(std::move(request)) {}
+
+        void reset() noexcept {
+            if (owner_ != nullptr && request_ != nullptr) {
+                owner_->abandon_request(std::move(request_));
+            }
+            owner_ = nullptr;
+        }
+
+        ConcurrentExecutor* owner_ = nullptr;
+        std::shared_ptr<Request> request_;
+
+        friend class ConcurrentExecutor;
+    };
+
     Submission submit(targets::qwen3_6::PreparedPrompt prompt, PromptSummary prompt_summary,
                       double prepare_seconds, ResolvedRequestOptions options,
                       Clock::time_point pending_deadline = {}) {
@@ -184,6 +234,70 @@ public:
         }
         queue_cv_.notify_one();
         return Submission(*this, std::move(request));
+    }
+
+    DecisionSubmission
+    submit_decision(targets::qwen3_6::PreparedPrompt prompt,
+                    PromptSummary prompt_summary,
+                    double prepare_seconds,
+                    ResolvedRequestOptions options,
+                    std::vector<DecisionFieldSpec> fields,
+                    Clock::time_point pending_deadline = {}) {
+        const Clock::time_point submitted = Clock::now();
+        if (pending_deadline == Clock::time_point{}) {
+            pending_deadline = submitted + pending_timeout_;
+        }
+        if (submitted >= pending_deadline) {
+            throw RequestError(RequestErrorKind::QueueTimeout,
+                               "decision request expired before submission");
+        }
+
+        std::uint64_t request_id = 0;
+        {
+            std::lock_guard lock(queue_mutex_);
+            if (stopping_ || failed_) {
+                throw RequestError(RequestErrorKind::Unavailable,
+                                   "inference engine is unavailable");
+            }
+            if (outstanding_ >= max_outstanding_) {
+                throw RequestError(RequestErrorKind::Overloaded,
+                                   "inference request queue is full");
+            }
+            ++outstanding_;
+            request_id = next_request_id_++;
+        }
+
+        std::shared_ptr<Request> request;
+        try {
+            auto output = instance_.loaded->frontend.make_output_session(
+                prompt, options.stop, options.output);
+            request = std::make_shared<Request>(
+                request_id,
+                std::move(prompt),
+                std::move(output),
+                prompt_summary,
+                prepare_seconds,
+                std::move(options),
+                pending_deadline,
+                submitted,
+                std::move(fields));
+        } catch (...) {
+            release_reserved_capacity();
+            throw;
+        }
+
+        {
+            std::lock_guard lock(queue_mutex_);
+            if (stopping_ || failed_) {
+                --outstanding_;
+                throw RequestError(RequestErrorKind::Unavailable,
+                                   "inference engine is unavailable");
+            }
+            pending_.push_back(request);
+        }
+
+        queue_cv_.notify_one();
+        return DecisionSubmission(*this, std::move(request));
     }
 
     [[nodiscard]] MemorySummary memory_summary() const {
@@ -287,14 +401,71 @@ private:
         }
     }
 
+    DecisionResult wait_for_decision(std::shared_ptr<Request> request,
+                                     const CancellationView& cancellation) {
+        struct ConsumerGuard {
+            ConcurrentExecutor* owner;
+            std::shared_ptr<Request> request;
+
+            ~ConsumerGuard() { owner->release_consumer(request); }
+        } guard{this, request};
+
+        std::exception_ptr caller_error;
+
+        for (;;) {
+            bool done = false;
+            {
+                std::unique_lock lock(request->mutex);
+                request->cv.wait_for(
+                    lock,
+                    std::chrono::milliseconds(10),
+                    [&] { return request->done; });
+                done = request->done;
+            }
+
+            if (caller_error == nullptr) {
+                try {
+                    if (cancellation.requested()) {
+                        request->cancelled.store(true, std::memory_order_release);
+                        queue_cv_.notify_one();
+                    }
+                } catch (...) {
+                    caller_error = std::current_exception();
+                    request->cancelled.store(true, std::memory_order_release);
+                    queue_cv_.notify_one();
+                }
+            }
+
+            if (!done) { continue; }
+
+            if (caller_error != nullptr) {
+                std::rethrow_exception(caller_error);
+            }
+
+            std::lock_guard lock(request->mutex);
+
+            if (request->error != nullptr) {
+                std::rethrow_exception(request->error);
+            }
+
+            return std::move(request->decision_result);
+        }
+    }
+
     struct Request {
         Request(std::uint64_t request_identity, targets::qwen3_6::PreparedPrompt input,
                 targets::qwen3_6::OutputSession output_session, PromptSummary summary,
                 double frontend_seconds, ResolvedRequestOptions request_options,
-                Clock::time_point limit, Clock::time_point submit_time)
+                Clock::time_point limit, Clock::time_point submit_time,
+                std::vector<DecisionFieldSpec> finite_fields = {})
             : id(request_identity), prompt(std::move(input)), output(std::move(output_session)),
               prompt_summary(summary), prepare_seconds(frontend_seconds),
-              options(std::move(request_options)), deadline(limit), submitted(submit_time) {}
+              options(std::move(request_options)), deadline(limit), submitted(submit_time),
+              decision_fields(std::move(finite_fields)) {}
+
+        [[nodiscard]] bool is_decision() const noexcept {
+            return !decision_fields.empty();
+        }
 
         const std::uint64_t id;
         targets::qwen3_6::PreparedPrompt prompt;
@@ -310,6 +481,9 @@ private:
         std::vector<TokenId> generated;
         std::string content;
         std::string reasoning;
+
+        std::vector<DecisionFieldSpec> decision_fields;
+        DecisionResult decision_result;
         std::size_t reasoning_close_index = 0;
         std::optional<std::uint32_t> lane;
         std::atomic<bool> cancelled{false};
@@ -477,9 +651,98 @@ private:
     }
 
     void complete_cancelled(const std::shared_ptr<Request>& request) {
+        if (request->is_decision()) {
+            complete_error(
+                request,
+                std::make_exception_ptr(
+                    RequestError(RequestErrorKind::Cancelled,
+                                 "decision request cancelled")));
+            return;
+        }
+
         (void)request->output.preview_terminal(FinishReason::Cancelled);
         append_output(request, request->output.commit_preview());
         complete_success(request, FinishReason::Cancelled);
+    }
+
+    void complete_decision_success(const std::shared_ptr<Request>& request,
+                                   DecisionResult result) {
+        release_planning_state(request);
+        request->prompt = {};
+
+        {
+            std::lock_guard lock(request->mutex);
+            if (request->done) { return; }
+            request->decision_result = std::move(result);
+            request->done            = true;
+        }
+
+        if (mark_completed(request)) { release_reserved_capacity(); }
+        request->cv.notify_one();
+    }
+
+    bool run_decision_request(const std::shared_ptr<Request>& request) {
+        if (!request->lane) {
+            throw std::logic_error("decision request has no lane");
+        }
+
+        const std::uint32_t lane = *request->lane;
+
+        DecisionResult result;
+        result.prompt           = request->prompt_summary;
+        result.prepare_seconds  = request->prepare_seconds;
+
+        if (request->begin) {
+            result.reused_prompt_tokens = request->begin->reused_prompt_tokens;
+            result.prefix_reuse_path    = request->begin->prefix_reuse_path;
+        }
+
+        result.fields.reserve(request->decision_fields.size());
+
+        try {
+            for (const DecisionFieldSpec& field : request->decision_fields) {
+                if (request->cancelled.load(std::memory_order_acquire)) {
+                    complete_cancelled(request);
+                    return true;
+                }
+
+                const auto probe =
+                    instance_.program->decision_probe_lane(
+                        lane,
+                        field.suffix_tokens,
+                        field.candidate_tokens);
+
+                DecisionFieldResult field_result;
+                field_result.name             = field.name;
+                field_result.candidate_tokens = field.candidate_tokens;
+                field_result.probabilities    = probe.probabilities;
+                field_result.winner_index     = probe.winner_index;
+                field_result.winner_token     = probe.winner_token;
+                field_result.frontier         = probe.frontier;
+                field_result.suffix_tokens    = probe.suffix_tokens;
+                field_result.capture_seconds  = probe.capture_seconds;
+                field_result.suffix_seconds   = probe.suffix_seconds;
+                field_result.score_seconds    = probe.score_seconds;
+                field_result.restore_seconds  = probe.restore_seconds;
+
+                result.fields.push_back(std::move(field_result));
+
+                consume_service_work(
+                    request,
+                    static_cast<std::uint64_t>(field.suffix_tokens.size()));
+            }
+
+            result.total_seconds =
+                request->prepare_seconds +
+                std::chrono::duration<double>(Clock::now() - request->submitted).count();
+
+            complete_decision_success(request, std::move(result));
+            return true;
+
+        } catch (...) {
+            complete_error(request, std::current_exception());
+            return true;
+        }
     }
 
     bool resolve_round(const std::shared_ptr<Request>& request, TokenId token,
@@ -683,6 +946,19 @@ private:
         if (step.round.tokens.size() != 1) {
             throw std::logic_error("prefill did not license exactly one token");
         }
+
+        if (request->is_decision()) {
+            const std::uint32_t lane = *request->lane;
+
+            // Terminal resolution retains exactly the executed prompt frontier.
+            // The sampled prefill token is intentionally not committed.
+            instance_.program->resolve_prefill_lane(lane, true);
+
+            (void)run_decision_request(request);
+            remove_completed_slot(lane);
+            return;
+        }
+
         if (resolve_round(request, step.round.tokens.front(), false)) {
             remove_completed_slot(*request->lane);
         } else {

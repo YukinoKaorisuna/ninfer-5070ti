@@ -418,6 +418,43 @@ struct GenerationResult {
     SpeculativeStats speculative;
 };
 
+// Finite constrained-decision contract.
+//
+// M1-C1 intentionally carries already-tokenized choices. Product-facing bool /
+// enum strings and exact single-token validation are added by M1-C2.
+struct DecisionFieldSpec {
+    std::string name;
+    std::vector<TokenId> suffix_tokens;
+    std::vector<TokenId> candidate_tokens;
+};
+
+struct DecisionFieldResult {
+    std::string name;
+    std::vector<TokenId> candidate_tokens;
+    std::vector<float> probabilities;
+    std::int32_t winner_index = -1;
+    TokenId winner_token      = -1;
+
+    std::uint32_t frontier      = 0;
+    std::uint32_t suffix_tokens = 0;
+
+    double capture_seconds = 0.0;
+    double suffix_seconds  = 0.0;
+    double score_seconds   = 0.0;
+    double restore_seconds = 0.0;
+};
+
+struct DecisionResult {
+    PromptSummary prompt;
+    std::vector<DecisionFieldResult> fields;
+
+    std::uint32_t reused_prompt_tokens = 0;
+    PrefixReusePath prefix_reuse_path  = PrefixReusePath::FullReset;
+
+    double prepare_seconds = 0.0;
+    double total_seconds   = 0.0;
+};
+
 struct ArenaMemorySummary {
     std::size_t capacity_bytes  = 0;
     std::size_t used_bytes      = 0;
