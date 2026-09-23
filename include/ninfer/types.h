@@ -506,6 +506,14 @@ struct FiniteChoicePresentation {
     std::vector<std::string> candidate_texts;
 };
 
+// Model-facing realization of one semantic dependency edge.
+//
+// This is presentation metadata rather than semantic meaning and contains
+// no tokenizer/backend state.
+struct DependencyConditioningPresentation {
+    std::vector<std::string> selected_choice_texts;
+};
+
 // Opaque semantic graph. V2-A contains independent FiniteChoice nodes only;
 // dependency/conditional APIs are added in later milestones.
 class StructuredDecisionSchema {
@@ -523,6 +531,10 @@ public:
 
     [[nodiscard]] SemanticNodeId
     add_finite_choice(FiniteChoice choice);
+
+    void add_dependency(
+        SemanticNodeId parent,
+        SemanticNodeId child);
 
     [[nodiscard]] bool empty() const noexcept;
     [[nodiscard]] std::size_t node_count() const noexcept;
@@ -552,6 +564,11 @@ public:
     void set_finite_choice(
         SemanticNodeId node,
         FiniteChoicePresentation presentation);
+
+    void set_dependency_conditioning(
+        SemanticNodeId parent,
+        SemanticNodeId child,
+        DependencyConditioningPresentation presentation);
 
 private:
     class Impl;

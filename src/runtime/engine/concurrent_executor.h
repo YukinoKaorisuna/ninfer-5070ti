@@ -1,3 +1,4 @@
+#include "decision_execution.h"
 #pragma once
 
 // Small fixed-capacity request scheduling and batched decode execution for every backend.
@@ -241,63 +242,93 @@ public:
                     PromptSummary prompt_summary,
                     double prepare_seconds,
                     ResolvedRequestOptions options,
-                    std::vector<DecisionFieldSpec> fields,
+                    DecisionExecutionProgram program,
                     Clock::time_point pending_deadline = {}) {
         const Clock::time_point submitted = Clock::now();
+
         if (pending_deadline == Clock::time_point{}) {
-            pending_deadline = submitted + pending_timeout_;
+            pending_deadline =
+                submitted + pending_timeout_;
         }
+
         if (submitted >= pending_deadline) {
-            throw RequestError(RequestErrorKind::QueueTimeout,
-                               "decision request expired before submission");
+            throw RequestError(
+                RequestErrorKind::QueueTimeout,
+                "decision request expired before submission");
         }
 
         std::uint64_t request_id = 0;
+
         {
-            std::lock_guard lock(queue_mutex_);
+            std::lock_guard lock(
+                queue_mutex_);
+
             if (stopping_ || failed_) {
-                throw RequestError(RequestErrorKind::Unavailable,
-                                   "inference engine is unavailable");
+                throw RequestError(
+                    RequestErrorKind::Unavailable,
+                    "inference engine is unavailable");
             }
-            if (outstanding_ >= max_outstanding_) {
-                throw RequestError(RequestErrorKind::Overloaded,
-                                   "inference request queue is full");
+
+            if (outstanding_ >=
+                max_outstanding_) {
+
+                throw RequestError(
+                    RequestErrorKind::Overloaded,
+                    "inference request queue is full");
             }
+
             ++outstanding_;
             request_id = next_request_id_++;
         }
 
         std::shared_ptr<Request> request;
+
         try {
-            auto output = instance_.loaded->frontend.make_output_session(
-                prompt, options.stop, options.output);
-            request = std::make_shared<Request>(
-                request_id,
-                std::move(prompt),
-                std::move(output),
-                prompt_summary,
-                prepare_seconds,
-                std::move(options),
-                pending_deadline,
-                submitted,
-                std::move(fields));
+            auto output =
+                instance_.loaded->frontend
+                    .make_output_session(
+                        prompt,
+                        options.stop,
+                        options.output);
+
+            request =
+                std::make_shared<Request>(
+                    request_id,
+                    std::move(prompt),
+                    std::move(output),
+                    prompt_summary,
+                    prepare_seconds,
+                    std::move(options),
+                    pending_deadline,
+                    submitted,
+                    std::move(program));
+
         } catch (...) {
             release_reserved_capacity();
             throw;
         }
 
         {
-            std::lock_guard lock(queue_mutex_);
+            std::lock_guard lock(
+                queue_mutex_);
+
             if (stopping_ || failed_) {
                 --outstanding_;
-                throw RequestError(RequestErrorKind::Unavailable,
-                                   "inference engine is unavailable");
+
+                throw RequestError(
+                    RequestErrorKind::Unavailable,
+                    "inference engine is unavailable");
             }
-            pending_.push_back(request);
+
+            pending_.push_back(
+                request);
         }
 
         queue_cv_.notify_one();
-        return DecisionSubmission(*this, std::move(request));
+
+        return DecisionSubmission(
+            *this,
+            std::move(request));
     }
 
     [[nodiscard]] MemorySummary memory_summary() const {
@@ -457,14 +488,14 @@ private:
                 targets::qwen3_6::OutputSession output_session, PromptSummary summary,
                 double frontend_seconds, ResolvedRequestOptions request_options,
                 Clock::time_point limit, Clock::time_point submit_time,
-                std::vector<DecisionFieldSpec> finite_fields = {})
+                DecisionExecutionProgram finite_program = {})
             : id(request_identity), prompt(std::move(input)), output(std::move(output_session)),
               prompt_summary(summary), prepare_seconds(frontend_seconds),
               options(std::move(request_options)), deadline(limit), submitted(submit_time),
-              decision_fields(std::move(finite_fields)) {}
+              decision_program(std::move(finite_program)) {}
 
         [[nodiscard]] bool is_decision() const noexcept {
-            return !decision_fields.empty();
+            return !decision_program.empty();
         }
 
         const std::uint64_t id;
@@ -482,7 +513,7 @@ private:
         std::string content;
         std::string reasoning;
 
-        std::vector<DecisionFieldSpec> decision_fields;
+        DecisionExecutionProgram decision_program;
         DecisionResult decision_result;
         std::size_t reasoning_close_index = 0;
         std::optional<std::uint32_t> lane;
@@ -683,87 +714,202 @@ private:
 
     bool run_decision_request(const std::shared_ptr<Request>& request) {
         if (!request->lane) {
-            throw std::logic_error("decision request has no lane");
+            throw std::logic_error(
+                "decision request has no lane");
         }
 
-        const std::uint32_t lane = *request->lane;
+        const std::uint32_t lane =
+            *request->lane;
 
         DecisionResult result;
-        result.prompt           = request->prompt_summary;
-        result.prepare_seconds  = request->prepare_seconds;
+
+        result.prompt =
+            request->prompt_summary;
+
+        result.prepare_seconds =
+            request->prepare_seconds;
 
         if (request->begin) {
-            result.reused_prompt_tokens = request->begin->reused_prompt_tokens;
-            result.prefix_reuse_path    = request->begin->prefix_reuse_path;
+            result.reused_prompt_tokens =
+                request->begin->
+                    reused_prompt_tokens;
+
+            result.prefix_reuse_path =
+                request->begin->
+                    prefix_reuse_path;
         }
 
-        result.fields.reserve(request->decision_fields.size());
+        result.fields.reserve(
+            request->decision_program
+                .nodes.size());
 
         try {
-            for (const DecisionFieldSpec& field : request->decision_fields) {
-                if (request->cancelled.load(std::memory_order_acquire)) {
-                    complete_cancelled(request);
+            for (std::size_t node_index = 0;
+                 node_index <
+                     request->decision_program
+                         .nodes.size();
+                 ++node_index) {
+
+                if (request->cancelled.load(
+                        std::memory_order_acquire)) {
+
+                    complete_cancelled(
+                        request);
+
                     return true;
                 }
 
+                const DecisionExecutionNode& node =
+                    request->decision_program
+                        .nodes[node_index];
+
+                std::size_t variant_index = 0;
+
+                if (node.parent_result_index) {
+                    const std::size_t parent_index =
+                        *node.parent_result_index;
+
+                    if (parent_index >=
+                        result.fields.size()) {
+
+                        throw std::logic_error(
+                            "decision dependency parent result is unavailable");
+                    }
+
+                    const std::int32_t parent_winner =
+                        result.fields[parent_index]
+                            .winner_index;
+
+                    if (parent_winner < 0) {
+                        throw std::logic_error(
+                            "decision dependency parent has no valid winner");
+                    }
+
+                    variant_index =
+                        static_cast<std::size_t>(
+                            parent_winner);
+
+                    if (variant_index >=
+                        node.variants.size()) {
+
+                        throw std::logic_error(
+                            "decision dependency winner is outside the compiled child variants");
+                    }
+                }
+
+                const DecisionFieldSpec& field =
+                    node.variants[
+                        variant_index];
+
                 const auto probe =
-                    instance_.program->decision_probe_lane(
-                        lane,
-                        field.suffix_tokens,
-                        field.candidate_tokens);
+                    instance_.program->
+                        decision_probe_lane(
+                            lane,
+                            field.suffix_tokens,
+                            field.candidate_tokens);
 
                 DecisionFieldResult field_result;
-                field_result.name             = field.name;
-                field_result.type             = field.type;
-                field_result.candidate_values = field.candidate_values;
-                field_result.candidate_tokens = field.candidate_tokens;
-                field_result.probabilities    = probe.probabilities;
-                field_result.winner_index     = probe.winner_index;
-                field_result.winner_token     = probe.winner_token;
 
-                if (!field_result.candidate_values.empty()) {
-                    if (field_result.candidate_values.size() !=
-                        field_result.candidate_tokens.size()) {
+                field_result.name =
+                    field.name;
+
+                field_result.type =
+                    field.type;
+
+                field_result.candidate_values =
+                    field.candidate_values;
+
+                field_result.candidate_tokens =
+                    field.candidate_tokens;
+
+                field_result.probabilities =
+                    probe.probabilities;
+
+                field_result.winner_index =
+                    probe.winner_index;
+
+                field_result.winner_token =
+                    probe.winner_token;
+
+                if (!field_result
+                         .candidate_values.empty()) {
+
+                    if (field_result
+                            .candidate_values.size() !=
+                        field_result
+                            .candidate_tokens.size()) {
+
                         throw std::logic_error(
                             "decision candidate value/token metadata size mismatch");
                     }
 
-                    if (field_result.winner_index < 0 ||
+                    if (field_result
+                            .winner_index < 0 ||
                         static_cast<std::size_t>(
-                            field_result.winner_index) >=
-                            field_result.candidate_values.size()) {
+                            field_result
+                                .winner_index) >=
+                            field_result
+                                .candidate_values.size()) {
+
                         throw std::logic_error(
                             "decision winner index is outside candidate metadata");
                     }
 
                     field_result.selected_value =
-                        field_result.candidate_values[
-                            static_cast<std::size_t>(
-                                field_result.winner_index)];
+                        field_result
+                            .candidate_values[
+                                static_cast<
+                                    std::size_t>(
+                                        field_result
+                                            .winner_index)];
                 }
-                field_result.frontier         = probe.frontier;
-                field_result.suffix_tokens    = probe.suffix_tokens;
-                field_result.capture_seconds  = probe.capture_seconds;
-                field_result.suffix_seconds   = probe.suffix_seconds;
-                field_result.score_seconds    = probe.score_seconds;
-                field_result.restore_seconds  = probe.restore_seconds;
 
-                result.fields.push_back(std::move(field_result));
+                field_result.frontier =
+                    probe.frontier;
+
+                field_result.suffix_tokens =
+                    probe.suffix_tokens;
+
+                field_result.capture_seconds =
+                    probe.capture_seconds;
+
+                field_result.suffix_seconds =
+                    probe.suffix_seconds;
+
+                field_result.score_seconds =
+                    probe.score_seconds;
+
+                field_result.restore_seconds =
+                    probe.restore_seconds;
+
+                result.fields.push_back(
+                    std::move(
+                        field_result));
 
                 consume_service_work(
                     request,
-                    static_cast<std::uint64_t>(field.suffix_tokens.size()));
+                    static_cast<std::uint64_t>(
+                        field.suffix_tokens.size()));
             }
 
             result.total_seconds =
                 request->prepare_seconds +
-                std::chrono::duration<double>(Clock::now() - request->submitted).count();
+                std::chrono::duration<double>(
+                    Clock::now() -
+                    request->submitted)
+                    .count();
 
-            complete_decision_success(request, std::move(result));
+            complete_decision_success(
+                request,
+                std::move(result));
+
             return true;
 
         } catch (...) {
-            complete_error(request, std::current_exception());
+            complete_error(
+                request,
+                std::current_exception());
+
             return true;
         }
     }
