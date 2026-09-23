@@ -1,6 +1,8 @@
 #include "decision_execution.h"
 #pragma once
 
+#include "ninfer/targets/qwen3_6/runtime.h"
+
 // Small fixed-capacity request scheduling and batched decode execution for every backend.
 
 #include "core/device.h"
@@ -743,12 +745,142 @@ private:
             request->decision_program
                 .nodes.size());
 
+        const auto selected_field =
+            [&](std::size_t node_index)
+                -> const DecisionFieldSpec& {
+
+            const DecisionExecutionNode& node =
+                request->decision_program
+                    .nodes[node_index];
+
+            std::size_t variant_index = 0;
+
+            if (node.parent_result_index) {
+                const std::size_t parent_index =
+                    *node.parent_result_index;
+
+                if (parent_index >=
+                    result.fields.size()) {
+
+                    throw std::logic_error(
+                        "decision dependency parent result is unavailable");
+                }
+
+                const std::int32_t parent_winner =
+                    result.fields[parent_index]
+                        .winner_index;
+
+                if (parent_winner < 0) {
+                    throw std::logic_error(
+                        "decision dependency parent has no valid winner");
+                }
+
+                variant_index =
+                    static_cast<std::size_t>(
+                        parent_winner);
+
+                if (variant_index >=
+                    node.variants.size()) {
+
+                    throw std::logic_error(
+                        "decision dependency winner is outside the compiled child variants");
+                }
+            }
+
+            return node.variants[
+                variant_index];
+        };
+
+        const auto append_result =
+            [&](const DecisionFieldSpec& field,
+                auto probe) {
+
+            DecisionFieldResult field_result;
+
+            field_result.name =
+                field.name;
+
+            field_result.type =
+                field.type;
+
+            field_result.candidate_values =
+                field.candidate_values;
+
+            field_result.candidate_tokens =
+                field.candidate_tokens;
+
+            field_result.probabilities =
+                std::move(
+                    probe.probabilities);
+
+            field_result.winner_index =
+                probe.winner_index;
+
+            field_result.winner_token =
+                probe.winner_token;
+
+            if (!field_result
+                     .candidate_values.empty()) {
+
+                if (field_result
+                        .candidate_values.size() !=
+                    field_result
+                        .candidate_tokens.size()) {
+
+                    throw std::logic_error(
+                        "decision candidate value/token metadata size mismatch");
+                }
+
+                if (field_result
+                        .winner_index < 0 ||
+                    static_cast<std::size_t>(
+                        field_result
+                            .winner_index) >=
+                        field_result
+                            .candidate_values.size()) {
+
+                    throw std::logic_error(
+                        "decision winner index is outside candidate metadata");
+                }
+
+                field_result.selected_value =
+                    field_result
+                        .candidate_values[
+                            static_cast<
+                                std::size_t>(
+                                    field_result
+                                        .winner_index)];
+            }
+
+            field_result.frontier =
+                probe.frontier;
+
+            field_result.suffix_tokens =
+                probe.suffix_tokens;
+
+            field_result.capture_seconds =
+                probe.capture_seconds;
+
+            field_result.suffix_seconds =
+                probe.suffix_seconds;
+
+            field_result.score_seconds =
+                probe.score_seconds;
+
+            field_result.restore_seconds =
+                probe.restore_seconds;
+
+            result.fields.push_back(
+                std::move(
+                    field_result));
+        };
+
         try {
-            for (std::size_t node_index = 0;
-                 node_index <
-                     request->decision_program
-                         .nodes.size();
-                 ++node_index) {
+            std::size_t node_index = 0;
+
+            while (node_index <
+                   request->decision_program
+                       .nodes.size()) {
 
                 if (request->cancelled.load(
                         std::memory_order_acquire)) {
@@ -763,133 +895,258 @@ private:
                     request->decision_program
                         .nodes[node_index];
 
-                std::size_t variant_index = 0;
+                bool used_shared_wave = false;
 
                 if (node.parent_result_index) {
                     const std::size_t parent_index =
                         *node.parent_result_index;
 
-                    if (parent_index >=
-                        result.fields.size()) {
+                    std::size_t group_end =
+                        node_index + 1;
 
-                        throw std::logic_error(
-                            "decision dependency parent result is unavailable");
+                    while (
+                        group_end <
+                            request->decision_program
+                                .nodes.size()) {
+
+                        const DecisionExecutionNode&
+                            candidate_node =
+                                request->decision_program
+                                    .nodes[group_end];
+
+                        if (!candidate_node
+                                 .parent_result_index ||
+                            *candidate_node
+                                 .parent_result_index !=
+                                parent_index) {
+
+                            break;
+                        }
+
+                        ++group_end;
                     }
 
-                    const std::int32_t parent_winner =
-                        result.fields[parent_index]
-                            .winner_index;
+                    const std::size_t sibling_count =
+                        group_end - node_index;
 
-                    if (parent_winner < 0) {
-                        throw std::logic_error(
-                            "decision dependency parent has no valid winner");
-                    }
+                    if (sibling_count >= 2) {
+                        std::vector<
+                            const DecisionFieldSpec*>
+                            selected;
 
-                    variant_index =
-                        static_cast<std::size_t>(
-                            parent_winner);
+                        selected.reserve(
+                            sibling_count);
 
-                    if (variant_index >=
-                        node.variants.size()) {
+                        for (std::size_t index =
+                                 node_index;
+                             index < group_end;
+                             ++index) {
 
-                        throw std::logic_error(
-                            "decision dependency winner is outside the compiled child variants");
+                            selected.push_back(
+                                &selected_field(
+                                    index));
+                        }
+
+                        std::size_t common =
+                            selected.front()
+                                ->suffix_tokens.size();
+
+                        for (std::size_t field_index = 1;
+                             field_index <
+                                 selected.size();
+                             ++field_index) {
+
+                            common =
+                                std::min(
+                                    common,
+                                    selected[field_index]
+                                        ->suffix_tokens
+                                        .size());
+
+                            std::size_t matched = 0;
+
+                            while (
+                                matched < common &&
+                                selected.front()
+                                        ->suffix_tokens[
+                                            matched] ==
+                                    selected[field_index]
+                                        ->suffix_tokens[
+                                            matched]) {
+
+                                ++matched;
+                            }
+
+                            common = matched;
+                        }
+
+                        bool residuals_nonempty =
+                            common != 0;
+
+                        if (residuals_nonempty) {
+                            for (const auto* field :
+                                 selected) {
+
+                                if (field
+                                        ->suffix_tokens
+                                        .size() <= common) {
+
+                                    residuals_nonempty =
+                                        false;
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Materialization is profitable exactly when at least
+                        // two siblings share one or more deterministic tokens.
+                        // Scheduler service accounting remains conservatively
+                        // replay-equivalent in V2-C2.
+                        if (residuals_nonempty) {
+                            std::vector<
+                                targets::qwen3_6::
+                                    DecisionWaveProbeSpec>
+                                probes;
+
+                            probes.reserve(
+                                selected.size());
+
+                            for (const auto* field :
+                                 selected) {
+
+                                probes.push_back(
+                                    targets::qwen3_6::
+                                        DecisionWaveProbeSpec{
+                                            std::span<
+                                                const TokenId>(
+                                                field
+                                                    ->suffix_tokens
+                                                    .data() +
+                                                    common,
+                                                field
+                                                    ->suffix_tokens
+                                                    .size() -
+                                                    common),
+                                            std::span<
+                                                const TokenId>(
+                                                field
+                                                    ->candidate_tokens
+                                                    .data(),
+                                                field
+                                                    ->candidate_tokens
+                                                    .size()),
+                                        });
+                            }
+
+                            const auto shared_prefix =
+                                std::span<
+                                    const TokenId>(
+                                    selected.front()
+                                        ->suffix_tokens
+                                        .data(),
+                                    common);
+
+                            auto wave =
+                                instance_.program->
+                                    decision_probe_wave_lane(
+                                        lane,
+                                        shared_prefix,
+                                        probes);
+
+                            if (wave.probes.size() !=
+                                selected.size()) {
+
+                                throw std::logic_error(
+                                    "shared decision wave returned the wrong probe count");
+                            }
+
+                            // Shared transaction timing is charged exactly
+                            // once across the public per-field timings.
+                            wave.probes.front()
+                                .capture_seconds +=
+                                    wave.capture_seconds;
+
+                            wave.probes.front()
+                                .suffix_seconds +=
+                                    wave.shared_prefix_seconds;
+
+                            wave.probes.back()
+                                .restore_seconds +=
+                                    wave.restore_seconds;
+
+                            // The target has fully restored the retained
+                            // frontier before returning. A cancellation which
+                            // arrived during the atomic wave is therefore safe
+                            // to honor here.
+                            if (request->cancelled.load(
+                                    std::memory_order_acquire)) {
+
+                                complete_cancelled(
+                                    request);
+
+                                return true;
+                            }
+
+                            for (std::size_t field_index = 0;
+                                 field_index <
+                                     selected.size();
+                                 ++field_index) {
+
+                                append_result(
+                                    *selected[
+                                        field_index],
+                                    std::move(
+                                        wave.probes[
+                                            field_index]));
+
+                                // Keep scheduler/service accounting
+                                // replay-equivalent for V2-C2. Actual target
+                                // work is lower; planner reduction is a later
+                                // optimization.
+                                consume_service_work(
+                                    request,
+                                    static_cast<
+                                        std::uint64_t>(
+                                            selected[
+                                                field_index]
+                                                ->suffix_tokens
+                                                .size()));
+                            }
+
+                            node_index =
+                                group_end;
+
+                            used_shared_wave =
+                                true;
+                        }
                     }
                 }
 
-                const DecisionFieldSpec& field =
-                    node.variants[
-                        variant_index];
+                if (used_shared_wave) {
+                    continue;
+                }
 
-                const auto probe =
+                const DecisionFieldSpec& field =
+                    selected_field(
+                        node_index);
+
+                auto probe =
                     instance_.program->
                         decision_probe_lane(
                             lane,
                             field.suffix_tokens,
                             field.candidate_tokens);
 
-                DecisionFieldResult field_result;
-
-                field_result.name =
-                    field.name;
-
-                field_result.type =
-                    field.type;
-
-                field_result.candidate_values =
-                    field.candidate_values;
-
-                field_result.candidate_tokens =
-                    field.candidate_tokens;
-
-                field_result.probabilities =
-                    probe.probabilities;
-
-                field_result.winner_index =
-                    probe.winner_index;
-
-                field_result.winner_token =
-                    probe.winner_token;
-
-                if (!field_result
-                         .candidate_values.empty()) {
-
-                    if (field_result
-                            .candidate_values.size() !=
-                        field_result
-                            .candidate_tokens.size()) {
-
-                        throw std::logic_error(
-                            "decision candidate value/token metadata size mismatch");
-                    }
-
-                    if (field_result
-                            .winner_index < 0 ||
-                        static_cast<std::size_t>(
-                            field_result
-                                .winner_index) >=
-                            field_result
-                                .candidate_values.size()) {
-
-                        throw std::logic_error(
-                            "decision winner index is outside candidate metadata");
-                    }
-
-                    field_result.selected_value =
-                        field_result
-                            .candidate_values[
-                                static_cast<
-                                    std::size_t>(
-                                        field_result
-                                            .winner_index)];
-                }
-
-                field_result.frontier =
-                    probe.frontier;
-
-                field_result.suffix_tokens =
-                    probe.suffix_tokens;
-
-                field_result.capture_seconds =
-                    probe.capture_seconds;
-
-                field_result.suffix_seconds =
-                    probe.suffix_seconds;
-
-                field_result.score_seconds =
-                    probe.score_seconds;
-
-                field_result.restore_seconds =
-                    probe.restore_seconds;
-
-                result.fields.push_back(
-                    std::move(
-                        field_result));
+                append_result(
+                    field,
+                    std::move(probe));
 
                 consume_service_work(
                     request,
                     static_cast<std::uint64_t>(
                         field.suffix_tokens.size()));
+
+                ++node_index;
             }
 
             result.total_seconds =
