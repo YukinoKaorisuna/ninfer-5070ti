@@ -1,6 +1,7 @@
 #include "ninfer/ops/constrained_choice.h"
 #include "ops/op_tester.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -116,7 +117,8 @@ int verify_probabilities(const char* label,
 }
 
 int run_case(std::int32_t candidates,
-             std::int32_t batch) {
+             std::int32_t batch,
+             bool balanced_fixture = false) {
     constexpr std::int32_t physical_rows = 64;
     constexpr std::int32_t valid_rows    = 61;
 
@@ -128,10 +130,15 @@ int run_case(std::int32_t candidates,
              row < physical_rows;
              ++row) {
             const float value =
-                -6.0f +
-                static_cast<float>(
-                    (row * 17 + b * 23) % 41) *
-                    0.1875f;
+                balanced_fixture
+                    ? -1.25f +
+                          static_cast<float>(
+                              (row * 13 + b * 7) % 19) *
+                              0.125f
+                    : -6.0f +
+                          static_cast<float>(
+                              (row * 17 + b * 23) % 41) *
+                              0.1875f;
 
             logits[
                 static_cast<std::size_t>(b) *
@@ -155,32 +162,34 @@ int run_case(std::int32_t candidates,
         }
     }
 
-    // Force a deterministic winner for each batch column.
-    for (std::int32_t b = 0; b < batch; ++b) {
-        const std::int32_t winning_k =
-            b % candidates;
+    if (!balanced_fixture) {
+        // Force a deterministic winner for each batch column.
+        for (std::int32_t b = 0; b < batch; ++b) {
+            const std::int32_t winning_k =
+                b % candidates;
 
-        const std::int32_t winning_token =
-            candidate_ids[
+            const std::int32_t winning_token =
+                candidate_ids[
+                    static_cast<std::size_t>(b) *
+                        candidates +
+                    winning_k];
+
+            logits[
                 static_cast<std::size_t>(b) *
-                    candidates +
-                winning_k];
+                    physical_rows +
+                winning_token] =
+                f32_to_bf16(9.0f + static_cast<float>(b));
+        }
 
-        logits[
-            static_cast<std::size_t>(b) *
-                physical_rows +
-            winning_token] =
-            f32_to_bf16(9.0f + static_cast<float>(b));
-    }
+        // Explicit tie in the first column: lowest candidate
+        // index must win.
+        if (candidates >= 2) {
+            const std::int32_t token0 = candidate_ids[0];
+            const std::int32_t token1 = candidate_ids[1];
 
-    // Explicit tie in the first column: lowest candidate
-    // index must win.
-    if (candidates >= 2) {
-        const std::int32_t token0 = candidate_ids[0];
-        const std::int32_t token1 = candidate_ids[1];
-
-        logits[token0] = f32_to_bf16(12.0f);
-        logits[token1] = f32_to_bf16(12.0f);
+            logits[token0] = f32_to_bf16(12.0f);
+            logits[token1] = f32_to_bf16(12.0f);
+        }
     }
 
     const OracleResult expected =
@@ -267,7 +276,9 @@ int run_case(std::int32_t candidates,
             candidate_ids.size());
 
     const std::string label =
-        "constrained_choice K=" +
+        std::string("constrained_choice ") +
+        (balanced_fixture ? "balanced " : "") +
+        "K=" +
         std::to_string(candidates) +
         " B=" +
         std::to_string(batch);
@@ -296,6 +307,35 @@ int run_case(std::int32_t candidates,
                 << " error=" << error
                 << "\n";
             ++failures;
+        }
+
+        if (balanced_fixture) {
+            float maximum_probability = 0.0f;
+
+            for (std::int32_t k = 0; k < candidates; ++k) {
+                maximum_probability =
+                    std::max(
+                        maximum_probability,
+                        actual_probabilities[
+                            static_cast<std::size_t>(b) *
+                                candidates +
+                            k]);
+            }
+
+            // This fixture exists specifically to exercise a genuinely
+            // distributed finite-choice softmax rather than an effectively
+            // saturated argmax case.
+            if (!(maximum_probability > 0.125f &&
+                  maximum_probability < 0.40f)) {
+                std::cerr
+                    << "FAIL " << label
+                    << " expected non-saturated distribution"
+                    << " B=" << b
+                    << " max_probability="
+                    << maximum_probability
+                    << "\n";
+                ++failures;
+            }
         }
     }
 
@@ -348,6 +388,10 @@ int main() {
     failures += run_case(4, 3);
     failures += run_case(8, 8);
     failures += run_case(16, 8);
+
+    // Independent CPU oracle + moderate logits. No forced dominant winner
+    // and no forced tie: several choices retain meaningful probability mass.
+    failures += run_case(8, 4, true);
 
     std::cout
         << (failures == 0 ? "OK" : "FAIL")
