@@ -26,6 +26,7 @@ struct Options {
     KvCacheStorage kv_cache = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     bool enable_vision  = false;
+    bool embedding_host = false;
     bool use_cuda_graph = true;
 
     bool raw_output      = false;
