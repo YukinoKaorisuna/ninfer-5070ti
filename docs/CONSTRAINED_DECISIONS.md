@@ -323,3 +323,431 @@ generic structured schema before compilation.
 The current constrained-choice candidate ceiling is an execution-backend
 qualification limit and is deliberately not part of the long-term structured
 schema abstraction.
+
+
+## Semantic execution architecture
+
+The long-term objective is broader than faster JSON generation or tool calling.
+
+The core principle is:
+
+> Keep semantic constraints. Eliminate representational generation.
+
+The model should spend inference compute only where genuine semantic uncertainty
+exists. Structure already known to the application should not be regenerated
+token by token merely because a protocol chooses to represent that structure as
+JSON, XML, SQL, source code, a tool call, or another textual format.
+
+### Three classes of execution
+
+A structured result contains three fundamentally different kinds of work.
+
+1. **Deterministic structure**
+
+   Structure already known from the semantic contract must not require a model
+   choice.
+
+   Examples include protocol framing, property names, fixed literals,
+   punctuation, known function names after a prior selection, static query
+   structure, and other representation-only material.
+
+2. **Finite semantic uncertainty**
+
+   A value with a known finite domain should be evaluated as a constrained
+   choice rather than generated autoregressively.
+
+   Examples include booleans, enums, routing targets, bounded categorical
+   values, approval decisions, policy outcomes, tool selection, bounded
+   integers, and numeric grids.
+
+3. **Open-ended semantic uncertainty**
+
+   Content whose domain is not practically finite remains ordinary language
+   generation and may use the normal decode path, MTP, or another generation
+   backend.
+
+   Examples include free-form explanations, long text, unrestricted code
+   bodies, and open-ended argument values.
+
+These execution classes may coexist in one request.
+
+### Semantic graph, not serialization graph
+
+The core abstraction must describe semantic computation rather than JSON or any
+other wire representation.
+
+Protocol and harness adapters may translate:
+
+- OpenAI-compatible tool schemas;
+- Anthropic tool-use schemas;
+- MCP tools;
+- OpenClaw;
+- Pi;
+- Hermes-style harnesses;
+- DeepSeek Harness;
+- workflow systems;
+- extraction/classification applications;
+- SQL/query builders;
+- code-generation systems;
+- vision applications;
+- custom callers;
+
+into one generic semantic execution representation.
+
+The core must not require changes when a new harness or serialization format is
+added.
+
+JSON, tool-call syntax, SQL, source code and other formats are renderings of the
+semantic result. They are not the execution model.
+
+### FiniteChoice as the fundamental bounded operation
+
+Boolean and enum remain useful product-facing and compatibility types, but they
+are not the fundamental long-term execution primitive.
+
+Conceptually, both lower to a finite semantic choice:
+
+    Boolean:
+        choices = [false, true]
+
+    Enum:
+        choices = [value0, value1, ...]
+
+Future bounded integer and numeric-grid decisions may use the same semantic
+operation even when their execution backend differs.
+
+Backend qualification limits such as candidate count, batch width, one-token
+branches, vocabulary geometry or kernel dimensions must not leak into this
+semantic abstraction.
+
+### Graph representation
+
+The semantic representation should support stable node identities and explicit
+dependencies.
+
+The preferred direction is a flat node graph / arena with typed payloads rather
+than recursive ownership being the execution contract.
+
+Conceptually:
+
+    SemanticExecutionGraph
+        nodes[]
+        root / roots
+
+    SemanticNode
+        typed payload
+        dependencies / children
+
+Typed payload representation may use `std::variant` or an equivalent tagged
+representation. Exact public C++ structures are deliberately deferred until the
+V2 implementation contract is reviewed.
+
+Stable node identities enable:
+
+- dependency validation;
+- topological planning;
+- execution-wave construction;
+- conditional paths;
+- DAG reuse;
+- compiled-plan lowering;
+- serialization or hashing later;
+- reusable subplans;
+- result-to-node attribution.
+
+### Dependency analysis and parallel waves
+
+Independent decisions should not remain permanently serialized merely because
+the first runtime prototype executes fields sequentially.
+
+A future compiler should identify independent nodes and schedule them in the
+same execution wave where the target/runtime permits it.
+
+For example:
+
+    Wave 0:
+        classify
+        urgent?
+        sentiment
+
+    Wave 1:
+        selected tool depends on classify
+        escalation path depends on urgent?
+
+    Wave 2:
+        argument schema depends on selected tool
+
+    Wave 3:
+        optional free-text leaf uses ordinary/MTP generation
+
+The exact GPU/runtime implementation of a wave is backend-specific and is not
+part of the semantic schema.
+
+This generalizes the independent-field parallel-scoring approach demonstrated
+by parallel finite-decision systems while still supporting dependency chains.
+
+### Published result and model conditioning are distinct
+
+A semantic node may affect the application-visible result, the model's working
+context, both, or neither directly.
+
+These concepts must not be conflated.
+
+For example, deterministic protocol syntax may need to be represented in model
+conditioning so that a later decision is scored in the correct textual/model
+context, while that syntax should not appear as an independent semantic value
+in the application result.
+
+Conversely, an application-provided value may contribute directly to the
+semantic result without requiring the model to choose it.
+
+The compiler/runtime therefore needs a conceptual separation between:
+
+    semantic result effect
+
+and:
+
+    model-conditioning effect
+
+This does not imply that low-level execution flags belong in the public schema.
+The compiler should derive execution effects from semantic nodes and adapter
+metadata wherever possible.
+
+### Whole-path tokenization remains authoritative
+
+Whenever semantic execution requires model-conditioning text, compilation must
+preserve actual tokenizer behavior across boundaries.
+
+The M1-C2 rule remains authoritative:
+
+    tokenize the complete semantic continuation path
+
+rather than assuming separately tokenized fragments can be concatenated.
+
+BPE and related tokenizers can change segmentation across textual boundaries.
+
+Future deterministic conditioning, finite tries, dependent branches and
+free-generation transitions must preserve this property.
+
+### Node-specific execution strategies
+
+The compiled plan may select a different execution mechanism for different
+semantic nodes.
+
+Conceptually:
+
+    deterministic node
+        -> assemble result and/or advance model conditioning
+
+    finite choice
+        -> constrained scorer
+
+    multi-token finite choice
+        -> token trie / finite-path scorer
+
+    open-ended leaf
+        -> ordinary decode / MTP
+
+    application-known value
+        -> no model decision
+
+The semantic graph does not prescribe CUDA kernels, KV strategy, batching
+geometry, MTP details or target-specific implementations.
+
+### Full-vocabulary projection is not an architectural requirement
+
+The current constrained-decision path still obtains full-vocabulary logits
+before selecting a small number of candidates.
+
+That is a current implementation limitation, not part of the semantic
+contract.
+
+A future restricted-row LM-head path may project only the required output rows
+for finite decisions.
+
+For a small finite domain this changes the conceptual work from:
+
+    hidden -> complete vocabulary -> retain K logits
+
+toward:
+
+    hidden -> K required output rows
+
+without changing the semantic graph.
+
+### Prefill and reusable semantic prefixes
+
+Stable application instructions, schema descriptions, tool catalogues and
+other reusable semantic context may eventually be compiled into reusable
+prefixes.
+
+A request may therefore separate:
+
+    stable application/schema context
+        -> cache/prefill once
+
+    request-specific context
+        -> normal request prefill
+
+    semantic execution
+        -> deterministic / finite / free execution nodes
+
+The semantic architecture must not prevent such prefix reuse.
+
+### Vision and multimodal input
+
+Vision is an input-context concern rather than a separate structured-output
+architecture.
+
+A semantic execution graph may operate over context produced from:
+
+- text;
+- images;
+- video;
+- retrieved documents;
+- tool/application state;
+- multimodal combinations.
+
+The same finite, deterministic and free-generation nodes apply after the
+multimodal context has been established.
+
+### MTP and structured decisions are complementary
+
+Semantic execution does not replace MTP.
+
+MTP should be used where the node genuinely requires open-ended generation.
+
+Finite choices should not be forced through MTP merely because they occur
+inside a response that also contains free text.
+
+A mixed plan may therefore contain:
+
+    finite node
+        -> constrained scorer
+
+    deterministic node
+        -> deterministic conditioning / assembly
+
+    free-generation node
+        -> MTP
+
+The compiler selects the appropriate execution strategy per node.
+
+### CompiledDecisionPlan remains opaque
+
+`CompiledDecisionPlan` remains the boundary between model-agnostic semantics
+and model-resolved execution.
+
+It may eventually contain:
+
+- resolved tokenizer paths;
+- dependency graph;
+- execution waves;
+- finite-choice metadata;
+- deterministic conditioning paths;
+- trie nodes;
+- result mappings;
+- free-generation transitions;
+- target/backend compatibility information.
+
+These details must not be exposed as the public semantic schema.
+
+For the current milestone, compiled plans remain bound to the Engine instance
+that created them. Model/tokenizer fingerprints and cross-Engine compiled-plan
+caching are deferred optimizations.
+
+### V2 staged implementation
+
+The next implementation series should proceed in deliberately separated steps.
+
+#### V2-A: semantic graph
+
+Introduce the model-agnostic semantic node graph and preserve legacy bool/enum
+APIs through compatibility lowering.
+
+V2-A must not require changes to:
+
+- CUDA constrained-choice kernels;
+- decision frontier mechanics;
+- executor execution semantics;
+- ordinary generation;
+- MTP;
+- Vision.
+
+Initial graph compilation may lower finite nodes back into the existing
+`DecisionFieldSpec` execution representation.
+
+#### V2-B: dependency-aware execution
+
+Introduce an ephemeral working frontier and sequential execution nodes so a
+later node can be conditioned on an earlier selected value.
+
+Preserve the caller's retained frontier.
+
+#### V2-C: parallel execution waves
+
+Identify independent finite nodes and evaluate them together when the target
+runtime can do so efficiently.
+
+Dependency edges determine later waves.
+
+#### V2-D: deterministic conditioning and result assembly
+
+Allow known structure to advance model context where required without asking
+the model to choose deterministic representation tokens.
+
+Keep application-visible semantic output separate from model-conditioning
+syntax.
+
+#### V2-E: multi-token finite choices
+
+Generalize finite choices to token tries / finite paths.
+
+#### V2-F: restricted-row LM head
+
+Avoid complete-vocabulary output projection when only a small set of output
+rows is required by a finite node.
+
+#### V2-G: open-ended generation leaves
+
+Allow a semantic graph to hand control to ordinary generation or MTP for
+genuinely open-ended values, then return to structured execution where
+supported.
+
+#### V2-H: adapters and compiled-plan caching
+
+Add protocol/harness adapters and later introduce cache identities based on
+semantic schema, model/tokenizer identity and compiler version.
+
+### Performance principles
+
+Major architecture decisions must be evaluated across:
+
+- prompt/prefill work;
+- prefix reuse;
+- decision/scoring work;
+- ordinary decode;
+- MTP/speculative execution;
+- Vision/multimodal input;
+- KV and recurrent-state memory;
+- temporary workspace;
+- LM-head bandwidth;
+- CPU/GPU synchronization;
+- batching and concurrency;
+- dependent versus independent decisions;
+- server/harness integration.
+
+A design should not be accepted solely because its C++ representation is
+convenient.
+
+Where relevant, decisions should be compared against approaches used by other
+inference engines and structured-decision systems.
+
+### Long-term success criterion
+
+The goal is not merely valid structured text.
+
+The goal is to minimize model computation spent reproducing information the
+runtime already knows.
+
+The ideal execution path asks the model only the questions whose answers are
+actually uncertain.
