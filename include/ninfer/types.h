@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace ninfer {
@@ -443,12 +444,120 @@ struct DecisionFieldInput {
     std::vector<std::string> values;
 };
 
-// Model-agnostic structured finite-decision schema.
+// Model-agnostic semantic execution values.
 //
-// This deliberately contains caller/schema semantics rather than token IDs.
-// Engine compilation resolves it against the active target/tokenizer.
-struct StructuredDecisionSchema {
-    std::vector<DecisionFieldInput> fields;
+// Semantic meaning is intentionally independent from model-facing text,
+// tokenization and output serialization.
+enum class SemanticValueKind : std::uint8_t {
+    Boolean,
+    Integer,
+    Number,
+    String,
+};
+
+class SemanticValue final {
+public:
+    [[nodiscard]] static SemanticValue boolean(bool value) noexcept;
+    [[nodiscard]] static SemanticValue integer(std::int64_t value) noexcept;
+    [[nodiscard]] static SemanticValue number(double value);
+    [[nodiscard]] static SemanticValue string(std::string value);
+
+    [[nodiscard]] SemanticValueKind kind() const noexcept;
+
+    [[nodiscard]] bool boolean_value() const;
+    [[nodiscard]] std::int64_t integer_value() const;
+    [[nodiscard]] double number_value() const;
+    [[nodiscard]] const std::string& string_value() const;
+
+    friend bool operator==(const SemanticValue& lhs,
+                           const SemanticValue& rhs) noexcept;
+
+private:
+    using Storage =
+        std::variant<bool, std::int64_t, double, std::string>;
+
+    explicit SemanticValue(Storage value);
+
+    Storage value_;
+};
+
+struct SemanticNodeId {
+    std::uint32_t value = 0;
+
+    [[nodiscard]] constexpr bool valid() const noexcept {
+        return value != 0;
+    }
+
+    friend constexpr bool operator==(SemanticNodeId,
+                                     SemanticNodeId) noexcept = default;
+};
+
+// Semantic finite domain. Backend limits such as K <= 16 and one-token
+// divergence deliberately do not belong to this type.
+struct FiniteChoice {
+    std::string label;
+    std::vector<SemanticValue> choices;
+};
+
+// Model-facing representation of one finite semantic node. These strings are
+// presentation metadata rather than semantic values or output serialization.
+struct FiniteChoicePresentation {
+    std::string continuation_prefix;
+    std::vector<std::string> candidate_texts;
+};
+
+// Opaque semantic graph. V2-A contains independent FiniteChoice nodes only;
+// dependency/conditional APIs are added in later milestones.
+class StructuredDecisionSchema {
+public:
+    StructuredDecisionSchema();
+    ~StructuredDecisionSchema();
+
+    StructuredDecisionSchema(const StructuredDecisionSchema&);
+    StructuredDecisionSchema&
+    operator=(const StructuredDecisionSchema&);
+
+    StructuredDecisionSchema(StructuredDecisionSchema&&) noexcept;
+    StructuredDecisionSchema&
+    operator=(StructuredDecisionSchema&&) noexcept;
+
+    [[nodiscard]] SemanticNodeId
+    add_finite_choice(FiniteChoice choice);
+
+    [[nodiscard]] bool empty() const noexcept;
+    [[nodiscard]] std::size_t node_count() const noexcept;
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> impl_;
+
+    friend class Engine;
+};
+
+// Model presentation is kept separate from the semantic graph so one semantic
+// contract can later be compiled for different model/chat-template surfaces.
+class DecisionModelPresentation {
+public:
+    DecisionModelPresentation();
+    ~DecisionModelPresentation();
+
+    DecisionModelPresentation(const DecisionModelPresentation&);
+    DecisionModelPresentation&
+    operator=(const DecisionModelPresentation&);
+
+    DecisionModelPresentation(DecisionModelPresentation&&) noexcept;
+    DecisionModelPresentation&
+    operator=(DecisionModelPresentation&&) noexcept;
+
+    void set_finite_choice(
+        SemanticNodeId node,
+        FiniteChoicePresentation presentation);
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> impl_;
+
+    friend class Engine;
 };
 
 // Internal/already-tokenized finite-choice form consumed by the executor.

@@ -13,6 +13,7 @@
 #include <type_traits>
 #include <utility>
 #include <variant>
+#include <cmath>
 
 namespace ninfer {
 namespace {
@@ -359,6 +360,369 @@ GenerationResult Engine::generate(PreparedPrompt prompt, RequestOptions options,
     return submit(std::move(prompt), std::move(options)).wait(sink, cancellation);
 }
 
+SemanticValue::SemanticValue(Storage value)
+    : value_(std::move(value)) {}
+
+SemanticValue
+SemanticValue::boolean(bool value) noexcept {
+    return SemanticValue(
+        Storage(std::in_place_type<bool>, value));
+}
+
+SemanticValue
+SemanticValue::integer(std::int64_t value) noexcept {
+    return SemanticValue(
+        Storage(std::in_place_type<std::int64_t>, value));
+}
+
+SemanticValue
+SemanticValue::number(double value) {
+    if (!std::isfinite(value)) {
+        throw std::invalid_argument(
+            "semantic number must be finite");
+    }
+
+    // Canonicalize negative zero so equality and future hashing have one
+    // stable representation.
+    if (value == 0.0) {
+        value = 0.0;
+    }
+
+    return SemanticValue(
+        Storage(std::in_place_type<double>, value));
+}
+
+SemanticValue
+SemanticValue::string(std::string value) {
+    return SemanticValue(
+        Storage(std::in_place_type<std::string>,
+                std::move(value)));
+}
+
+SemanticValueKind
+SemanticValue::kind() const noexcept {
+    switch (value_.index()) {
+    case 0:
+        return SemanticValueKind::Boolean;
+    case 1:
+        return SemanticValueKind::Integer;
+    case 2:
+        return SemanticValueKind::Number;
+    case 3:
+        return SemanticValueKind::String;
+    default:
+        std::terminate();
+    }
+}
+
+bool
+SemanticValue::boolean_value() const {
+    return std::get<bool>(value_);
+}
+
+std::int64_t
+SemanticValue::integer_value() const {
+    return std::get<std::int64_t>(value_);
+}
+
+double
+SemanticValue::number_value() const {
+    return std::get<double>(value_);
+}
+
+const std::string&
+SemanticValue::string_value() const {
+    return std::get<std::string>(value_);
+}
+
+bool
+operator==(const SemanticValue& lhs,
+           const SemanticValue& rhs) noexcept {
+    return lhs.value_ == rhs.value_;
+}
+
+class StructuredDecisionSchema::Impl {
+public:
+    struct Node {
+        SemanticNodeId id;
+        FiniteChoice choice;
+    };
+
+    std::vector<Node> nodes;
+};
+
+StructuredDecisionSchema::StructuredDecisionSchema()
+    : impl_(std::make_unique<Impl>()) {}
+
+StructuredDecisionSchema::~StructuredDecisionSchema() = default;
+
+StructuredDecisionSchema::StructuredDecisionSchema(
+    const StructuredDecisionSchema& other)
+    : impl_(other.impl_
+                ? std::make_unique<Impl>(*other.impl_)
+                : nullptr) {}
+
+StructuredDecisionSchema&
+StructuredDecisionSchema::operator=(
+    const StructuredDecisionSchema& other) {
+
+    if (this != &other) {
+        impl_ = other.impl_
+                    ? std::make_unique<Impl>(*other.impl_)
+                    : nullptr;
+    }
+
+    return *this;
+}
+
+StructuredDecisionSchema::StructuredDecisionSchema(
+    StructuredDecisionSchema&&) noexcept = default;
+
+StructuredDecisionSchema&
+StructuredDecisionSchema::operator=(
+    StructuredDecisionSchema&&) noexcept = default;
+
+SemanticNodeId
+StructuredDecisionSchema::add_finite_choice(
+    FiniteChoice choice) {
+
+    if (impl_ == nullptr) {
+        throw std::logic_error(
+            "StructuredDecisionSchema is moved from");
+    }
+
+    if (choice.choices.size() < 2) {
+        throw std::invalid_argument(
+            "finite choice requires at least two semantic values");
+    }
+
+    for (std::size_t i = 0;
+         i < choice.choices.size();
+         ++i) {
+
+        for (std::size_t j = 0;
+             j < i;
+             ++j) {
+
+            if (choice.choices[i] ==
+                choice.choices[j]) {
+
+                throw std::invalid_argument(
+                    "finite choice semantic values must be unique");
+            }
+        }
+    }
+
+    if (impl_->nodes.size() >=
+        static_cast<std::size_t>(
+            std::numeric_limits<std::uint32_t>::max())) {
+
+        throw std::overflow_error(
+            "semantic node ID space exhausted");
+    }
+
+    const SemanticNodeId id{
+        static_cast<std::uint32_t>(
+            impl_->nodes.size() + 1)
+    };
+
+    impl_->nodes.push_back(
+        Impl::Node{
+            id,
+            std::move(choice)
+        });
+
+    return id;
+}
+
+bool
+StructuredDecisionSchema::empty() const noexcept {
+    return impl_ == nullptr ||
+           impl_->nodes.empty();
+}
+
+std::size_t
+StructuredDecisionSchema::node_count() const noexcept {
+    return impl_ != nullptr
+               ? impl_->nodes.size()
+               : 0;
+}
+
+class DecisionModelPresentation::Impl {
+public:
+    struct Entry {
+        SemanticNodeId node;
+        FiniteChoicePresentation presentation;
+    };
+
+    std::vector<Entry> entries;
+};
+
+DecisionModelPresentation::DecisionModelPresentation()
+    : impl_(std::make_unique<Impl>()) {}
+
+DecisionModelPresentation::~DecisionModelPresentation() = default;
+
+DecisionModelPresentation::DecisionModelPresentation(
+    const DecisionModelPresentation& other)
+    : impl_(other.impl_
+                ? std::make_unique<Impl>(*other.impl_)
+                : nullptr) {}
+
+DecisionModelPresentation&
+DecisionModelPresentation::operator=(
+    const DecisionModelPresentation& other) {
+
+    if (this != &other) {
+        impl_ = other.impl_
+                    ? std::make_unique<Impl>(*other.impl_)
+                    : nullptr;
+    }
+
+    return *this;
+}
+
+DecisionModelPresentation::DecisionModelPresentation(
+    DecisionModelPresentation&&) noexcept = default;
+
+DecisionModelPresentation&
+DecisionModelPresentation::operator=(
+    DecisionModelPresentation&&) noexcept = default;
+
+void
+DecisionModelPresentation::set_finite_choice(
+    SemanticNodeId node,
+    FiniteChoicePresentation presentation) {
+
+    if (impl_ == nullptr) {
+        throw std::logic_error(
+            "DecisionModelPresentation is moved from");
+    }
+
+    if (!node.valid()) {
+        throw std::invalid_argument(
+            "finite-choice presentation requires a valid semantic node ID");
+    }
+
+    for (Impl::Entry& entry : impl_->entries) {
+        if (entry.node == node) {
+            entry.presentation =
+                std::move(presentation);
+            return;
+        }
+    }
+
+    impl_->entries.push_back(
+        Impl::Entry{
+            node,
+            std::move(presentation)
+        });
+}
+
+namespace {
+
+struct LegacyDecisionDefinition {
+    StructuredDecisionSchema schema;
+    DecisionModelPresentation presentation;
+};
+
+LegacyDecisionDefinition
+lower_legacy_decision_fields(
+    std::vector<DecisionFieldInput> fields) {
+
+    LegacyDecisionDefinition definition;
+
+    for (DecisionFieldInput& input : fields) {
+        if (input.suffix.empty()) {
+            throw std::invalid_argument(
+                "decision field suffix must not be empty");
+        }
+
+        FiniteChoice choice;
+        choice.label = input.name;
+
+        FiniteChoicePresentation model;
+
+        model.continuation_prefix =
+            input.suffix;
+
+        switch (input.type) {
+        case DecisionFieldType::Boolean:
+            if (!input.values.empty()) {
+                throw std::invalid_argument(
+                    "boolean decision fields must not provide enum values");
+            }
+
+            choice.choices.push_back(
+                SemanticValue::boolean(false));
+
+            choice.choices.push_back(
+                SemanticValue::boolean(true));
+
+            model.candidate_texts = {
+                "false",
+                "true",
+            };
+            break;
+
+        case DecisionFieldType::Enum:
+            if (input.values.size() < 2) {
+                throw std::invalid_argument(
+                    "enum decision field requires at least two values");
+            }
+
+            choice.choices.reserve(
+                input.values.size());
+
+            for (const std::string& value :
+                 input.values) {
+
+                choice.choices.push_back(
+                    SemanticValue::string(value));
+            }
+
+            model.candidate_texts =
+                input.values;
+            break;
+        }
+
+        const SemanticNodeId node =
+            definition.schema.add_finite_choice(
+                std::move(choice));
+
+        definition.presentation.set_finite_choice(
+            node,
+            std::move(model));
+    }
+
+    return definition;
+}
+
+bool
+is_canonical_boolean_choice(
+    const FiniteChoice& choice) {
+
+    if (choice.choices.size() != 2) {
+        return false;
+    }
+
+    const SemanticValue& first =
+        choice.choices[0];
+
+    const SemanticValue& second =
+        choice.choices[1];
+
+    return
+        first.kind() ==
+            SemanticValueKind::Boolean &&
+        second.kind() ==
+            SemanticValueKind::Boolean &&
+        !first.boolean_value() &&
+        second.boolean_value();
+}
+
+} // namespace
+
 class CompiledDecisionPlan::Impl {
 public:
     Impl(std::weak_ptr<const void> engine_identity,
@@ -407,23 +771,51 @@ std::size_t CompiledDecisionPlan::field_count() const noexcept {
 
 CompiledDecisionPlan
 Engine::compile_decision_plan(
-    StructuredDecisionSchema schema) const {
+    const StructuredDecisionSchema& schema,
+    const DecisionModelPresentation& presentation) const {
 
     if (impl_ == nullptr) {
-        throw std::logic_error("Engine is moved from");
+        throw std::logic_error(
+            "Engine is moved from");
     }
 
-    std::vector<DecisionFieldInput>& fields =
-        schema.fields;
-
-    if (fields.empty() || fields.size() > 8) {
+    if (schema.impl_ == nullptr) {
         throw std::invalid_argument(
-            "decision schema requires 1..8 fields");
+            "StructuredDecisionSchema is moved from");
     }
 
-    const auto tokenize = [&](std::string_view value) {
+    if (presentation.impl_ == nullptr) {
+        throw std::invalid_argument(
+            "DecisionModelPresentation is moved from");
+    }
+
+    const std::vector<
+        StructuredDecisionSchema::Impl::Node>& nodes =
+        schema.impl_->nodes;
+
+    // Current executor qualification only. This is deliberately not a
+    // FiniteChoice semantic-domain limit.
+    if (nodes.empty() ||
+        nodes.size() > 8) {
+
+        throw std::invalid_argument(
+            "decision backend currently requires 1..8 finite-choice nodes");
+    }
+
+    if (presentation.impl_->entries.size() !=
+        nodes.size()) {
+
+        throw std::invalid_argument(
+            "decision presentation must cover exactly the semantic nodes");
+    }
+
+    const auto tokenize =
+        [&](std::string_view value) {
+
         return std::visit(
-            [&](const auto& target_ptr) -> std::vector<TokenId> {
+            [&](const auto& target_ptr)
+                -> std::vector<TokenId> {
+
                 if (target_ptr == nullptr) {
                     throw std::logic_error(
                         "Engine target is not active");
@@ -436,132 +828,162 @@ Engine::compile_decision_plan(
     };
 
     std::vector<DecisionFieldSpec> tokenized;
-    tokenized.reserve(fields.size());
+    tokenized.reserve(nodes.size());
 
-    for (std::size_t field_index = 0;
-         field_index < fields.size();
-         ++field_index) {
+    for (std::size_t node_index = 0;
+         node_index < nodes.size();
+         ++node_index) {
 
-        DecisionFieldInput& input = fields[field_index];
+        const auto& node =
+            nodes[node_index];
 
-        if (input.name.empty()) {
+        const FiniteChoice& choice =
+            node.choice;
+
+        // The current low-level result/executor requires a non-empty unique
+        // field name. Labels themselves remain semantic diagnostic metadata;
+        // this validation is a backend compatibility requirement.
+        if (choice.label.empty()) {
             throw std::invalid_argument(
-                "decision field name must not be empty");
+                "decision backend requires a non-empty finite-choice label");
         }
 
         for (std::size_t prior = 0;
-             prior < field_index;
+             prior < node_index;
              ++prior) {
 
-            if (fields[prior].name == input.name) {
+            if (nodes[prior].choice.label ==
+                choice.label) {
+
                 throw std::invalid_argument(
-                    "decision field names must be unique");
+                    "decision backend requires unique finite-choice labels");
             }
         }
 
-        if (input.suffix.empty()) {
+        // Current constrained-choice scorer qualification only.
+        if (choice.choices.size() < 2 ||
+            choice.choices.size() > 16) {
+
             throw std::invalid_argument(
-                "decision field suffix must not be empty");
+                "decision backend currently supports 2..16 choices per node");
         }
 
-        DecisionFieldSpec raw;
-        raw.name = input.name;
-        raw.type = input.type;
+        const DecisionModelPresentation::Impl::Entry*
+            presentation_entry = nullptr;
 
-        std::vector<std::string> values;
+        for (const auto& entry :
+             presentation.impl_->entries) {
 
-        switch (input.type) {
-        case DecisionFieldType::Boolean:
-            if (!input.values.empty()) {
-                throw std::invalid_argument(
-                    "boolean decision fields must not provide enum values");
+            if (entry.node == node.id) {
+                presentation_entry = &entry;
+                break;
             }
-
-            values = {"false", "true"};
-            break;
-
-        case DecisionFieldType::Enum:
-            if (input.values.size() < 2 ||
-                input.values.size() > 16) {
-
-                throw std::invalid_argument(
-                    "enum decision field requires 2..16 values");
-            }
-
-            values = std::move(input.values);
-            break;
         }
 
-        for (std::size_t choice_index = 0;
-             choice_index < values.size();
-             ++choice_index) {
+        if (presentation_entry == nullptr) {
+            throw std::invalid_argument(
+                "decision presentation is missing a semantic node");
+        }
 
-            if (values[choice_index].empty()) {
-                throw std::invalid_argument(
-                    "decision choice value must not be empty");
-            }
+        const FiniteChoicePresentation& model =
+            presentation_entry->presentation;
 
-            for (std::size_t prior = 0;
-                 prior < choice_index;
-                 ++prior) {
+        if (model.candidate_texts.size() !=
+            choice.choices.size()) {
 
-                if (values[prior] == values[choice_index]) {
+            throw std::invalid_argument(
+                "finite-choice presentation candidate count does not match semantic domain");
+        }
+
+        for (std::size_t i = 0;
+             i < model.candidate_texts.size();
+             ++i) {
+
+            for (std::size_t j = 0;
+                 j < i;
+                 ++j) {
+
+                if (model.candidate_texts[i] ==
+                    model.candidate_texts[j]) {
+
                     throw std::invalid_argument(
-                        "decision choice values must be unique");
+                        "finite-choice presentation texts must be unique");
                 }
             }
         }
 
-        // Tokenize complete suffix+choice paths rather than tokenizing the
-        // suffix and candidate independently. BPE tokenization can change at
-        // the text boundary, so independent tokenization is not generally a
-        // valid representation of the model continuation.
-        std::vector<std::vector<TokenId>> paths;
-        paths.reserve(values.size());
+        DecisionFieldSpec raw;
 
-        for (const std::string& value : values) {
+        raw.name = choice.label;
+        raw.type =
+            is_canonical_boolean_choice(choice)
+                ? DecisionFieldType::Boolean
+                : DecisionFieldType::Enum;
+
+        // Tokenize complete presentation-prefix + candidate paths. BPE
+        // boundaries make separately-tokenized fragments non-authoritative.
+        std::vector<std::vector<TokenId>> paths;
+
+        paths.reserve(
+            model.candidate_texts.size());
+
+        for (const std::string& candidate_text :
+             model.candidate_texts) {
+
             std::string path_text;
+
             path_text.reserve(
-                input.suffix.size() + value.size());
-            path_text.append(input.suffix);
-            path_text.append(value);
+                model.continuation_prefix.size() +
+                candidate_text.size());
+
+            path_text.append(
+                model.continuation_prefix);
+
+            path_text.append(
+                candidate_text);
 
             std::vector<TokenId> path_tokens =
                 tokenize(path_text);
 
             if (path_tokens.empty()) {
                 throw std::invalid_argument(
-                    "decision suffix/value path tokenized to no tokens");
+                    "decision presentation path tokenized to no tokens");
             }
 
             paths.push_back(
                 std::move(path_tokens));
         }
 
-        std::size_t common = paths.front().size();
+        std::size_t common =
+            paths.front().size();
 
         for (std::size_t path_index = 1;
              path_index < paths.size();
              ++path_index) {
 
-            common = std::min(
-                common,
-                paths[path_index].size());
+            common =
+                std::min(
+                    common,
+                    paths[path_index].size());
 
             std::size_t matched = 0;
 
-            while (matched < common &&
-                   paths.front()[matched] ==
-                       paths[path_index][matched]) {
+            while (
+                matched < common &&
+                paths.front()[matched] ==
+                    paths[path_index][matched]) {
+
                 ++matched;
             }
 
             common = matched;
         }
 
+        // The current reversible decision runtime consumes a non-empty
+        // executable suffix. A future backend may lift this restriction.
         if (common == 0) {
             throw std::invalid_argument(
-                "decision suffix/value paths have no shared token prefix");
+                "decision presentation paths have no shared token prefix");
         }
 
         raw.suffix_tokens.assign(
@@ -569,23 +991,31 @@ Engine::compile_decision_plan(
             paths.front().begin() +
                 static_cast<std::ptrdiff_t>(common));
 
-        raw.candidate_values.reserve(values.size());
-        raw.candidate_tokens.reserve(values.size());
+        raw.candidate_values.reserve(
+            model.candidate_texts.size());
+
+        raw.candidate_tokens.reserve(
+            model.candidate_texts.size());
 
         for (std::size_t choice_index = 0;
-             choice_index < values.size();
+             choice_index <
+                 model.candidate_texts.size();
              ++choice_index) {
 
-            const std::vector<TokenId>& path_tokens =
-                paths[choice_index];
+            const std::vector<TokenId>&
+                path_tokens =
+                    paths[choice_index];
 
-            // M1 represents each branch by exactly one token after the shared
-            // path. Multi-token divergences become trie branches in M2.
-            if (path_tokens.size() != common + 1) {
+            // Current backend: exactly one divergent token. V2 semantics do
+            // not contain this restriction; multi-token paths later lower to
+            // the finite trie backend.
+            if (path_tokens.size() !=
+                common + 1) {
+
                 throw std::invalid_argument(
-                    "decision choice requires a multi-token branch after "
-                    "joint suffix/value tokenization in M1: " +
-                    values[choice_index]);
+                    "decision finite choice requires a multi-token branch after whole-path tokenization in the current backend: " +
+                    model.candidate_texts[
+                        choice_index]);
             }
 
             const TokenId token =
@@ -598,12 +1028,16 @@ Engine::compile_decision_plan(
                 raw.candidate_tokens.end()) {
 
                 throw std::invalid_argument(
-                    "decision choice values must produce distinct "
-                    "one-token branches");
+                    "decision presentation choices must produce distinct one-token branches");
             }
 
+            // DecisionResult remains the V1 string result during V2-A.
+            // Therefore the temporary caller-visible value is the model
+            // presentation string. Typed SemanticNodeResult is a later
+            // milestone.
             raw.candidate_values.push_back(
-                values[choice_index]);
+                model.candidate_texts[
+                    choice_index]);
 
             raw.candidate_tokens.push_back(
                 token);
@@ -613,12 +1047,13 @@ Engine::compile_decision_plan(
             std::move(raw));
     }
 
-
     return CompiledDecisionPlan(
-        std::make_shared<const CompiledDecisionPlan::Impl>(
-            std::weak_ptr<const void>(
-                std::shared_ptr<const void>(impl_)),
-            std::move(tokenized)));
+        std::make_shared<
+            const CompiledDecisionPlan::Impl>(
+                std::weak_ptr<const void>(
+                    std::shared_ptr<const void>(
+                        impl_)),
+                std::move(tokenized)));
 }
 
 DecisionHandle
@@ -681,12 +1116,14 @@ Engine::submit_decision(
     std::vector<DecisionFieldInput> fields,
     std::chrono::steady_clock::time_point pending_deadline) {
 
-    StructuredDecisionSchema schema;
-    schema.fields = std::move(fields);
+    LegacyDecisionDefinition definition =
+        lower_legacy_decision_fields(
+            std::move(fields));
 
     CompiledDecisionPlan plan =
         compile_decision_plan(
-            std::move(schema));
+            definition.schema,
+            definition.presentation);
 
     return submit_decision(
         std::move(prompt),
@@ -700,12 +1137,14 @@ Engine::decide(
     std::vector<DecisionFieldInput> fields,
     const CancellationView& cancellation) {
 
-    StructuredDecisionSchema schema;
-    schema.fields = std::move(fields);
+    LegacyDecisionDefinition definition =
+        lower_legacy_decision_fields(
+            std::move(fields));
 
     CompiledDecisionPlan plan =
         compile_decision_plan(
-            std::move(schema));
+            definition.schema,
+            definition.presentation);
 
     return decide(
         std::move(prompt),

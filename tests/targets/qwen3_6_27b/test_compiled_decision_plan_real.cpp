@@ -3,16 +3,21 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
 namespace {
 
 using ninfer::CompiledDecisionPlan;
-using ninfer::DecisionFieldInput;
 using ninfer::DecisionFieldResult;
-using ninfer::DecisionFieldType;
+using ninfer::DecisionModelPresentation;
 using ninfer::DecisionResult;
+using ninfer::FiniteChoice;
+using ninfer::FiniteChoicePresentation;
+using ninfer::SemanticNodeId;
+using ninfer::SemanticValue;
+using ninfer::SemanticValueKind;
 using ninfer::StructuredDecisionSchema;
 using ninfer::TokenId;
 
@@ -35,24 +40,252 @@ ninfer::EngineOptions make_options(const char* artifact) {
     return options;
 }
 
-StructuredDecisionSchema make_schema() {
+struct DecisionDefinition {
     StructuredDecisionSchema schema;
+    DecisionModelPresentation presentation;
+};
 
-    DecisionFieldInput approved;
-    approved.name = "approved";
-    approved.type = DecisionFieldType::Boolean;
-    approved.suffix = " approved: ";
+DecisionDefinition make_definition() {
+    DecisionDefinition definition;
 
-    DecisionFieldInput route;
-    route.name = "route";
-    route.type = DecisionFieldType::Enum;
-    route.suffix = " route: ";
-    route.values = {"local", "remote", "human"};
+    FiniteChoice approved;
+    approved.label = "approved";
+    approved.choices = {
+        SemanticValue::boolean(false),
+        SemanticValue::boolean(true),
+    };
 
-    schema.fields.push_back(std::move(approved));
-    schema.fields.push_back(std::move(route));
+    const SemanticNodeId approved_node =
+        definition.schema.add_finite_choice(
+            std::move(approved));
 
-    return schema;
+    definition.presentation.set_finite_choice(
+        approved_node,
+        FiniteChoicePresentation{
+            " approved: ",
+            {"false", "true"},
+        });
+
+    FiniteChoice route;
+    route.label = "route";
+    route.choices = {
+        SemanticValue::string("local"),
+        SemanticValue::string("remote"),
+        SemanticValue::string("human"),
+    };
+
+    const SemanticNodeId route_node =
+        definition.schema.add_finite_choice(
+            std::move(route));
+
+    definition.presentation.set_finite_choice(
+        route_node,
+        FiniteChoicePresentation{
+            " route: ",
+            {"local", "remote", "human"},
+        });
+
+    return definition;
+}
+
+bool validate_v2a_host_api() {
+    try {
+        const SemanticValue boolean_true =
+            SemanticValue::boolean(true);
+
+        const SemanticValue integer_one =
+            SemanticValue::integer(1);
+
+        const SemanticValue number_one =
+            SemanticValue::number(1.0);
+
+        const SemanticValue negative_zero =
+            SemanticValue::number(-0.0);
+
+        const SemanticValue positive_zero =
+            SemanticValue::number(0.0);
+
+        const SemanticValue string_true =
+            SemanticValue::string("true");
+
+        if (boolean_true.kind() !=
+                SemanticValueKind::Boolean ||
+            !boolean_true.boolean_value()) {
+
+            std::cerr
+                << "FAIL: SemanticValue boolean contract\n";
+            return false;
+        }
+
+        if (integer_one.kind() !=
+                SemanticValueKind::Integer ||
+            integer_one.integer_value() != 1) {
+
+            std::cerr
+                << "FAIL: SemanticValue integer contract\n";
+            return false;
+        }
+
+        if (number_one.kind() !=
+                SemanticValueKind::Number ||
+            number_one.number_value() != 1.0) {
+
+            std::cerr
+                << "FAIL: SemanticValue number contract\n";
+            return false;
+        }
+
+        if (integer_one == number_one) {
+            std::cerr
+                << "FAIL: integer and number semantic identities collapsed\n";
+            return false;
+        }
+
+        if (boolean_true == string_true) {
+            std::cerr
+                << "FAIL: boolean and string semantic identities collapsed\n";
+            return false;
+        }
+
+        if (!(negative_zero == positive_zero)) {
+            std::cerr
+                << "FAIL: negative zero was not canonicalized\n";
+            return false;
+        }
+
+        bool non_finite_rejected = false;
+
+        try {
+            (void)SemanticValue::number(
+                std::numeric_limits<double>::infinity());
+        } catch (const std::invalid_argument&) {
+            non_finite_rejected = true;
+        }
+
+        if (!non_finite_rejected) {
+            std::cerr
+                << "FAIL: non-finite semantic number accepted\n";
+            return false;
+        }
+
+        StructuredDecisionSchema schema;
+
+        FiniteChoice first;
+        first.label = "first";
+        first.choices = {
+            SemanticValue::boolean(false),
+            SemanticValue::boolean(true),
+        };
+
+        const SemanticNodeId first_id =
+            schema.add_finite_choice(
+                std::move(first));
+
+        FiniteChoice second;
+        second.label = "second";
+        second.choices = {
+            SemanticValue::string("a"),
+            SemanticValue::string("b"),
+        };
+
+        const SemanticNodeId second_id =
+            schema.add_finite_choice(
+                std::move(second));
+
+        if (!first_id.valid() ||
+            !second_id.valid() ||
+            first_id.value != 1 ||
+            second_id.value != 2 ||
+            schema.node_count() != 2 ||
+            schema.empty()) {
+
+            std::cerr
+                << "FAIL: semantic node ID/schema contract\n";
+            return false;
+        }
+
+        const StructuredDecisionSchema copied =
+            schema;
+
+        if (copied.node_count() != 2 ||
+            copied.empty()) {
+
+            std::cerr
+                << "FAIL: semantic schema copy contract\n";
+            return false;
+        }
+
+        bool duplicate_rejected = false;
+
+        try {
+            StructuredDecisionSchema duplicate_schema;
+
+            FiniteChoice duplicate;
+            duplicate.label = "duplicate";
+            duplicate.choices = {
+                SemanticValue::string("same"),
+                SemanticValue::string("same"),
+            };
+
+            (void)duplicate_schema.add_finite_choice(
+                std::move(duplicate));
+        } catch (const std::invalid_argument&) {
+            duplicate_rejected = true;
+        }
+
+        if (!duplicate_rejected) {
+            std::cerr
+                << "FAIL: duplicate semantic choices accepted\n";
+            return false;
+        }
+
+        DecisionModelPresentation presentation;
+
+        presentation.set_finite_choice(
+            first_id,
+            FiniteChoicePresentation{
+                " first: ",
+                {"false", "true"},
+            });
+
+        presentation.set_finite_choice(
+            second_id,
+            FiniteChoicePresentation{
+                " second: ",
+                {"a", "b"},
+            });
+
+        std::cout
+            << "V2A_HOST_API=PASS\n";
+
+        std::cout
+            << "SEMANTIC_NODE_IDS=1,2\n";
+
+        std::cout
+            << "SEMANTIC_SCHEMA_COPY=PASS\n";
+
+        std::cout
+            << "SEMANTIC_DUPLICATE_REJECTION=PASS\n";
+
+        std::cout
+            << "SEMANTIC_NUMERIC_IDENTITY=TYPE_SENSITIVE\n";
+
+        std::cout
+            << "SEMANTIC_NEGATIVE_ZERO=CANONICALIZED\n";
+
+        std::cout
+            << "SEMANTIC_NONFINITE=REJECTED\n";
+
+        return true;
+
+    } catch (const std::exception& error) {
+        std::cerr
+            << "FAIL: V2-A host API exception: "
+            << error.what()
+            << "\n";
+
+        return false;
+    }
 }
 
 bool validate_result(
@@ -192,9 +425,13 @@ int run(const char* artifact) {
         ninfer::Engine engine(
             make_options(artifact));
 
+        const DecisionDefinition definition =
+            make_definition();
+
         plan =
             engine.compile_decision_plan(
-                make_schema());
+                definition.schema,
+                definition.presentation);
 
         std::cout
             << "PLAN_VALID="
@@ -298,9 +535,13 @@ int run(const char* artifact) {
             foreign_rejected = true;
         }
 
+        const DecisionDefinition own_definition =
+            make_definition();
+
         const CompiledDecisionPlan own_plan =
             engine.compile_decision_plan(
-                make_schema());
+                own_definition.schema,
+                own_definition.presentation);
 
         const DecisionResult own_result =
             engine.decide(
@@ -376,6 +617,10 @@ int run(const char* artifact) {
 } // namespace
 
 int main() {
+    if (!validate_v2a_host_api()) {
+        return 1;
+    }
+
     const char* artifact =
         std::getenv(
             "NINFER_QWEN3_8_27B_DECISION_WEIGHTS");

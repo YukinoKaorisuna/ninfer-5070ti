@@ -140,7 +140,9 @@ public:
     // target/tokenizer. The resulting plan is immutable, cheap to copy and
     // reusable across requests handled by this Engine/model.
     [[nodiscard]] CompiledDecisionPlan
-    compile_decision_plan(StructuredDecisionSchema schema) const;
+    compile_decision_plan(
+        const StructuredDecisionSchema& schema,
+        const DecisionModelPresentation& presentation) const;
 
     // Execute an already-compiled structured decision plan.
     [[nodiscard]] DecisionHandle
