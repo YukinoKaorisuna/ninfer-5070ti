@@ -225,6 +225,18 @@ Program<Variant>::decision_probe_lane(
 }
 
 template <>
+DecisionWaveProbeResult
+Program<Variant>::decision_probe_wave_lane(
+    std::uint32_t lane,
+    std::span<const TokenId> shared_prefix_tokens,
+    std::span<const DecisionWaveProbeSpec> probes) {
+    return impl_->decision_probe_wave_lane(
+        lane,
+        shared_prefix_tokens,
+        probes);
+}
+
+template <>
 MemorySummary Program<Variant>::memory_summary() const noexcept {
     return impl_->memory_summary();
 }

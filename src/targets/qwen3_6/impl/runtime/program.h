@@ -244,6 +244,12 @@ public:
                         std::span<const TokenId> suffix_tokens,
                         std::span<const TokenId> candidate_tokens);
 
+    [[nodiscard]] qwen3_6::DecisionWaveProbeResult
+    decision_probe_wave_lane(
+        std::uint32_t lane,
+        std::span<const TokenId> shared_prefix_tokens,
+        std::span<const qwen3_6::DecisionWaveProbeSpec> probes);
+
     [[nodiscard]] MemorySummary memory_summary() const noexcept;
 
     void reset_memory_peaks() noexcept;
@@ -305,6 +311,12 @@ public:
     // Separate from rewrite_checkpoint_state_host: constrained decisions must
     // never overwrite the retained rolling/stable prefix checkpoint.
     std::optional<PinnedHostBuffer> decision_frontier_state_host;
+
+    // V2-C2 inner snapshot. The outer decision_frontier_state_host preserves
+    // the retained frontier while this buffer preserves the materialized
+    // temporary shared frontier between sibling probes.
+    std::optional<PinnedHostBuffer> decision_wave_frontier_state_host;
+
     std::optional<PinnedHostBuffer> dflash_rewrite_checkpoint_host;
     std::size_t dflash_rewrite_checkpoint_stride = 0;
     TokenId* host_tokens = nullptr;

@@ -36,6 +36,33 @@ struct DecisionProbeResult {
     double restore_seconds = 0.0;
 };
 
+// One residual finite-choice probe beneath a temporary shared decision
+// frontier. Spans are borrowed only for the synchronous call.
+struct DecisionWaveProbeSpec {
+    std::span<const TokenId> suffix_tokens;
+    std::span<const TokenId> candidate_tokens;
+};
+
+// Result of one target-private shared-frontier transaction.
+struct DecisionWaveProbeResult {
+    std::vector<DecisionProbeResult> probes;
+
+    std::uint32_t frontier = 0;
+    std::uint32_t shared_prefix_tokens = 0;
+
+    // Actual deterministic target traversals performed by the wave:
+    // shared prefix once + every residual sibling suffix.
+    std::uint32_t executed_suffix_tokens = 0;
+
+    // Work the replay baseline would perform:
+    // complete shared-prefix + residual path for every sibling.
+    std::uint32_t replay_equivalent_suffix_tokens = 0;
+
+    double capture_seconds       = 0.0;
+    double shared_prefix_seconds = 0.0;
+    double restore_seconds       = 0.0;
+};
+
 struct GraphExecutionProfile {
     std::uint32_t min            = 0;
     std::uint32_t max            = 0;
@@ -193,6 +220,12 @@ public:
     decision_probe_lane(std::uint32_t lane,
                         std::span<const TokenId> suffix_tokens,
                         std::span<const TokenId> candidate_tokens);
+
+    [[nodiscard]] DecisionWaveProbeResult
+    decision_probe_wave_lane(
+        std::uint32_t lane,
+        std::span<const TokenId> shared_prefix_tokens,
+        std::span<const DecisionWaveProbeSpec> probes);
 
     [[nodiscard]] MemorySummary memory_summary() const noexcept;
     void reset_memory_peaks() noexcept;
