@@ -1464,75 +1464,160 @@ Engine::compile_decision_plan(
         }
 
     } else {
-        if (nodes.size() != 2 ||
-            dependencies.size() != 1) {
+        // V2-C1 backend topology:
+        //
+        //        root
+        //      /  |  \
+        //     B   C   D
+        //
+        // Exactly one semantic root is supported. Every other node has
+        // exactly one parent, and that parent must be the same root.
+        //
+        // Execution remains replay-from-retained-frontier. This compiler
+        // change does not materialize a working frontier or alter the target.
+        if (nodes.size() < 2 ||
+            dependencies.size() !=
+                nodes.size() - 1) {
 
             throw std::invalid_argument(
-                "V2-B backend currently supports exactly one root-to-child dependency across two finite-choice nodes");
+                "V2-C1 backend requires one root and one or more direct dependent children");
         }
 
         if (presentation.impl_->
-                dependency_entries.size() != 1) {
+                dependency_entries.size() !=
+            dependencies.size()) {
 
             throw std::invalid_argument(
-                "V2-B dependency requires exactly one conditioning presentation");
+                "dependency conditioning must cover exactly the semantic dependency edges");
         }
 
-        const auto& dependency =
-            dependencies.front();
+        const auto node_index_of =
+            [&](SemanticNodeId id)
+                -> std::size_t {
 
-        const auto* root =
-            find_node(
-                dependency.parent);
+            for (std::size_t index = 0;
+                 index < nodes.size();
+                 ++index) {
 
-        const auto* child =
-            find_node(
-                dependency.child);
-
-        if (root == nullptr ||
-            child == nullptr) {
+                if (nodes[index].id == id) {
+                    return index;
+                }
+            }
 
             throw std::logic_error(
                 "compiled semantic dependency references an unknown node");
+        };
+
+        std::vector<std::size_t> incoming(
+            nodes.size(),
+            0);
+
+        std::vector<SemanticNodeId> parent_of(
+            nodes.size());
+
+        for (const auto& dependency :
+             dependencies) {
+
+            const std::size_t parent_index =
+                node_index_of(
+                    dependency.parent);
+
+            const std::size_t child_index =
+                node_index_of(
+                    dependency.child);
+
+            if (parent_index == child_index) {
+                throw std::logic_error(
+                    "semantic dependency self-edge reached compilation");
+            }
+
+            ++incoming[child_index];
+
+            if (incoming[child_index] > 1) {
+                throw std::invalid_argument(
+                    "V2-C1 backend does not support multiple parents for one semantic node");
+            }
+
+            parent_of[child_index] =
+                dependency.parent;
+        }
+
+        std::size_t root_count = 0;
+        std::size_t root_node_index = 0;
+
+        for (std::size_t index = 0;
+             index < nodes.size();
+             ++index) {
+
+            if (incoming[index] == 0) {
+                ++root_count;
+                root_node_index = index;
+            }
+        }
+
+        if (root_count != 1) {
+            throw std::invalid_argument(
+                "V2-C1 backend requires exactly one semantic root");
+        }
+
+        const auto& root =
+            nodes[root_node_index];
+
+        for (std::size_t index = 0;
+             index < nodes.size();
+             ++index) {
+
+            if (index == root_node_index) {
+                continue;
+            }
+
+            if (incoming[index] != 1 ||
+                parent_of[index] != root.id) {
+
+                throw std::invalid_argument(
+                    "V2-C1 backend supports only direct one-parent fan-out from one root");
+            }
+        }
+
+        const auto find_conditioning =
+            [&](SemanticNodeId parent,
+                SemanticNodeId child)
+                -> const DecisionModelPresentation::
+                    Impl::DependencyEntry* {
+
+            for (const auto& entry :
+                 presentation.impl_->
+                     dependency_entries) {
+
+                if (entry.parent == parent &&
+                    entry.child == child) {
+
+                    return &entry;
+                }
+            }
+
+            return nullptr;
+        };
+
+        for (const auto& dependency :
+             dependencies) {
+
+            if (find_conditioning(
+                    dependency.parent,
+                    dependency.child) == nullptr) {
+
+                throw std::invalid_argument(
+                    "decision presentation is missing dependency conditioning");
+            }
         }
 
         const auto* root_model =
             find_presentation(
-                root->id);
+                root.id);
 
-        const auto* child_model =
-            find_presentation(
-                child->id);
-
-        const DecisionModelPresentation::Impl::
-            DependencyEntry* conditioning =
-                nullptr;
-
-        for (const auto& entry :
-             presentation.impl_->
-                 dependency_entries) {
-
-            if (entry.parent ==
-                    dependency.parent &&
-                entry.child ==
-                    dependency.child) {
-
-                conditioning = &entry;
-                break;
-            }
-        }
-
-        if (conditioning == nullptr) {
+        if (root_model == nullptr) {
             throw std::invalid_argument(
-                "decision presentation is missing dependency conditioning");
-        }
-
-        if (conditioning->presentation
-                .selected_choice_texts.size() !=
-            root->choice.choices.size()) {
-
-            throw std::invalid_argument(
-                "dependency conditioning count must match the parent semantic choice count");
+                "decision presentation is missing the semantic root");
         }
 
         runtime::DecisionExecutionNode
@@ -1540,59 +1625,110 @@ Engine::compile_decision_plan(
 
         root_execution.variants.push_back(
             compile_field(
-                root->choice,
+                root.choice,
                 root_model->presentation
                     .continuation_prefix,
                 root_model->presentation
                     .candidate_texts));
 
+        program.nodes.reserve(
+            nodes.size());
+
+        // The compiled execution order is explicitly topological and does not
+        // depend on the root having been inserted first into the semantic
+        // schema.
         program.nodes.push_back(
             std::move(root_execution));
 
-        runtime::DecisionExecutionNode
-            child_execution;
+        for (std::size_t node_index = 0;
+             node_index < nodes.size();
+             ++node_index) {
 
-        child_execution.parent_result_index =
-            std::size_t{0};
+            if (node_index ==
+                root_node_index) {
 
-        child_execution.variants.reserve(
-            root->choice.choices.size());
+                continue;
+            }
 
-        for (std::size_t parent_choice = 0;
-             parent_choice <
-                 root->choice.choices.size();
-             ++parent_choice) {
+            const auto& child =
+                nodes[node_index];
 
-            const std::string&
-                selected_conditioning =
-                    conditioning->presentation
-                        .selected_choice_texts[
-                            parent_choice];
+            const auto* child_model =
+                find_presentation(
+                    child.id);
 
-            std::string continuation;
+            if (child_model == nullptr) {
+                throw std::invalid_argument(
+                    "decision presentation is missing a dependent semantic node");
+            }
 
-            continuation.reserve(
-                selected_conditioning.size() +
-                child_model->presentation
-                    .continuation_prefix.size());
+            const auto* conditioning =
+                find_conditioning(
+                    root.id,
+                    child.id);
 
-            continuation.append(
-                selected_conditioning);
+            if (conditioning == nullptr) {
+                throw std::invalid_argument(
+                    "decision presentation is missing dependency conditioning");
+            }
 
-            continuation.append(
-                child_model->presentation
-                    .continuation_prefix);
+            if (conditioning->presentation
+                    .selected_choice_texts.size() !=
+                root.choice.choices.size()) {
 
-            child_execution.variants.push_back(
-                compile_field(
-                    child->choice,
-                    continuation,
+                throw std::invalid_argument(
+                    "dependency conditioning count must match the parent semantic choice count");
+            }
+
+            runtime::DecisionExecutionNode
+                child_execution;
+
+            // Root is always execution result 0 after topological lowering.
+            child_execution.parent_result_index =
+                std::size_t{0};
+
+            child_execution.variants.reserve(
+                root.choice.choices.size());
+
+            for (std::size_t parent_choice = 0;
+                 parent_choice <
+                     root.choice.choices.size();
+                 ++parent_choice) {
+
+                const std::string&
+                    selected_conditioning =
+                        conditioning->presentation
+                            .selected_choice_texts[
+                                parent_choice];
+
+                std::string continuation;
+
+                continuation.reserve(
+                    selected_conditioning.size() +
                     child_model->presentation
-                        .candidate_texts));
-        }
+                        .continuation_prefix.size());
 
-        program.nodes.push_back(
-            std::move(child_execution));
+                continuation.append(
+                    selected_conditioning);
+
+                continuation.append(
+                    child_model->presentation
+                        .continuation_prefix);
+
+                // Preserve V2-B's whole-path tokenizer contract independently
+                // for every parent-conditioned sibling variant.
+                child_execution.variants.push_back(
+                    compile_field(
+                        child.choice,
+                        continuation,
+                        child_model->presentation
+                            .candidate_texts));
+            }
+
+            program.nodes.push_back(
+                std::move(
+                    child_execution));
+        }
     }
 
     (void)validate_and_project_decision_program(
