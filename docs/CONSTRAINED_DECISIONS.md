@@ -171,3 +171,49 @@ sampling and does not publish continuation hidden into the retained sequence.
 The existing rewrite-checkpoint host allocation is deliberately not reused.
 Decision execution has a separate lazy pinned-host snapshot so ordinary prefix
 checkpoint policy remains unaffected.
+
+
+## M1-C2: typed bool/enum tokenization
+
+M1-C2 adds a product-facing typed layer above the raw-token M1-C1
+Engine/executor path.
+
+Supported field types:
+
+- boolean
+- enum
+
+Boolean fields use the canonical caller-visible values:
+
+- `false`
+- `true`
+
+Enum fields carry 2-16 caller-visible string values.
+
+The Qwen frontend tokenizes each complete `suffix + candidate` path before
+submission to the executor. It computes the longest common token prefix across
+all candidate paths and uses that shared prefix as the executable field suffix.
+In M1 every candidate path must then diverge by exactly one valid token, and
+distinct values must produce distinct candidate token IDs.
+
+Joint path tokenization is required because BPE tokenization can change at the
+boundary between the suffix and candidate text. Independently tokenizing those
+strings is not generally equivalent to tokenizing the actual continuation.
+Multi-token divergences are deferred to the M2 trie path.
+
+Suffixes may contain multiple tokens.
+
+Typed requests are translated into the existing `DecisionFieldSpec` raw-token
+representation, so M1-C2 does not change scheduler admission, retained-frontier
+execution, constrained scoring, or state restoration.
+
+The result preserves:
+
+- candidate string values
+- candidate token IDs
+- restricted-choice probabilities
+- winner index
+- winner token
+- selected string value
+
+Multi-token candidate values remain M2 work.

@@ -419,17 +419,46 @@ struct GenerationResult {
 };
 
 // Finite constrained-decision contract.
+
+enum class DecisionFieldType : std::uint8_t {
+    Boolean,
+    Enum,
+};
+
+// Product-facing M1 input.
 //
-// M1-C1 intentionally carries already-tokenized choices. Product-facing bool /
-// enum strings and exact single-token validation are added by M1-C2.
+// Boolean fields use the canonical values "false" and "true" and therefore do
+// not require caller-provided choices.
+//
+// Enum values are both the caller-visible values and the internal M1 labels.
+// M1-C2 requires every value to tokenize to exactly one model token.
+struct DecisionFieldInput {
+    std::string name;
+    DecisionFieldType type = DecisionFieldType::Enum;
+    std::string suffix;
+    std::vector<std::string> values;
+};
+
+// Internal/already-tokenized finite-choice form consumed by the executor.
+//
+// candidate_values is optional for raw-token callers. Typed M1-C2 callers
+// populate it so the result can map winner_index back to the original value.
 struct DecisionFieldSpec {
     std::string name;
     std::vector<TokenId> suffix_tokens;
     std::vector<TokenId> candidate_tokens;
+
+    DecisionFieldType type = DecisionFieldType::Enum;
+    std::vector<std::string> candidate_values;
 };
 
 struct DecisionFieldResult {
     std::string name;
+
+    DecisionFieldType type = DecisionFieldType::Enum;
+    std::vector<std::string> candidate_values;
+    std::string selected_value;
+
     std::vector<TokenId> candidate_tokens;
     std::vector<float> probabilities;
     std::int32_t winner_index = -1;

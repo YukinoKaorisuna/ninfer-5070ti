@@ -714,10 +714,33 @@ private:
 
                 DecisionFieldResult field_result;
                 field_result.name             = field.name;
+                field_result.type             = field.type;
+                field_result.candidate_values = field.candidate_values;
                 field_result.candidate_tokens = field.candidate_tokens;
                 field_result.probabilities    = probe.probabilities;
                 field_result.winner_index     = probe.winner_index;
                 field_result.winner_token     = probe.winner_token;
+
+                if (!field_result.candidate_values.empty()) {
+                    if (field_result.candidate_values.size() !=
+                        field_result.candidate_tokens.size()) {
+                        throw std::logic_error(
+                            "decision candidate value/token metadata size mismatch");
+                    }
+
+                    if (field_result.winner_index < 0 ||
+                        static_cast<std::size_t>(
+                            field_result.winner_index) >=
+                            field_result.candidate_values.size()) {
+                        throw std::logic_error(
+                            "decision winner index is outside candidate metadata");
+                    }
+
+                    field_result.selected_value =
+                        field_result.candidate_values[
+                            static_cast<std::size_t>(
+                                field_result.winner_index)];
+                }
                 field_result.frontier         = probe.frontier;
                 field_result.suffix_tokens    = probe.suffix_tokens;
                 field_result.capture_seconds  = probe.capture_seconds;

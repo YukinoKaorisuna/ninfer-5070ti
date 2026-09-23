@@ -114,6 +114,16 @@ public:
     //
     // M1-C1 requires caller-provided token IDs. Each field must contain a
     // non-empty suffix and 2..16 unique candidate token IDs.
+    // Typed product-facing decision path.
+    [[nodiscard]] DecisionHandle
+    submit_decision(PreparedPrompt prompt, std::vector<DecisionFieldInput> fields,
+                    std::chrono::steady_clock::time_point pending_deadline = {});
+
+    DecisionResult decide(PreparedPrompt prompt, std::vector<DecisionFieldInput> fields,
+                          const CancellationView& cancellation = {});
+
+    // Raw-token path retained for parity tests, diagnostics and lower-level
+    // callers. Typed product requests should use DecisionFieldInput.
     [[nodiscard]] DecisionHandle
     submit_decision(PreparedPrompt prompt, std::vector<DecisionFieldSpec> fields,
                     std::chrono::steady_clock::time_point pending_deadline = {});

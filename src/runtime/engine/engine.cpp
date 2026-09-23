@@ -6,6 +6,7 @@
 #include "runtime/engine/concurrent_executor.h"
 #include "targets/registry.h"
 
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -356,6 +357,229 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
 GenerationResult Engine::generate(PreparedPrompt prompt, RequestOptions options, OutputSink* sink,
                                   const CancellationView& cancellation) {
     return submit(std::move(prompt), std::move(options)).wait(sink, cancellation);
+}
+
+DecisionHandle
+Engine::submit_decision(PreparedPrompt prompt, std::vector<DecisionFieldInput> fields,
+                        std::chrono::steady_clock::time_point pending_deadline) {
+    if (impl_ == nullptr) {
+        throw std::logic_error("Engine is moved from");
+    }
+
+    if (prompt.impl_ == nullptr) {
+        throw std::invalid_argument("PreparedPrompt is empty");
+    }
+
+    if (fields.empty() || fields.size() > 8) {
+        throw std::invalid_argument(
+            "decision request requires 1..8 fields");
+    }
+
+    const auto tokenize = [&](std::string_view value) {
+        return std::visit(
+            [&](const auto& target_ptr) -> std::vector<TokenId> {
+                if (target_ptr == nullptr) {
+                    throw std::logic_error(
+                        "Engine target is not active");
+                }
+
+                return target_ptr->loaded->frontend
+                    .tokenize_decision_text(value);
+            },
+            impl_->active);
+    };
+
+    std::vector<DecisionFieldSpec> tokenized;
+    tokenized.reserve(fields.size());
+
+    for (std::size_t field_index = 0;
+         field_index < fields.size();
+         ++field_index) {
+
+        DecisionFieldInput& input = fields[field_index];
+
+        if (input.name.empty()) {
+            throw std::invalid_argument(
+                "decision field name must not be empty");
+        }
+
+        for (std::size_t prior = 0;
+             prior < field_index;
+             ++prior) {
+
+            if (fields[prior].name == input.name) {
+                throw std::invalid_argument(
+                    "decision field names must be unique");
+            }
+        }
+
+        if (input.suffix.empty()) {
+            throw std::invalid_argument(
+                "decision field suffix must not be empty");
+        }
+
+        DecisionFieldSpec raw;
+        raw.name = input.name;
+        raw.type = input.type;
+
+        std::vector<std::string> values;
+
+        switch (input.type) {
+        case DecisionFieldType::Boolean:
+            if (!input.values.empty()) {
+                throw std::invalid_argument(
+                    "boolean decision fields must not provide enum values");
+            }
+
+            values = {"false", "true"};
+            break;
+
+        case DecisionFieldType::Enum:
+            if (input.values.size() < 2 ||
+                input.values.size() > 16) {
+
+                throw std::invalid_argument(
+                    "enum decision field requires 2..16 values");
+            }
+
+            values = std::move(input.values);
+            break;
+        }
+
+        for (std::size_t choice_index = 0;
+             choice_index < values.size();
+             ++choice_index) {
+
+            if (values[choice_index].empty()) {
+                throw std::invalid_argument(
+                    "decision choice value must not be empty");
+            }
+
+            for (std::size_t prior = 0;
+                 prior < choice_index;
+                 ++prior) {
+
+                if (values[prior] == values[choice_index]) {
+                    throw std::invalid_argument(
+                        "decision choice values must be unique");
+                }
+            }
+        }
+
+        // Tokenize complete suffix+choice paths rather than tokenizing the
+        // suffix and candidate independently. BPE tokenization can change at
+        // the text boundary, so independent tokenization is not generally a
+        // valid representation of the model continuation.
+        std::vector<std::vector<TokenId>> paths;
+        paths.reserve(values.size());
+
+        for (const std::string& value : values) {
+            std::string path_text;
+            path_text.reserve(
+                input.suffix.size() + value.size());
+            path_text.append(input.suffix);
+            path_text.append(value);
+
+            std::vector<TokenId> path_tokens =
+                tokenize(path_text);
+
+            if (path_tokens.empty()) {
+                throw std::invalid_argument(
+                    "decision suffix/value path tokenized to no tokens");
+            }
+
+            paths.push_back(
+                std::move(path_tokens));
+        }
+
+        std::size_t common = paths.front().size();
+
+        for (std::size_t path_index = 1;
+             path_index < paths.size();
+             ++path_index) {
+
+            common = std::min(
+                common,
+                paths[path_index].size());
+
+            std::size_t matched = 0;
+
+            while (matched < common &&
+                   paths.front()[matched] ==
+                       paths[path_index][matched]) {
+                ++matched;
+            }
+
+            common = matched;
+        }
+
+        if (common == 0) {
+            throw std::invalid_argument(
+                "decision suffix/value paths have no shared token prefix");
+        }
+
+        raw.suffix_tokens.assign(
+            paths.front().begin(),
+            paths.front().begin() +
+                static_cast<std::ptrdiff_t>(common));
+
+        raw.candidate_values.reserve(values.size());
+        raw.candidate_tokens.reserve(values.size());
+
+        for (std::size_t choice_index = 0;
+             choice_index < values.size();
+             ++choice_index) {
+
+            const std::vector<TokenId>& path_tokens =
+                paths[choice_index];
+
+            // M1 represents each branch by exactly one token after the shared
+            // path. Multi-token divergences become trie branches in M2.
+            if (path_tokens.size() != common + 1) {
+                throw std::invalid_argument(
+                    "decision choice requires a multi-token branch after "
+                    "joint suffix/value tokenization in M1: " +
+                    values[choice_index]);
+            }
+
+            const TokenId token =
+                path_tokens[common];
+
+            if (std::find(
+                    raw.candidate_tokens.begin(),
+                    raw.candidate_tokens.end(),
+                    token) !=
+                raw.candidate_tokens.end()) {
+
+                throw std::invalid_argument(
+                    "decision choice values must produce distinct "
+                    "one-token branches");
+            }
+
+            raw.candidate_values.push_back(
+                values[choice_index]);
+
+            raw.candidate_tokens.push_back(
+                token);
+        }
+
+        tokenized.push_back(
+            std::move(raw));
+    }
+
+    return submit_decision(
+        std::move(prompt),
+        std::move(tokenized),
+        pending_deadline);
+}
+
+DecisionResult
+Engine::decide(PreparedPrompt prompt, std::vector<DecisionFieldInput> fields,
+               const CancellationView& cancellation) {
+    return submit_decision(
+               std::move(prompt),
+               std::move(fields))
+        .wait(cancellation);
 }
 
 DecisionHandle

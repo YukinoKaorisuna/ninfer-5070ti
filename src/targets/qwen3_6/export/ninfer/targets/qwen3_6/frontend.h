@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace ninfer::targets::qwen3_6 {
@@ -132,6 +133,12 @@ public:
                                              const PreparationControl& control = {}) const;
     [[nodiscard]] PreparedPrompt prepare_tokens(std::vector<TokenId> token_ids,
                                                 bool allow_prefix_identity = true) const;
+
+    // Narrow decision-label tokenization surface. This deliberately exposes
+    // token IDs, not the tokenizer implementation.
+    [[nodiscard]] std::vector<TokenId>
+    tokenize_decision_text(std::string_view text) const;
+
     [[nodiscard]] PromptCapabilities prompt_capabilities() const noexcept;
     [[nodiscard]] MediaCacheSummary media_cache_summary() const;
     [[nodiscard]] OutputSession make_output_session(const PreparedPrompt& prompt,
