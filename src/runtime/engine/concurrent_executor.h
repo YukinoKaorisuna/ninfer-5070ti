@@ -793,7 +793,8 @@ private:
 
         const auto append_result =
             [&](const DecisionFieldSpec& field,
-                auto probe) {
+                auto probe,
+                std::uint32_t executed_suffix_tokens) {
 
             DecisionFieldResult field_result;
 
@@ -857,6 +858,9 @@ private:
 
             field_result.suffix_tokens =
                 probe.suffix_tokens;
+
+            field_result.executed_suffix_tokens =
+                executed_suffix_tokens;
 
             field_result.capture_seconds =
                 probe.capture_seconds;
@@ -1092,12 +1096,29 @@ private:
                                      selected.size();
                                  ++field_index) {
 
+                                const std::size_t
+                                    logical_suffix_tokens =
+                                        selected[
+                                            field_index]
+                                            ->suffix_tokens
+                                            .size();
+
+                                const std::size_t
+                                    executed_suffix_tokens =
+                                        field_index == 0
+                                            ? logical_suffix_tokens
+                                            : logical_suffix_tokens -
+                                                  common;
+
                                 append_result(
                                     *selected[
                                         field_index],
                                     std::move(
                                         wave.probes[
-                                            field_index]));
+                                            field_index]),
+                                    static_cast<
+                                        std::uint32_t>(
+                                            executed_suffix_tokens));
 
                                 // Keep scheduler/service accounting
                                 // replay-equivalent for V2-C2. Actual target
@@ -1139,7 +1160,9 @@ private:
 
                 append_result(
                     field,
-                    std::move(probe));
+                    std::move(probe),
+                    static_cast<std::uint32_t>(
+                        field.suffix_tokens.size()));
 
                 consume_service_work(
                     request,

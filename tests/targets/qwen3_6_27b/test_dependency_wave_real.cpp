@@ -391,6 +391,388 @@ validate_host_api() {
     }
 }
 
+
+int
+run_shared_frontier_real(
+    ninfer::Engine& engine) {
+
+    StructuredDecisionSchema schema;
+    DecisionModelPresentation presentation;
+
+    FiniteChoice root;
+    root.label = "shared_approved";
+
+    root.choices = {
+        SemanticValue::boolean(false),
+        SemanticValue::boolean(true),
+    };
+
+    const SemanticNodeId root_id =
+        schema.add_finite_choice(
+            std::move(root));
+
+    FiniteChoice child_b;
+    child_b.label = "shared_route_b";
+
+    child_b.choices = {
+        SemanticValue::string("local"),
+        SemanticValue::string("remote"),
+        SemanticValue::string("human"),
+    };
+
+    const SemanticNodeId child_b_id =
+        schema.add_finite_choice(
+            std::move(child_b));
+
+    FiniteChoice child_c;
+    child_c.label = "shared_route_c";
+
+    child_c.choices = {
+        SemanticValue::string("local"),
+        SemanticValue::string("remote"),
+        SemanticValue::string("human"),
+    };
+
+    const SemanticNodeId child_c_id =
+        schema.add_finite_choice(
+            std::move(child_c));
+
+    schema.add_dependency(
+        root_id,
+        child_b_id);
+
+    schema.add_dependency(
+        root_id,
+        child_c_id);
+
+    presentation.set_finite_choice(
+        root_id,
+        FiniteChoicePresentation{
+            " route: ",
+            {"local", "remote"},
+        });
+
+    const std::string child_b_prefix =
+        " sibling B route: ";
+
+    const std::string child_c_prefix =
+        " sibling C route: ";
+
+    presentation.set_finite_choice(
+        child_b_id,
+        FiniteChoicePresentation{
+            child_b_prefix,
+            {"local", "remote", "human"},
+        });
+
+    presentation.set_finite_choice(
+        child_c_id,
+        FiniteChoicePresentation{
+            child_c_prefix,
+            {"local", "remote", "human"},
+        });
+
+    // Both siblings receive the same long selected-parent conditioning for
+    // each possible root winner. Whole paths are still tokenized separately,
+    // so the runtime must discover the shared prefix from token sequences.
+    const std::vector<std::string>
+        shared_conditioning = {
+            " selected parent outcome approved=false; common dependency context "
+            "for both sibling decisions; preserve this deterministic semantic "
+            "conditioning before entering the sibling-specific route field. ",
+
+            " selected parent outcome approved=true; common dependency context "
+            "for both sibling decisions; preserve this deterministic semantic "
+            "conditioning before entering the sibling-specific route field. ",
+        };
+
+    presentation.set_dependency_conditioning(
+        root_id,
+        child_b_id,
+        DependencyConditioningPresentation{
+            shared_conditioning,
+        });
+
+    presentation.set_dependency_conditioning(
+        root_id,
+        child_c_id,
+        DependencyConditioningPresentation{
+            shared_conditioning,
+        });
+
+    const CompiledDecisionPlan plan =
+        engine.compile_decision_plan(
+            schema,
+            presentation);
+
+    if (!plan ||
+        plan.empty() ||
+        plan.field_count() != 3) {
+
+        std::cerr
+            << "FAIL: V2-C2 shared plan metadata\n";
+
+        return 1;
+    }
+
+    const DecisionResult result =
+        engine.decide(
+            engine.prepare_tokens(
+                std::vector<TokenId>(63, 198),
+                true),
+            plan);
+
+    if (result.fields.size() != 3) {
+        std::cerr
+            << "FAIL: V2-C2 expected root + two siblings\n";
+
+        return 1;
+    }
+
+    const DecisionFieldResult& root_result =
+        result.fields[0];
+
+    const DecisionFieldResult& child_b_result =
+        result.fields[1];
+
+    const DecisionFieldResult& child_c_result =
+        result.fields[2];
+
+    if (root_result.name != "shared_approved" ||
+        child_b_result.name != "shared_route_b" ||
+        child_c_result.name != "shared_route_c") {
+
+        std::cerr
+            << "FAIL: V2-C2 execution order\n";
+
+        return 1;
+    }
+
+    if (!validate_field(root_result, 63) ||
+        !validate_field(child_b_result, 63) ||
+        !validate_field(child_c_result, 63)) {
+
+        std::cerr
+            << "FAIL: V2-C2 result validation\n";
+
+        return 1;
+    }
+
+    if (root_result.winner_index < 0 ||
+        static_cast<std::size_t>(
+            root_result.winner_index) >=
+            shared_conditioning.size()) {
+
+        std::cerr
+            << "FAIL: V2-C2 parent winner index\n";
+
+        return 1;
+    }
+
+    const std::size_t selected_parent =
+        static_cast<std::size_t>(
+            root_result.winner_index);
+
+    const SingleDefinition expected_b =
+        make_single_child(
+            "shared_route_b",
+            shared_conditioning[
+                selected_parent] +
+            child_b_prefix);
+
+    const SingleDefinition expected_c =
+        make_single_child(
+            "shared_route_c",
+            shared_conditioning[
+                selected_parent] +
+            child_c_prefix);
+
+    const DecisionResult standalone_b =
+        engine.decide(
+            engine.prepare_tokens(
+                std::vector<TokenId>(63, 198),
+                true),
+            engine.compile_decision_plan(
+                expected_b.schema,
+                expected_b.presentation));
+
+    const DecisionResult standalone_c =
+        engine.decide(
+            engine.prepare_tokens(
+                std::vector<TokenId>(63, 198),
+                true),
+            engine.compile_decision_plan(
+                expected_c.schema,
+                expected_c.presentation));
+
+    if (standalone_b.fields.size() != 1 ||
+        standalone_c.fields.size() != 1) {
+
+        std::cerr
+            << "FAIL: V2-C2 standalone baselines\n";
+
+        return 1;
+    }
+
+    if (!field_equal(
+            child_b_result,
+            standalone_b.fields[0]) ||
+        !field_equal(
+            child_c_result,
+            standalone_c.fields[0])) {
+
+        std::cerr
+            << "FAIL: V2-C2 semantic/probability parity\n";
+
+        return 1;
+    }
+
+    const std::uint64_t replay_equivalent =
+        static_cast<std::uint64_t>(
+            child_b_result.suffix_tokens) +
+        static_cast<std::uint64_t>(
+            child_c_result.suffix_tokens);
+
+    const std::uint64_t executed =
+        static_cast<std::uint64_t>(
+            child_b_result
+                .executed_suffix_tokens) +
+        static_cast<std::uint64_t>(
+            child_c_result
+                .executed_suffix_tokens);
+
+    if (executed == 0 ||
+        executed >= replay_equivalent) {
+
+        std::cerr
+            << "FAIL: V2-C2 did not reduce deterministic traversal: executed="
+            << executed
+            << " replay="
+            << replay_equivalent
+            << "\n";
+
+        return 1;
+    }
+
+    if (child_b_result
+            .executed_suffix_tokens !=
+        child_b_result.suffix_tokens) {
+
+        std::cerr
+            << "FAIL: V2-C2 first sibling did not own the shared prefix\n";
+
+        return 1;
+    }
+
+    if (child_c_result
+            .executed_suffix_tokens >=
+        child_c_result.suffix_tokens) {
+
+        std::cerr
+            << "FAIL: V2-C2 second sibling did not reuse shared prefix\n";
+
+        return 1;
+    }
+
+    if (!(child_b_result.capture_seconds > 0.0) ||
+        child_c_result.capture_seconds != 0.0) {
+
+        std::cerr
+            << "FAIL: V2-C2 outer capture ownership\n";
+
+        return 1;
+    }
+
+    if (child_b_result.frontier != 63 ||
+        child_c_result.frontier != 63) {
+
+        std::cerr
+            << "FAIL: V2-C2 retained frontier changed\n";
+
+        return 1;
+    }
+
+    const ninfer::RuntimeStats stats =
+        engine.runtime_stats();
+
+    if (stats.committed_decode_tokens != 0 ||
+        stats.decode_rounds != 0 ||
+        stats.decode_row_rounds != 0) {
+
+        std::cerr
+            << "FAIL: V2-C2 entered normal decode\n";
+
+        return 1;
+    }
+
+    const std::uint64_t saved =
+        replay_equivalent -
+        executed;
+
+    std::cout
+        << "V2C2_PARENT_WINNER_INDEX="
+        << selected_parent
+        << "\n";
+
+    std::cout
+        << "V2C2_REPLAY_EQUIVALENT_SUFFIX_TOKENS="
+        << replay_equivalent
+        << "\n";
+
+    std::cout
+        << "V2C2_EXECUTED_SUFFIX_TOKENS="
+        << executed
+        << "\n";
+
+    std::cout
+        << "V2C2_SAVED_SUFFIX_TOKENS="
+        << saved
+        << "\n";
+
+    std::cout
+        << "V2C2_FIRST_CHILD_LOGICAL_SUFFIX="
+        << child_b_result.suffix_tokens
+        << "\n";
+
+    std::cout
+        << "V2C2_FIRST_CHILD_EXECUTED_SUFFIX="
+        << child_b_result.executed_suffix_tokens
+        << "\n";
+
+    std::cout
+        << "V2C2_SECOND_CHILD_LOGICAL_SUFFIX="
+        << child_c_result.suffix_tokens
+        << "\n";
+
+    std::cout
+        << "V2C2_SECOND_CHILD_EXECUTED_SUFFIX="
+        << child_c_result.executed_suffix_tokens
+        << "\n";
+
+    std::cout
+        << "V2C2_SHARED_FRONTIER_USED=YES\n";
+
+    std::cout
+        << "V2C2_SECOND_CHILD_OUTER_CAPTURE=NO\n";
+
+    std::cout
+        << "V2C2_SEMANTIC_PROBABILITY_PARITY=PASS\n";
+
+    std::cout
+        << "V2C2_RETAINED_FRONTIER_RESTORED=YES\n";
+
+    std::cout
+        << "V2C2_SECOND_SEQUENCE_LANE=NO\n";
+
+    std::cout
+        << "V2C2_NORMAL_DECODE_USED=NO\n";
+
+    std::cout
+        << "V2C2_SHARED_FRONTIER=PASS\n";
+
+    return 0;
+}
+
 int
 run_real(const char* artifact) {
     ninfer::Engine engine(
@@ -636,6 +1018,12 @@ run_real(const char* artifact) {
 
     std::cout
         << "V2C1_FANOUT=PASS\n";
+
+    if (run_shared_frontier_real(
+            engine) != 0) {
+
+        return 1;
+    }
 
     return 0;
 }

@@ -604,6 +604,9 @@ struct DecisionFieldResult {
 
     std::uint32_t frontier      = 0;
     std::uint32_t suffix_tokens = 0;
+    // Actual deterministic target traversal charged to this field.
+    // May be smaller than suffix_tokens when a sibling wave shares a prefix.
+    std::uint32_t executed_suffix_tokens = 0;
 
     double capture_seconds = 0.0;
     double suffix_seconds  = 0.0;
