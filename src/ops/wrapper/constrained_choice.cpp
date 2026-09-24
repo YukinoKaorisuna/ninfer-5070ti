@@ -74,9 +74,9 @@ void constrained_choice(const Tensor& logits,
             "constrained_choice: B must be in [1,8]");
     }
 
-    if (candidates < 2 || candidates > 16) {
+    if (candidates < 2) {
         throw std::invalid_argument(
-            "constrained_choice: K must be in [2,16]");
+            "constrained_choice: K must be at least 2");
     }
 
     if (candidate_ids.ne[1] != batch) {

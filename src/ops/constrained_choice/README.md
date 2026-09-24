@@ -9,7 +9,7 @@ explicit legal token IDs, and computes a softmax over that finite domain.
 Current contract:
 
 - batch `B`: 1..8;
-- candidate count `K`: 2..16;
+- candidate count `K`: at least 2, with no fixed product-level ceiling;
 - candidate IDs: I32 `[K,B]`;
 - probabilities: FP32 `[K,B]`;
 - winners: I32 `[B]`;

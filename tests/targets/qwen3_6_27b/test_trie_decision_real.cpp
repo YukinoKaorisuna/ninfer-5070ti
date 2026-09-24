@@ -770,6 +770,157 @@ bool validate_typed_multitoken_input(
     return true;
 }
 
+
+bool validate_wide_candidate_domain(
+    ninfer::Engine& engine) {
+
+    std::vector<std::string>
+        candidate_texts;
+
+    candidate_texts.reserve(26);
+
+    for (char letter = 'A';
+         letter <= 'Z';
+         ++letter) {
+
+        std::string candidate;
+
+        candidate.push_back(
+            letter);
+
+        candidate +=
+            " route terminal";
+
+        candidate_texts.push_back(
+            std::move(candidate));
+    }
+
+    Definition definition =
+        make_definition(
+            " wide choice: ",
+            candidate_texts);
+
+    const CompiledDecisionPlan plan =
+        engine.compile_decision_plan(
+            definition.schema,
+            definition.presentation);
+
+    const DecisionResult result =
+        engine.decide(
+            engine.prepare_tokens(
+                std::vector<TokenId>(
+                    63,
+                    198),
+                true),
+            plan);
+
+    if (result.fields.size() != 1) {
+        return false;
+    }
+
+    const DecisionFieldResult& field =
+        result.fields.front();
+
+    if (field.candidate_values !=
+            definition.semantic_values ||
+        field.candidate_values.size() != 26 ||
+        field.probabilities.size() != 26 ||
+        field.frontier != 63 ||
+        field.winner_index < 0 ||
+        static_cast<std::size_t>(
+            field.winner_index) >=
+                field.candidate_values.size() ||
+        field.selected_value !=
+            field.candidate_values[
+                static_cast<std::size_t>(
+                    field.winner_index)]) {
+
+        return false;
+    }
+
+    double probability_sum = 0.0;
+
+    if (!valid_probability_vector(
+            field,
+            &probability_sum)) {
+
+        return false;
+    }
+
+    std::size_t outgoing_degree = 0;
+
+    if (!field.candidate_tokens.empty()) {
+        if (!field.candidate_token_paths.empty()) {
+            return false;
+        }
+
+        outgoing_degree =
+            field.candidate_tokens.size();
+
+    } else {
+        if (field.candidate_token_paths.size() !=
+            candidate_texts.size()) {
+
+            return false;
+        }
+
+        const std::size_t common =
+            common_prefix_length(
+                field.candidate_token_paths);
+
+        std::set<TokenId> outgoing;
+
+        for (const auto& path :
+             field.candidate_token_paths) {
+
+            if (path.size() <= common) {
+                return false;
+            }
+
+            outgoing.insert(
+                path[common]);
+        }
+
+        outgoing_degree =
+            outgoing.size();
+
+        if (field.winner_token != -1) {
+            return false;
+        }
+    }
+
+    if (outgoing_degree <= 16) {
+        std::cerr
+            << "FAIL: wide choice did not create an ambiguity degree above 16; degree="
+            << outgoing_degree
+            << "\n";
+
+        return false;
+    }
+
+    std::cout
+        << "V2D_WIDE_CANDIDATE_COUNT="
+        << field.candidate_values.size()
+        << "\n";
+
+    std::cout
+        << "V2D_WIDE_OUTGOING_DEGREE="
+        << outgoing_degree
+        << "\n";
+
+    std::cout
+        << "V2D_WIDE_PROBABILITY_SUM="
+        << std::setprecision(10)
+        << probability_sum
+        << "\n";
+
+    std::cout
+        << "V2D_K16_CAP_REMOVED=PASS\n";
+
+    return true;
+}
+
+
 int run(const char* artifact) {
     ninfer::Engine engine(
         make_options(artifact));
@@ -1046,6 +1197,15 @@ int run(const char* artifact) {
 
             std::cerr
                 << "FAIL: typed multi-token convenience path qualification failed\n";
+
+            return 1;
+        }
+
+        if (!validate_wide_candidate_domain(
+                engine)) {
+
+            std::cerr
+                << "FAIL: >16 finite-choice qualification failed\n";
 
             return 1;
         }

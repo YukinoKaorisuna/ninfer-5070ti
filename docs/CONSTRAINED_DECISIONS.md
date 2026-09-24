@@ -26,6 +26,9 @@ Current implementation highlights:
 - Boolean/Enum convenience requests and the generic semantic API use one
   whole-path compiler;
 - multi-token finite choices lower to private V2-D1 token tries;
+- the former decision/scorer K=16 ceiling has been removed; historical M1
+  sections below retain their original 2-16 qualification wording as design
+  history rather than the current backend contract;
 - one-root direct dependency fan-out and V2-C shared-prefix sibling execution
   are implemented;
 - finite-decision execution currently requires

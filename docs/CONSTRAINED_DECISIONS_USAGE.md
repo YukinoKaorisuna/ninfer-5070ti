@@ -246,7 +246,10 @@ The semantic IR is intentionally broader than the currently qualified backend.
 Compilation/execution currently imposes:
 
 - 1..8 finite-choice nodes per plan;
-- 2..16 choices per finite node;
+- at least 2 choices per finite node; the former K=16 product/backend
+  ceiling has been removed. Candidate counts are bounded only by representable
+  tensor/result indices, unique model token branching, and available runtime
+  workspace/resources;
 - Boolean choices must be canonical `false,true`, or all choices must be
   Strings for the current `DecisionResult` backend;
 - Integer/Number `SemanticValue` kinds are representable in the semantic IR
@@ -271,7 +274,8 @@ real-artifact qualification is specifically Qwen3.8-27B on RTX 5080.
 
 The V2-D1 real qualification test covers:
 
-- four multi-token candidates;
+- four multi-token candidates in the multi-depth topology case;
+- a 26-way finite choice whose scored ambiguity degree is greater than 16;
 - three ambiguity probes across three ambiguity depths;
 - shared internal trie prefixes and a deterministic unary tail;
 - exact-prefix and distinct-text duplicate-token-path rejection;

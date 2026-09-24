@@ -26,9 +26,11 @@ namespace ninfer::ops {
  * For each batch column, only the supplied candidate token logits participate
  * in the softmax. Equal maxima select the lowest candidate index.
  *
- * M1 domain:
+ * Finite-choice domain:
  *   1 <= B <= 8
- *   2 <= K <= 16
+ *   2 <= K
+ *   K is represented by the Tensor's int32 extent and is otherwise limited
+ *   by caller/runtime resources rather than an arbitrary product ceiling.
  *   every candidate id is in [0, valid_rows)
  */
 void constrained_choice(const Tensor& logits,

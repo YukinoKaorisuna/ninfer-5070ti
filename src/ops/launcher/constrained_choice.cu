@@ -11,8 +11,19 @@
 namespace ninfer::ops::detail {
 namespace {
 
-constexpr int kWarpSize      = 32;
-constexpr int kMaxCandidates = 16;
+constexpr int kWarpSize          = 32;
+constexpr int kDecisionBlockSize = 256;
+
+__device__ bool better_candidate(
+    float candidate_score,
+    std::int32_t candidate_index,
+    float current_score,
+    std::int32_t current_index) {
+
+    return candidate_score > current_score ||
+           (candidate_score == current_score &&
+            candidate_index < current_index);
+}
 
 __global__ void constrained_choice_kernel(
     const __nv_bfloat16* __restrict__ logits,
@@ -24,92 +35,225 @@ __global__ void constrained_choice_kernel(
     std::int32_t candidates,
     std::int32_t batch) {
 
-    const int b    = static_cast<int>(blockIdx.x);
-    const int lane = static_cast<int>(threadIdx.x);
+    const int b =
+        static_cast<int>(blockIdx.x);
 
-    if (b >= batch || lane >= kWarpSize) {
+    const int lane =
+        static_cast<int>(threadIdx.x);
+
+    if (b >= batch) {
         return;
     }
 
-    __shared__ float scores[kMaxCandidates];
-    __shared__ float denom;
-    __shared__ float max_score;
+    __shared__ float reduce_values[kDecisionBlockSize];
+    __shared__ std::int32_t reduce_indices[kDecisionBlockSize];
+
+    __shared__ float maximum;
+    __shared__ float denominator;
     __shared__ std::int32_t winner;
 
-    if (lane < candidates) {
+    float local_max = -INFINITY;
+
+    // candidates is a convenient sentinel because every legal candidate
+    // index lies in [0,candidates).
+    std::int32_t local_winner =
+        candidates;
+
+    for (std::int32_t k = lane;
+         k < candidates;
+         k += static_cast<std::int32_t>(blockDim.x)) {
+
         const std::size_t candidate_offset =
-            static_cast<std::size_t>(b) * candidates + lane;
+            static_cast<std::size_t>(b) *
+                static_cast<std::size_t>(candidates) +
+            static_cast<std::size_t>(k);
 
-        const std::int32_t token_id = candidate_ids[candidate_offset];
+        const std::int32_t token_id =
+            candidate_ids[candidate_offset];
 
-        // The public contract requires IDs to be within valid_rows.
-        // Keep the kernel memory-safe even if an internal caller violates it.
+        // The public contract requires IDs in [0,valid_rows). Keep the
+        // kernel memory-safe even if an internal caller violates it.
         const float score =
-            (token_id >= 0 && token_id < valid_rows)
+            token_id >= 0 &&
+                    token_id < valid_rows
                 ? __bfloat162float(
-                      logits[static_cast<std::size_t>(b) * physical_rows +
-                             static_cast<std::size_t>(token_id)])
+                      logits[
+                          static_cast<std::size_t>(b) *
+                              static_cast<std::size_t>(physical_rows) +
+                          static_cast<std::size_t>(token_id)])
                 : -INFINITY;
 
-        scores[lane] = score;
+        if (better_candidate(
+                score,
+                k,
+                local_max,
+                local_winner)) {
+
+            local_max = score;
+            local_winner = k;
+        }
     }
 
-    __syncwarp();
+    reduce_values[lane] =
+        local_max;
 
-    if (lane == 0) {
-        float local_max = scores[0];
-        std::int32_t local_winner = 0;
+    reduce_indices[lane] =
+        local_winner;
 
-        for (int k = 1; k < candidates; ++k) {
-            const float value = scores[k];
+    __syncthreads();
 
-            // Strict comparison preserves lowest candidate index on ties.
-            if (value > local_max) {
-                local_max    = value;
-                local_winner = k;
+    // Block-wide (score,lowest-index) max reduction.
+    for (int stride =
+             static_cast<int>(blockDim.x) / 2;
+         stride > 0;
+         stride >>= 1) {
+
+        if (lane < stride) {
+            const float other_score =
+                reduce_values[lane + stride];
+
+            const std::int32_t other_index =
+                reduce_indices[lane + stride];
+
+            if (better_candidate(
+                    other_score,
+                    other_index,
+                    reduce_values[lane],
+                    reduce_indices[lane])) {
+
+                reduce_values[lane] =
+                    other_score;
+
+                reduce_indices[lane] =
+                    other_index;
             }
         }
 
-        float local_denom = 0.0f;
-
-        for (int k = 0; k < candidates; ++k) {
-            local_denom += expf(scores[k] - local_max);
-        }
-
-        max_score = local_max;
-        denom     = local_denom;
-        winner    = local_winner;
-    }
-
-    __syncwarp();
-
-    if (lane < candidates) {
-        const std::size_t output_offset =
-            static_cast<std::size_t>(b) * candidates + lane;
-
-        probabilities[output_offset] =
-            expf(scores[lane] - max_score) / denom;
+        __syncthreads();
     }
 
     if (lane == 0) {
-        winners[b] = winner;
+        maximum =
+            reduce_values[0];
+
+        winner =
+            reduce_indices[0];
+    }
+
+    __syncthreads();
+
+    float local_sum = 0.0F;
+
+    for (std::int32_t k = lane;
+         k < candidates;
+         k += static_cast<std::int32_t>(blockDim.x)) {
+
+        const std::size_t candidate_offset =
+            static_cast<std::size_t>(b) *
+                static_cast<std::size_t>(candidates) +
+            static_cast<std::size_t>(k);
+
+        const std::int32_t token_id =
+            candidate_ids[candidate_offset];
+
+        const float score =
+            token_id >= 0 &&
+                    token_id < valid_rows
+                ? __bfloat162float(
+                      logits[
+                          static_cast<std::size_t>(b) *
+                              static_cast<std::size_t>(physical_rows) +
+                          static_cast<std::size_t>(token_id)])
+                : -INFINITY;
+
+        local_sum +=
+            expf(score - maximum);
+    }
+
+    reduce_values[lane] =
+        local_sum;
+
+    __syncthreads();
+
+    for (int stride =
+             static_cast<int>(blockDim.x) / 2;
+         stride > 0;
+         stride >>= 1) {
+
+        if (lane < stride) {
+            reduce_values[lane] +=
+                reduce_values[lane + stride];
+        }
+
+        __syncthreads();
+    }
+
+    if (lane == 0) {
+        denominator =
+            reduce_values[0];
+    }
+
+    __syncthreads();
+
+    for (std::int32_t k = lane;
+         k < candidates;
+         k += static_cast<std::int32_t>(blockDim.x)) {
+
+        const std::size_t candidate_offset =
+            static_cast<std::size_t>(b) *
+                static_cast<std::size_t>(candidates) +
+            static_cast<std::size_t>(k);
+
+        const std::int32_t token_id =
+            candidate_ids[candidate_offset];
+
+        const float score =
+            token_id >= 0 &&
+                    token_id < valid_rows
+                ? __bfloat162float(
+                      logits[
+                          static_cast<std::size_t>(b) *
+                              static_cast<std::size_t>(physical_rows) +
+                          static_cast<std::size_t>(token_id)])
+                : -INFINITY;
+
+        probabilities[candidate_offset] =
+            expf(score - maximum) /
+            denominator;
+    }
+
+    if (lane == 0) {
+        winners[b] =
+            winner;
     }
 }
 
 } // namespace
 
-void constrained_choice_launch(const Tensor& logits,
-                               const Tensor& candidate_ids,
-                               Tensor& probabilities,
-                               Tensor& winners,
-                               std::int32_t valid_rows,
-                               cudaStream_t stream) {
-    const std::int32_t candidates = candidate_ids.ne[0];
-    const std::int32_t batch      = candidate_ids.ne[1];
+void constrained_choice_launch(
+    const Tensor& logits,
+    const Tensor& candidate_ids,
+    Tensor& probabilities,
+    Tensor& winners,
+    std::int32_t valid_rows,
+    cudaStream_t stream) {
+
+    const std::int32_t candidates =
+        candidate_ids.ne[0];
+
+    const std::int32_t batch =
+        candidate_ids.ne[1];
+
+    // Preserve the original warp-sized fast path for small finite domains
+    // while using a block-wide strided reduction for larger domains.
+    const unsigned int threads =
+        candidates <= kWarpSize
+            ? static_cast<unsigned int>(kWarpSize)
+            : static_cast<unsigned int>(kDecisionBlockSize);
 
     constrained_choice_kernel<<<
         static_cast<unsigned int>(batch),
-        kWarpSize,
+        threads,
         0,
         stream>>>(
             static_cast<const __nv_bfloat16*>(logits.data),
@@ -121,7 +265,8 @@ void constrained_choice_launch(const Tensor& logits,
             candidates,
             batch);
 
-    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(
+        cudaGetLastError());
 }
 
 } // namespace ninfer::ops::detail

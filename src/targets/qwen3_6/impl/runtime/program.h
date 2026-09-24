@@ -333,6 +333,10 @@ public:
     std::size_t workspace_logical_peak_bytes = 0;
 
 private:
+    [[nodiscard]] DecisionProbeResult
+    score_decision_candidates(
+        std::span<const TokenId> candidate_tokens);
+
     void clear_lane(SequenceState& sequence, RequestControl& request) noexcept;
     void ordered_reset(SequenceState& sequence);
     void prepare_graphs();

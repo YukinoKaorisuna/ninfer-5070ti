@@ -119,8 +119,13 @@ int verify_probabilities(const char* label,
 int run_case(std::int32_t candidates,
              std::int32_t batch,
              bool balanced_fixture = false) {
-    constexpr std::int32_t physical_rows = 64;
-    constexpr std::int32_t valid_rows    = 61;
+    const std::int32_t physical_rows =
+        std::max<std::int32_t>(
+            64,
+            candidates + 17);
+
+    const std::int32_t valid_rows =
+        physical_rows - 3;
 
     std::vector<std::uint16_t> logits(
         static_cast<std::size_t>(physical_rows) * batch);
@@ -158,7 +163,8 @@ int run_case(std::int32_t candidates,
                 static_cast<std::size_t>(b) *
                     candidates +
                 k] =
-                (3 + b * 11 + k * 7) % valid_rows;
+                (3 + b * 11 + k) %
+                valid_rows;
         }
     }
 
@@ -388,6 +394,16 @@ int main() {
     failures += run_case(4, 3);
     failures += run_case(8, 8);
     failures += run_case(16, 8);
+
+    // Boundary and wide-domain coverage. K=17 is the regression which proves
+    // the former fixed-16 implementation ceiling has been crossed.
+    failures += run_case(17, 1);
+    failures += run_case(31, 1);
+    failures += run_case(32, 8);
+    failures += run_case(33, 3);
+    failures += run_case(64, 1);
+    failures += run_case(127, 4);
+    failures += run_case(257, 1);
 
     // Independent CPU oracle + moderate logits. No forced dominant winner
     // and no forced tie: several choices retain meaningful probability mass.

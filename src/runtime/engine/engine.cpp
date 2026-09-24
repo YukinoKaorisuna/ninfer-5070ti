@@ -899,11 +899,17 @@ validate_decision_field_variant(
         }
     }
 
-    if (field.candidate_tokens.size() < 2 ||
-        field.candidate_tokens.size() > 16) {
-
+    if (field.candidate_tokens.size() < 2) {
         throw std::invalid_argument(
-            "decision field requires 2..16 candidate tokens");
+            "decision field requires at least two candidate tokens");
+    }
+
+    if (field.candidate_tokens.size() >
+        static_cast<std::size_t>(
+            std::numeric_limits<std::int32_t>::max())) {
+
+        throw std::length_error(
+            "decision field candidate count exceeds int32 result/index representation");
     }
 
     for (std::size_t i = 0;
@@ -943,9 +949,17 @@ build_decision_trie_plan(
     const std::vector<std::vector<TokenId>>& paths,
     std::size_t common_prefix_tokens) {
 
-    if (paths.size() < 2 || paths.size() > 16) {
+    if (paths.size() < 2) {
         throw std::invalid_argument(
-            "decision trie requires 2..16 semantic candidate paths");
+            "decision trie requires at least two semantic candidate paths");
+    }
+
+    if (paths.size() >
+        static_cast<std::size_t>(
+            std::numeric_limits<std::int32_t>::max())) {
+
+        throw std::length_error(
+            "decision trie candidate count exceeds int32 result/index representation");
     }
 
     struct TempNode {
@@ -1207,11 +1221,17 @@ validate_decision_execution_variant(
     const std::size_t candidate_count =
         trie.candidate_token_paths.size();
 
-    if (candidate_count < 2 ||
-        candidate_count > 16) {
-
+    if (candidate_count < 2) {
         throw std::invalid_argument(
-            "decision trie requires 2..16 candidate paths");
+            "decision trie requires at least two candidate paths");
+    }
+
+    if (candidate_count >
+        static_cast<std::size_t>(
+            std::numeric_limits<std::int32_t>::max())) {
+
+        throw std::length_error(
+            "decision trie candidate count exceeds int32 result/index representation");
     }
 
     if (field.candidate_values.size() !=
@@ -1299,11 +1319,17 @@ validate_decision_execution_variant(
                 "decision trie probe suffix must not be empty");
         }
 
-        if (probe.candidate_tokens.size() < 2 ||
-            probe.candidate_tokens.size() > 16) {
-
+        if (probe.candidate_tokens.size() < 2) {
             throw std::invalid_argument(
-                "decision trie probe requires 2..16 outgoing tokens");
+                "decision trie probe requires at least two outgoing tokens");
+        }
+
+        if (probe.candidate_tokens.size() >
+            static_cast<std::size_t>(
+                std::numeric_limits<std::int32_t>::max())) {
+
+            throw std::length_error(
+                "decision trie probe degree exceeds int32 scorer representation");
         }
 
         if (probe.descendant_candidate_indices.size() !=
@@ -1706,11 +1732,17 @@ Engine::compile_decision_plan(
                 "decision backend requires a non-empty finite-choice label");
         }
 
-        if (choice.choices.size() < 2 ||
-            choice.choices.size() > 16) {
-
+        if (choice.choices.size() < 2) {
             throw std::invalid_argument(
-                "decision backend currently supports 2..16 choices per node");
+                "decision backend requires at least two choices per node");
+        }
+
+        if (choice.choices.size() >
+            static_cast<std::size_t>(
+                std::numeric_limits<std::int32_t>::max())) {
+
+            throw std::length_error(
+                "decision finite-choice domain exceeds int32 result/index representation");
         }
 
         if (candidate_texts.size() !=

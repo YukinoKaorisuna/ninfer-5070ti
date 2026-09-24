@@ -139,8 +139,10 @@ The probe list is backend-only.
 
 With K semantic leaves, the number of ambiguous branch nodes is at most K - 1.
 
-The current backend limit K <= 16 therefore implies at most 15 ambiguous D1
-probes per finite-choice variant.
+There is no longer a product-level K=16 ceiling. With K semantic leaves,
+the structural ambiguity bound remains K - 1. Individual ambiguity-node degree
+is limited by representable tensor indices, distinct legal model tokens and
+available runtime workspace rather than an arbitrary finite-choice constant.
 
 ## Probability semantics
 

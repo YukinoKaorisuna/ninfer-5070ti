@@ -15,8 +15,6 @@ namespace {
 
 constexpr std::int32_t kPhysicalRows = 248320;
 constexpr std::int32_t kValidRows    = 248077;
-constexpr std::int32_t kMaximumBatch = 8;
-constexpr std::int32_t kMaximumK     = 16;
 
 void run_case(std::int32_t candidates, std::int32_t batch) {
     DeviceBuffer logits =
@@ -109,15 +107,21 @@ int main() {
         return 0;
     }
 
-    for (const std::int32_t candidates : {2, 4, 8, 16}) {
+    for (const std::int32_t candidates :
+         {2, 8, 16, 17, 32, 64, 128, 256}) {
+
         run_case(candidates, 1);
     }
 
-    for (const std::int32_t candidates : {2, 4, 8, 16}) {
+    for (const std::int32_t candidates :
+         {8, 16, 17, 32, 64, 128}) {
+
         run_case(candidates, 4);
     }
 
-    for (const std::int32_t candidates : {2, 4, 8, 16}) {
+    for (const std::int32_t candidates :
+         {8, 16, 17, 32, 64}) {
+
         run_case(candidates, 8);
     }
 

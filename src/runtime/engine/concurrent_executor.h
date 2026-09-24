@@ -898,7 +898,10 @@ private:
                 trie.candidate_token_paths.size();
 
             if (candidate_count < 2 ||
-                candidate_count > 16 ||
+                candidate_count >
+                    static_cast<std::size_t>(
+                        std::numeric_limits<
+                            std::int32_t>::max()) ||
                 field.candidate_values.size() !=
                     candidate_count) {
 

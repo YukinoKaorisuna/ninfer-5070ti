@@ -1172,6 +1172,129 @@ SpeculativeStats ProgramImplCore::speculative_stats_lane(std::uint32_t lane) con
 }
 
 DecisionProbeResult
+ProgramImplCore::score_decision_candidates(
+    std::span<const TokenId> candidate_tokens) {
+
+    if (!io.ordinary) {
+        throw std::logic_error(
+            "decision scorer requires the ordinary target backend");
+    }
+
+    if (candidate_tokens.size() < 2) {
+        throw std::invalid_argument(
+            "decision scorer requires at least two candidates");
+    }
+
+    if (candidate_tokens.size() >
+        static_cast<std::size_t>(
+            std::numeric_limits<std::int32_t>::max())) {
+
+        throw std::length_error(
+            "decision scorer candidate count exceeds int32 tensor representation");
+    }
+
+    const std::int32_t k =
+        static_cast<std::int32_t>(
+            candidate_tokens.size());
+
+    // Decision scoring is terminal with respect to the preceding model
+    // traversal. Reuse the ordinary runtime workspace rather than reserving
+    // a fixed persistent candidate domain.
+    work.reset();
+
+    try {
+        Tensor ids =
+            work.alloc(
+                DType::I32,
+                {k, 1});
+
+        Tensor probabilities =
+            work.alloc(
+                DType::FP32,
+                {k, 1});
+
+        Tensor winners =
+            work.alloc(
+                DType::I32,
+                {1});
+
+        mark_workspace_usage(
+            work.used());
+
+        CUDA_CHECK(
+            cudaMemcpyAsync(
+                ids.data,
+                candidate_tokens.data(),
+                candidate_tokens.size() *
+                    sizeof(TokenId),
+                cudaMemcpyHostToDevice,
+                device.stream));
+
+        Tensor logits =
+            io.ordinary->logits
+                .slice(1, 0, 1);
+
+        ops::constrained_choice(
+            logits,
+            ids,
+            probabilities,
+            winners,
+            TextConfig::token_domain,
+            device.stream);
+
+        DecisionProbeResult result;
+
+        result.probabilities.resize(
+            candidate_tokens.size());
+
+        CUDA_CHECK(
+            cudaMemcpyAsync(
+                result.probabilities.data(),
+                probabilities.data,
+                result.probabilities.size() *
+                    sizeof(float),
+                cudaMemcpyDeviceToHost,
+                device.stream));
+
+        CUDA_CHECK(
+            cudaMemcpyAsync(
+                &result.winner_index,
+                winners.data,
+                sizeof(result.winner_index),
+                cudaMemcpyDeviceToHost,
+                device.stream));
+
+        device.synchronize();
+
+        if (result.winner_index < 0 ||
+            result.winner_index >= k) {
+
+            throw std::runtime_error(
+                "decision scorer returned an invalid winner");
+        }
+
+        result.winner_token =
+            candidate_tokens[
+                static_cast<std::size_t>(
+                    result.winner_index)];
+
+        work.reset();
+
+        return result;
+
+    } catch (...) {
+        try {
+            device.synchronize();
+        } catch (...) {}
+
+        work.reset();
+
+        throw;
+    }
+}
+
+
+DecisionProbeResult
 ProgramImplCore::decision_probe_lane(
     std::uint32_t lane,
     std::span<const TokenId> suffix_tokens,
@@ -1210,9 +1333,9 @@ ProgramImplCore::decision_probe_lane(
             "decision probe suffix must contain at least one token");
     }
 
-    if (candidate_tokens.size() < 2 || candidate_tokens.size() > 16) {
+    if (candidate_tokens.size() < 2) {
         throw std::invalid_argument(
-            "decision probe candidate count must be in [2,16]");
+            "decision probe requires at least two candidates");
     }
 
     for (std::size_t i = 0; i < candidate_tokens.size(); ++i) {
@@ -1431,73 +1554,22 @@ ProgramImplCore::decision_probe_lane(
                 Clock::now() - suffix_started)
                 .count();
 
-        const auto score_started = Clock::now();
+        const auto score_started =
+            Clock::now();
 
-        const std::int32_t k =
-            static_cast<std::int32_t>(
-                candidate_tokens.size());
+        DecisionProbeResult scored =
+            score_decision_candidates(
+                candidate_tokens);
 
-        Tensor ids =
-            io.ordinary->decision_candidate_ids
-                .slice(0, 0, k)
-                .slice(1, 0, 1);
+        result.probabilities =
+            std::move(
+                scored.probabilities);
 
-        Tensor probabilities =
-            io.ordinary->decision_probabilities
-                .slice(0, 0, k)
-                .slice(1, 0, 1);
-
-        Tensor winners =
-            io.ordinary->decision_winners
-                .slice(0, 0, 1);
-
-        CUDA_CHECK(cudaMemcpyAsync(
-            ids.data,
-            candidate_tokens.data(),
-            candidate_tokens.size() * sizeof(TokenId),
-            cudaMemcpyHostToDevice,
-            device.stream));
-
-        Tensor logits =
-            io.ordinary->logits.slice(1, 0, 1);
-
-        ops::constrained_choice(
-            logits,
-            ids,
-            probabilities,
-            winners,
-            TextConfig::token_domain,
-            device.stream);
-
-        result.probabilities.resize(
-            candidate_tokens.size());
-
-        CUDA_CHECK(cudaMemcpyAsync(
-            result.probabilities.data(),
-            probabilities.data,
-            result.probabilities.size() * sizeof(float),
-            cudaMemcpyDeviceToHost,
-            device.stream));
-
-        CUDA_CHECK(cudaMemcpyAsync(
-            &result.winner_index,
-            winners.data,
-            sizeof(result.winner_index),
-            cudaMemcpyDeviceToHost,
-            device.stream));
-
-        device.synchronize();
-
-        if (result.winner_index < 0 ||
-            result.winner_index >= k) {
-            throw std::runtime_error(
-                "decision probe returned an invalid winner");
-        }
+        result.winner_index =
+            scored.winner_index;
 
         result.winner_token =
-            candidate_tokens[
-                static_cast<std::size_t>(
-                    result.winner_index)];
+            scored.winner_token;
 
         result.score_seconds =
             std::chrono::duration<double>(
@@ -1574,11 +1646,9 @@ ProgramImplCore::decision_probe_wave_lane(
                 "shared decision sibling residual suffix must not be empty");
         }
 
-        if (probe.candidate_tokens.size() < 2 ||
-            probe.candidate_tokens.size() > 16) {
-
+        if (probe.candidate_tokens.size() < 2) {
             throw std::invalid_argument(
-                "shared decision sibling candidate count must be in [2,16]");
+                "shared decision sibling requires at least two candidates");
         }
 
         for (const TokenId token :
@@ -1914,85 +1984,8 @@ ProgramImplCore::decision_probe_wave_lane(
                 candidate_tokens)
             -> qwen3_6::DecisionProbeResult {
 
-        qwen3_6::DecisionProbeResult
-            probe_result;
-
-        const std::int32_t k =
-            static_cast<std::int32_t>(
-                candidate_tokens.size());
-
-        Tensor ids =
-            io.ordinary
-                ->decision_candidate_ids
-                .slice(0, 0, k)
-                .slice(1, 0, 1);
-
-        Tensor probabilities =
-            io.ordinary
-                ->decision_probabilities
-                .slice(0, 0, k)
-                .slice(1, 0, 1);
-
-        Tensor winners =
-            io.ordinary
-                ->decision_winners
-                .slice(0, 0, 1);
-
-        CUDA_CHECK(cudaMemcpyAsync(
-            ids.data,
-            candidate_tokens.data(),
-            candidate_tokens.size() *
-                sizeof(TokenId),
-            cudaMemcpyHostToDevice,
-            device.stream));
-
-        Tensor logits =
-            io.ordinary->logits
-                .slice(1, 0, 1);
-
-        ops::constrained_choice(
-            logits,
-            ids,
-            probabilities,
-            winners,
-            TextConfig::token_domain,
-            device.stream);
-
-        probe_result.probabilities.resize(
-            candidate_tokens.size());
-
-        CUDA_CHECK(cudaMemcpyAsync(
-            probe_result.probabilities.data(),
-            probabilities.data,
-            probe_result.probabilities.size() *
-                sizeof(float),
-            cudaMemcpyDeviceToHost,
-            device.stream));
-
-        CUDA_CHECK(cudaMemcpyAsync(
-            &probe_result.winner_index,
-            winners.data,
-            sizeof(
-                probe_result.winner_index),
-            cudaMemcpyDeviceToHost,
-            device.stream));
-
-        device.synchronize();
-
-        if (probe_result.winner_index < 0 ||
-            probe_result.winner_index >= k) {
-
-            throw std::runtime_error(
-                "shared decision probe returned an invalid winner");
-        }
-
-        probe_result.winner_token =
-            candidate_tokens[
-                static_cast<std::size_t>(
-                    probe_result
-                        .winner_index)];
-
-        return probe_result;
+        return score_decision_candidates(
+            candidate_tokens);
     };
 
     try {
