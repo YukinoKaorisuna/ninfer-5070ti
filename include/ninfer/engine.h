@@ -54,6 +54,55 @@ private:
     friend class Engine;
 };
 
+class DecisionHandle {
+public:
+    DecisionHandle() noexcept;
+    ~DecisionHandle();
+
+    DecisionHandle(DecisionHandle&&) noexcept;
+    DecisionHandle& operator=(DecisionHandle&&) noexcept;
+
+    DecisionHandle(const DecisionHandle&)            = delete;
+    DecisionHandle& operator=(const DecisionHandle&) = delete;
+
+    [[nodiscard]] explicit operator bool() const noexcept;
+
+    DecisionResult wait(const CancellationView& cancellation = {});
+
+private:
+    class Impl;
+    explicit DecisionHandle(std::unique_ptr<Impl> impl) noexcept;
+    std::unique_ptr<Impl> impl_;
+
+    friend class Engine;
+};
+
+class CompiledDecisionPlan {
+public:
+    CompiledDecisionPlan() noexcept;
+    ~CompiledDecisionPlan();
+
+    CompiledDecisionPlan(const CompiledDecisionPlan&) noexcept;
+    CompiledDecisionPlan& operator=(const CompiledDecisionPlan&) noexcept;
+
+    CompiledDecisionPlan(CompiledDecisionPlan&&) noexcept;
+    CompiledDecisionPlan& operator=(CompiledDecisionPlan&&) noexcept;
+
+    [[nodiscard]] explicit operator bool() const noexcept;
+    [[nodiscard]] bool empty() const noexcept;
+    [[nodiscard]] std::size_t field_count() const noexcept;
+
+private:
+    class Impl;
+
+    explicit CompiledDecisionPlan(
+        std::shared_ptr<const Impl> impl) noexcept;
+
+    std::shared_ptr<const Impl> impl_;
+
+    friend class Engine;
+};
+
 class Engine {
 public:
     explicit Engine(EngineOptions options);
@@ -87,8 +136,58 @@ public:
                               OutputSink* sink                     = nullptr,
                               const CancellationView& cancellation = {});
 
+    // Compile model-agnostic decision semantics once against the active
+    // target/tokenizer. The resulting plan is immutable, cheap to copy and
+    // reusable across requests handled by this exact Engine instance.
+    //
+    // Current finite-decision execution requires
+    // EngineOptions::speculative.backend == SpeculativeBackend::None.
+    [[nodiscard]] CompiledDecisionPlan
+    compile_decision_plan(
+        const StructuredDecisionSchema& schema,
+        const DecisionModelPresentation& presentation) const;
+
+    // Execute an already-compiled structured decision plan.
+    [[nodiscard]] DecisionHandle
+    submit_decision(
+        PreparedPrompt prompt,
+        const CompiledDecisionPlan& plan,
+        std::chrono::steady_clock::time_point pending_deadline = {});
+
+    DecisionResult
+    decide(
+        PreparedPrompt prompt,
+        const CompiledDecisionPlan& plan,
+        const CancellationView& cancellation = {});
+
+    // Convenience typed finite-choice path. Boolean fields use canonical
+    // false/true candidates; Enum values are both semantic values and
+    // model-facing candidate text. Whole-path tokenization may lower a field
+    // to a depth-1 choice or a multi-token trie.
+    [[nodiscard]] DecisionHandle
+    submit_decision(PreparedPrompt prompt, std::vector<DecisionFieldInput> fields,
+                    std::chrono::steady_clock::time_point pending_deadline = {});
+
+    DecisionResult decide(PreparedPrompt prompt, std::vector<DecisionFieldInput> fields,
+                          const CancellationView& cancellation = {});
+
+    // Raw depth-1 token path retained for parity tests, diagnostics and
+    // lower-level callers that already own token IDs. Product code should
+    // prefer DecisionFieldInput or a compiled semantic plan.
+    [[nodiscard]] DecisionHandle
+    submit_decision(PreparedPrompt prompt, std::vector<DecisionFieldSpec> fields,
+                    std::chrono::steady_clock::time_point pending_deadline = {});
+
+    DecisionResult decide(PreparedPrompt prompt, std::vector<DecisionFieldSpec> fields,
+                          const CancellationView& cancellation = {});
+
     [[nodiscard]] const EngineOptions& options() const;
     [[nodiscard]] LoadSummary load_summary() const;
+
+    // Concrete finite-decision scorer resource envelope for this Engine.
+    // This is a workspace bound, not an arbitrary product-level K constant.
+    [[nodiscard]] DecisionCapacitySummary decision_capacity() const;
+
     [[nodiscard]] MemorySummary memory_summary() const;
     [[nodiscard]] RuntimeStats runtime_stats() const;
     [[nodiscard]] MediaCacheSummary media_cache_summary() const;

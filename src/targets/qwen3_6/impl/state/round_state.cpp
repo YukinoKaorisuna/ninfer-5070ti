@@ -65,6 +65,7 @@ RoundStateLayout begin_round_state_layout(LayoutBuilder& builder, const RoundSta
             add_tensor(builder, DType::BF16,
                        {spec.hidden, checked_i32(spec.batch_capacity, "RoundState batch capacity")},
                        "ordinary decode hidden");
+
     }
     layout.token      = add_tensor(builder, DType::I32, {1}, "step token");
     layout.pos        = add_tensor(builder, DType::I32, {1}, "step position");
@@ -110,6 +111,7 @@ OrdinaryDecodeState::OrdinaryDecodeState(DeviceSpan backing,
                             DType::I32, {count});
     logits         = layout.logits.bind(backing);
     hidden         = layout.hidden.bind(backing);
+
 }
 
 void complete_round_state_layout(LayoutBuilder& builder, RoundStateLayout& layout) {

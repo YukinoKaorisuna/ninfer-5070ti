@@ -1046,6 +1046,32 @@ std::uint32_t Frontend::count_tokens(PromptInput input, const PreparationControl
     } catch (const fi::ProcessorError& error) { throw_processor_error(error); }
 }
 
+std::vector<TokenId>
+Frontend::tokenize_decision_text(std::string_view text) const {
+    if (impl_ == nullptr) {
+        throw std::logic_error("frontend is empty");
+    }
+
+    const std::vector<int> encoded =
+        impl_->tokenizer->encode(text);
+
+    std::vector<TokenId> tokens;
+    tokens.reserve(encoded.size());
+
+    for (const int token : encoded) {
+        if (token < 0 ||
+            !impl_->tokenizer->is_valid_token(token)) {
+            throw std::out_of_range(
+                "decision text tokenized outside the checkpoint vocabulary");
+        }
+
+        tokens.push_back(
+            static_cast<TokenId>(token));
+    }
+
+    return tokens;
+}
+
 PromptCapabilities Frontend::prompt_capabilities() const noexcept {
     return impl_ != nullptr ? impl_->chat_template.capabilities() : PromptCapabilities{};
 }

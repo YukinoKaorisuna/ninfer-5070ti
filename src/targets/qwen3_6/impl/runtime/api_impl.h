@@ -211,6 +211,31 @@ SpeculativeStats Program<Variant>::speculative_stats_lane(std::uint32_t lane) co
     return impl_->speculative_stats_lane(lane);
 }
 
+
+template <>
+DecisionProbeResult
+Program<Variant>::decision_probe_lane(
+    std::uint32_t lane,
+    std::span<const TokenId> suffix_tokens,
+    std::span<const TokenId> candidate_tokens) {
+    return impl_->decision_probe_lane(
+        lane,
+        suffix_tokens,
+        candidate_tokens);
+}
+
+template <>
+DecisionWaveProbeResult
+Program<Variant>::decision_probe_wave_lane(
+    std::uint32_t lane,
+    std::span<const TokenId> shared_prefix_tokens,
+    std::span<const DecisionWaveProbeSpec> probes) {
+    return impl_->decision_probe_wave_lane(
+        lane,
+        shared_prefix_tokens,
+        probes);
+}
+
 template <>
 MemorySummary Program<Variant>::memory_summary() const noexcept {
     return impl_->memory_summary();

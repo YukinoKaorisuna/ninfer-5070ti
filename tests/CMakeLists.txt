@@ -66,6 +66,10 @@ ninfer_add_test(ninfer_decode_graph_test SOURCES test_decode_graph.cpp)
 ninfer_add_test(ninfer_tensor_test       SOURCES test_tensor.cpp)
 ninfer_add_test(ninfer_arena_test        SOURCES test_arena.cpp)
 ninfer_add_test(ninfer_request_memory_test SOURCES test_request_memory.cpp)
+ninfer_add_test(ninfer_decision_routing_test
+  SOURCES test_decision_routing.cpp)
+ninfer_add_test(ninfer_decision_resources_test
+  SOURCES test_decision_resources.cpp)
 ninfer_add_test(ninfer_admission_policy_test SOURCES test_admission_policy.cpp)
 ninfer_add_test(ninfer_kv_capacity_test SOURCES test_kv_capacity.cpp)
 ninfer_add_test(ninfer_sampling_defaults_test
@@ -110,6 +114,75 @@ ninfer_add_test(ninfer_qwen3_6_27b_prefix_real_test
   SOURCES targets/qwen3_6_27b/test_engine_prefix_real.cpp
   LIBRARIES ninfer_engine)
 set_tests_properties(ninfer_qwen3_6_27b_prefix_real_test PROPERTIES SKIP_RETURN_CODE 77)
+ninfer_add_test(ninfer_qwen3_8_27b_constrained_decision_real_test
+  SOURCES targets/qwen3_6_27b/test_constrained_decision_real.cpp
+  LIBRARIES ninfer_engine)
+target_include_directories(
+  ninfer_qwen3_8_27b_constrained_decision_real_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_5_9b/export
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_27b/export
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_35b_a3b/export)
+target_link_libraries(
+  ninfer_qwen3_8_27b_constrained_decision_real_test PRIVATE
+  CUDA::cudart)
+set_tests_properties(
+  ninfer_qwen3_8_27b_constrained_decision_real_test
+  PROPERTIES SKIP_RETURN_CODE 77)
+
+ninfer_add_test(ninfer_qwen3_8_27b_engine_decision_real_test
+  SOURCES targets/qwen3_6_27b/test_engine_decision_real.cpp
+  LIBRARIES ninfer_engine)
+set_tests_properties(
+  ninfer_qwen3_8_27b_engine_decision_real_test
+  PROPERTIES SKIP_RETURN_CODE 77)
+
+ninfer_add_test(ninfer_qwen3_8_27b_engine_decision_typed_real_test
+  SOURCES targets/qwen3_6_27b/test_engine_decision_typed_real.cpp
+  LIBRARIES ninfer_engine)
+set_tests_properties(
+  ninfer_qwen3_8_27b_engine_decision_typed_real_test
+  PROPERTIES SKIP_RETURN_CODE 77)
+
+ninfer_add_test(ninfer_qwen3_8_27b_compiled_decision_plan_real_test
+  SOURCES targets/qwen3_6_27b/test_compiled_decision_plan_real.cpp
+  LIBRARIES ninfer_engine)
+ninfer_add_test(ninfer_qwen3_8_27b_dependency_decision_real_test
+  SOURCES targets/qwen3_6_27b/test_dependency_decision_real.cpp
+  LIBRARIES ninfer_engine)
+ninfer_add_test(ninfer_qwen3_8_27b_dependency_wave_real_test
+  SOURCES targets/qwen3_6_27b/test_dependency_wave_real.cpp
+  LIBRARIES ninfer_engine)
+
+ninfer_add_test(ninfer_qwen3_8_27b_trie_decision_real_test
+  SOURCES targets/qwen3_6_27b/test_trie_decision_real.cpp
+  LIBRARIES ninfer_engine)
+set_tests_properties(
+  ninfer_qwen3_8_27b_trie_decision_real_test
+  PROPERTIES SKIP_RETURN_CODE 77)
+
+ninfer_add_test(ninfer_qwen3_8_27b_decision_noninterference_real_test
+  SOURCES targets/qwen3_6_27b/test_decision_noninterference_real.cpp
+  LIBRARIES ninfer_engine)
+set_tests_properties(
+  ninfer_qwen3_8_27b_decision_noninterference_real_test
+  PROPERTIES SKIP_RETURN_CODE 77)
+
+ninfer_add_test(ninfer_qwen3_8_27b_decision_scheduler_isolation_real_test
+  SOURCES targets/qwen3_6_27b/test_decision_scheduler_isolation_real.cpp
+  LIBRARIES ninfer_engine)
+set_tests_properties(
+  ninfer_qwen3_8_27b_decision_scheduler_isolation_real_test
+  PROPERTIES SKIP_RETURN_CODE 77)
+set_tests_properties(
+  ninfer_qwen3_8_27b_compiled_decision_plan_real_test
+  PROPERTIES SKIP_RETURN_CODE 77)
+set_tests_properties(
+  ninfer_qwen3_8_27b_dependency_decision_real_test
+  PROPERTIES SKIP_RETURN_CODE 77)
+set_tests_properties(
+  ninfer_qwen3_8_27b_dependency_wave_real_test
+  PROPERTIES SKIP_RETURN_CODE 77)
 ninfer_add_test(ninfer_qwen3_6_27b_load_plan_test
   SOURCES targets/qwen3_6_27b/test_load_plan.cpp
   NEEDS_SOURCE_DIR
@@ -230,6 +303,9 @@ ninfer_add_op_test(ninfer_context_kv_materialize_test
   LIBRARIES ninfer_ops)
 ninfer_add_op_test(ninfer_candidate_selector_test
   SOURCES ops/test_candidate_selector.cpp
+  LIBRARIES ninfer_ops)
+ninfer_add_op_test(ninfer_constrained_choice_test
+  SOURCES ops/test_constrained_choice.cpp
   LIBRARIES ninfer_ops)
 ninfer_add_op_test(ninfer_prepare_masked_block_test
   SOURCES ops/test_prepare_masked_block.cpp

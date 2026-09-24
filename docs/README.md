@@ -36,12 +36,17 @@ This is the canonical validated artifact for the RTX 5080 true-128K profile. Run
 
 | Document | Purpose |
 |---|---|
+| [Constrained decisions](CONSTRAINED_DECISIONS_USAGE.md) | current C++ finite-decision API, multi-token tries, dependencies, result semantics and backend limitations |
 | [CLI](cli.md) | text, chat-history, image/video input, output streams, sampling, MTP and common runtime options |
 | [HTTP serving](serving.md) | OpenAI Responses/Chat Completions, Anthropic Messages, state, streaming, token counting, authentication, tools and multimodal input |
 | [Performance](performance.md) | general performance results and reproduction commands |
 | [CLI examples](../examples/cli/) | committed text, multimodal, thinking, long-decode and long-context inputs |
 
 The executable `--help` output remains the exact source for command-line option spelling and defaults.
+
+Architecture/history for constrained decisions is recorded in
+[CONSTRAINED_DECISIONS.md](CONSTRAINED_DECISIONS.md) and the linked V2 ADR and
+milestone documents. Use the current usage guide above for implemented behavior.
 
 ## Other upstream/community model artifacts
 

@@ -180,6 +180,11 @@ void capture_ordinary_decode_batch(OrdinaryBatchContext& state, std::int32_t bat
 void ordinary_decode_batch(OrdinaryBatchContext& state, std::int32_t batch_size,
                            ops::GqaExecutionEnvelope envelope, DecodeGraphExecutable* executable);
 
+// Executes the ordinary target traversal without sampling or publishing
+// continuation hidden. Used by constrained-decision suffix execution.
+void ordinary_forward_batch(OrdinaryBatchContext& state, std::int32_t batch_size,
+                            ops::GqaExecutionEnvelope envelope);
+
 // Executes one exact-B MTP verification/alignment/proposal transaction. Each row may carry a
 // different current and next proposal extent while the model traversal remains batched.
 void capture_mtp_decode_batch(MtpBatchContext& state, std::int32_t batch_size, std::uint32_t k,

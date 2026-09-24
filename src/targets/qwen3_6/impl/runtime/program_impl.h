@@ -2,7 +2,9 @@
 #include "targets/qwen3_6/impl/runtime/program.h"
 
 #include "targets/qwen3_6/impl/runtime/schedule.h"
+#include "runtime/contract/decision_resources.h"
 #include "ninfer/ops/gdn_replay.h"
+#include "ninfer/ops/constrained_choice.h"
 #include "ninfer/ops/prepare_ragged_prefix.h"
 #include "ninfer/ops/scatter.h"
 #include "ninfer/ops/speculative_round.h"
@@ -1167,6 +1169,993 @@ GenerationTimings ProgramImplCore::generation_timings_lane(std::uint32_t lane) c
 
 SpeculativeStats ProgramImplCore::speculative_stats_lane(std::uint32_t lane) const noexcept {
     return lane < max_concurrency ? requests[lane].speculative_stats : SpeculativeStats{};
+
+}
+
+DecisionProbeResult
+ProgramImplCore::score_decision_candidates(
+    std::span<const TokenId> candidate_tokens) {
+
+    if (!io.ordinary) {
+        throw std::logic_error(
+            "decision scorer requires the ordinary target backend");
+    }
+
+    if (candidate_tokens.size() < 2) {
+        throw std::invalid_argument(
+            "decision scorer requires at least two candidates");
+    }
+
+    if (candidate_tokens.size() >
+        static_cast<std::size_t>(
+            std::numeric_limits<std::int32_t>::max())) {
+
+        throw std::length_error(
+            "decision scorer candidate count exceeds int32 tensor representation");
+    }
+
+    const runtime::DecisionScorerWorkspaceProjection workspace =
+        runtime::project_decision_scorer_workspace(
+            candidate_tokens.size(),
+            work.capacity());
+
+    if (!workspace.fits) {
+        throw std::length_error(
+            "decision scorer resource limit exceeded: requested_K=" +
+            std::to_string(
+                workspace.requested_candidates) +
+            " required_bytes=" +
+            std::to_string(
+                workspace.required_bytes) +
+            " available_bytes=" +
+            std::to_string(
+                workspace.available_bytes) +
+            " workspace_maximum_K=" +
+            std::to_string(
+                workspace.maximum_candidates));
+    }
+
+    const std::int32_t k =
+        static_cast<std::int32_t>(
+            candidate_tokens.size());
+
+    // Decision scoring is terminal with respect to the preceding model
+    // traversal. Reuse the ordinary runtime workspace rather than reserving
+    // a fixed persistent candidate domain.
+    work.reset();
+
+    try {
+        Tensor ids =
+            work.alloc(
+                DType::I32,
+                {k, 1});
+
+        Tensor probabilities =
+            work.alloc(
+                DType::FP32,
+                {k, 1});
+
+        Tensor winners =
+            work.alloc(
+                DType::I32,
+                {1});
+
+        mark_workspace_usage(
+            work.used());
+
+        CUDA_CHECK(
+            cudaMemcpyAsync(
+                ids.data,
+                candidate_tokens.data(),
+                candidate_tokens.size() *
+                    sizeof(TokenId),
+                cudaMemcpyHostToDevice,
+                device.stream));
+
+        Tensor logits =
+            io.ordinary->logits
+                .slice(1, 0, 1);
+
+        ops::constrained_choice(
+            logits,
+            ids,
+            probabilities,
+            winners,
+            TextConfig::token_domain,
+            device.stream);
+
+        DecisionProbeResult result;
+
+        result.probabilities.resize(
+            candidate_tokens.size());
+
+        CUDA_CHECK(
+            cudaMemcpyAsync(
+                result.probabilities.data(),
+                probabilities.data,
+                result.probabilities.size() *
+                    sizeof(float),
+                cudaMemcpyDeviceToHost,
+                device.stream));
+
+        CUDA_CHECK(
+            cudaMemcpyAsync(
+                &result.winner_index,
+                winners.data,
+                sizeof(result.winner_index),
+                cudaMemcpyDeviceToHost,
+                device.stream));
+
+        device.synchronize();
+
+        if (result.winner_index < 0 ||
+            result.winner_index >= k) {
+
+            throw std::runtime_error(
+                "decision scorer returned an invalid winner");
+        }
+
+        result.winner_token =
+            candidate_tokens[
+                static_cast<std::size_t>(
+                    result.winner_index)];
+
+        work.reset();
+
+        return result;
+
+    } catch (...) {
+        try {
+            device.synchronize();
+        } catch (...) {}
+
+        work.reset();
+
+        throw;
+    }
+}
+
+
+DecisionProbeResult
+ProgramImplCore::decision_probe_lane(
+    std::uint32_t lane,
+    std::span<const TokenId> suffix_tokens,
+    std::span<const TokenId> candidate_tokens) {
+
+    // M1-C1 raw-token domain hardening.
+    // decision_probe_lane indexes embeddings/logits directly, so reject
+    // malformed internal token IDs before any CUDA access.
+    for (const TokenId token : suffix_tokens) {
+        if (token < 0 ||
+            static_cast<std::uint32_t>(token) >= TextConfig::token_domain) {
+            throw std::out_of_range(
+                "decision suffix token is outside the model token domain");
+        }
+    }
+
+    for (const TokenId token : candidate_tokens) {
+        if (token < 0 ||
+            static_cast<std::uint32_t>(token) >= TextConfig::token_domain) {
+            throw std::out_of_range(
+                "decision candidate token is outside the model token domain");
+        }
+    }
+
+    if (speculative_backend != SpeculativeBackend::None || !io.ordinary) {
+        throw std::logic_error(
+            "constrained decision execution requires the ordinary target backend (SpeculativeBackend::None)");
+    }
+
+    if (lane >= max_concurrency) {
+        throw std::out_of_range("decision probe lane is out of range");
+    }
+
+    if (suffix_tokens.empty()) {
+        throw std::invalid_argument(
+            "decision probe suffix must contain at least one token");
+    }
+
+    if (candidate_tokens.size() < 2) {
+        throw std::invalid_argument(
+            "decision probe requires at least two candidates");
+    }
+
+    for (std::size_t i = 0; i < candidate_tokens.size(); ++i) {
+        const TokenId token = candidate_tokens[i];
+
+        if (token < 0 || token >= TextConfig::token_domain) {
+            throw std::invalid_argument(
+                "decision probe candidate token is outside the licensed domain");
+        }
+
+        if (std::find(candidate_tokens.begin(),
+                      candidate_tokens.begin() +
+                          static_cast<std::ptrdiff_t>(i),
+                      token) !=
+            candidate_tokens.begin() +
+                static_cast<std::ptrdiff_t>(i)) {
+            throw std::invalid_argument(
+                "decision probe candidate tokens must be distinct");
+        }
+    }
+
+    SequenceState& sequence = sequences[lane];
+    RequestControl& request = requests[lane];
+
+    if (!sequence.retained ||
+        request.lifecycle != Lifecycle::Complete ||
+        !sequence.kv ||
+        sequence.kv->text.bound_row() >= 0 ||
+        sequence.execution_frontier == 0 ||
+        sequence.execution_frontier >= capacity ||
+        sequence.text_kv_valid != sequence.execution_frontier ||
+        sequence.ledger_frontier != sequence.execution_frontier + 1 ||
+        sequence.ledger.size() != sequence.ledger_frontier ||
+        sequence.prefix_identity.size() != sequence.ledger_frontier) {
+        throw std::logic_error(
+            "decision probe requires a complete retained ordinary frontier");
+    }
+
+    const std::uint32_t base = sequence.execution_frontier;
+
+    if (suffix_tokens.size() >
+        static_cast<std::size_t>(capacity - base)) {
+        throw std::invalid_argument(
+            "decision probe suffix exceeds model capacity");
+    }
+
+    const std::uint32_t final_frontier =
+        base + static_cast<std::uint32_t>(suffix_tokens.size());
+
+    const std::uint32_t required_pages =
+        final_frontier == 0
+            ? 0U
+            : 1U +
+                  (final_frontier - 1U) /
+                      static_cast<std::uint32_t>(kPagedKVPageSize);
+
+    const std::uint32_t original_entitlement =
+        sequence.kv->text.page_entitlement();
+
+    if (required_pages > decoder->text_kv.pool().logical_page_capacity()) {
+        throw std::invalid_argument(
+            "decision probe requires more KV pages than the pool permits");
+    }
+
+    if (!decision_frontier_state_host) {
+        decision_frontier_state_host.emplace(
+            decoder->linear_attention.slot_bytes());
+    }
+
+    const std::int32_t state_slot =
+        LinearStateSlots::current_state_slot(
+            sequence.lane, max_concurrency);
+
+    DecisionProbeResult result;
+    result.frontier      = base;
+    result.suffix_tokens =
+        static_cast<std::uint32_t>(suffix_tokens.size());
+
+    bool kv_bound = false;
+
+    const auto restore_frontier = [&]() {
+        const auto restore_started = Clock::now();
+
+        try {
+            decoder->linear_attention.copy_slot_from_host(
+                decision_frontier_state_host->data(),
+                state_slot,
+                device.stream);
+
+            trim_sequence_kv(sequence, base, 0);
+
+            if (sequence.kv->text.page_entitlement() !=
+                original_entitlement) {
+                resize_sequence_kv_entitlement(
+                    sequence,
+                    original_entitlement,
+                    0);
+            }
+
+            if (kv_bound) {
+                unbind_sequence_kv(sequence);
+                kv_bound = false;
+            }
+
+            device.synchronize();
+        } catch (...) {
+            if (kv_bound) {
+                try {
+                    unbind_sequence_kv(sequence);
+                } catch (...) {}
+                kv_bound = false;
+            }
+            throw;
+        }
+
+        result.restore_seconds =
+            std::chrono::duration<double>(
+                Clock::now() - restore_started)
+                .count();
+    };
+
+    try {
+        const auto capture_started = Clock::now();
+
+        decoder->linear_attention.copy_slot_to_host(
+            state_slot,
+            decision_frontier_state_host->data(),
+            device.stream);
+
+        device.synchronize();
+
+        result.capture_seconds =
+            std::chrono::duration<double>(
+                Clock::now() - capture_started)
+                .count();
+
+        if (required_pages > original_entitlement) {
+            resize_sequence_kv_entitlement(
+                sequence,
+                required_pages,
+                0);
+        }
+
+        bind_sequence_kv(sequence);
+        kv_bound = true;
+
+        const auto suffix_started = Clock::now();
+
+        for (std::size_t index = 0;
+             index < suffix_tokens.size();
+             ++index) {
+
+            const std::uint32_t position =
+                base + static_cast<std::uint32_t>(index);
+
+            *ordinary_host_ingress = {};
+
+            ordinary_host_ingress->tokens[0] =
+                suffix_tokens[index];
+            ordinary_host_ingress->cache_positions[0] =
+                checked_i32(position,
+                            "decision probe cache position");
+            ordinary_host_ingress->rope_positions[0] =
+                checked_i32(position,
+                            "decision probe RoPE position") +
+                sequence.rope_delta;
+            ordinary_host_ingress->text_kv_table_rows[0] =
+                sequence.kv->text.bound_row();
+            ordinary_host_ingress->lanes[0] =
+                static_cast<std::int32_t>(sequence.lane);
+
+            materialize_sequence_kv(
+                sequence,
+                position + 1U,
+                0);
+
+            schedule::OrdinaryBatchContext schedule_state{
+                {device,
+                 model,
+                 work,
+                 decoder->linear_attention,
+                 replay_records ? &*replay_records : nullptr,
+                 replay_host_records
+                     ? &*replay_host_records
+                     : nullptr,
+                 device.load_stream,
+                 &replay_ready_events,
+                 &replay_free_events,
+                 io,
+                 prefill_hidden,
+                 prefill_chunk,
+                 proposal_head},
+                decoder->text_kv,
+                *io.ordinary,
+                *ordinary_host_ingress,
+                *ordinary_host_egress,
+                tail_hidden_store};
+
+            mark_workspace_usage(
+                workspace_plan.ordinary_round);
+
+            schedule::ordinary_forward_batch(
+                schedule_state,
+                1,
+                ops::GqaExecutionEnvelope{
+                    position + 1U,
+                    position + 1U});
+
+            // The pinned ingress storage is reused for the next token, so
+            // complete this one-token traversal before rewriting it.
+            device.synchronize();
+        }
+
+        result.suffix_seconds =
+            std::chrono::duration<double>(
+                Clock::now() - suffix_started)
+                .count();
+
+        const auto score_started =
+            Clock::now();
+
+        DecisionProbeResult scored =
+            score_decision_candidates(
+                candidate_tokens);
+
+        result.probabilities =
+            std::move(
+                scored.probabilities);
+
+        result.winner_index =
+            scored.winner_index;
+
+        result.winner_token =
+            scored.winner_token;
+
+        result.score_seconds =
+            std::chrono::duration<double>(
+                Clock::now() - score_started)
+                .count();
+
+        restore_frontier();
+
+        return result;
+
+    } catch (...) {
+        try {
+            restore_frontier();
+        } catch (...) {}
+        throw;
+    }
+}
+
+
+qwen3_6::DecisionWaveProbeResult
+ProgramImplCore::decision_probe_wave_lane(
+    std::uint32_t lane,
+    std::span<const TokenId> shared_prefix_tokens,
+    std::span<const qwen3_6::DecisionWaveProbeSpec> probes) {
+
+    if (speculative_backend != SpeculativeBackend::None ||
+        !io.ordinary) {
+
+        throw std::logic_error(
+            "shared decision wave requires the ordinary target backend (SpeculativeBackend::None)");
+    }
+
+    if (lane >= max_concurrency) {
+        throw std::out_of_range(
+            "shared decision wave lane is out of range");
+    }
+
+    if (shared_prefix_tokens.empty()) {
+        throw std::invalid_argument(
+            "shared decision wave requires a non-empty shared prefix");
+    }
+
+    if (probes.size() < 2) {
+        throw std::invalid_argument(
+            "shared decision wave requires at least two sibling probes");
+    }
+
+    const auto validate_token =
+        [](TokenId token,
+           const char* message) {
+
+        if (token < 0 ||
+            static_cast<std::uint32_t>(token) >=
+                TextConfig::token_domain) {
+
+            throw std::out_of_range(
+                message);
+        }
+    };
+
+    for (const TokenId token :
+         shared_prefix_tokens) {
+
+        validate_token(
+            token,
+            "shared decision prefix token is outside the model token domain");
+    }
+
+    for (const auto& probe :
+         probes) {
+
+        if (probe.suffix_tokens.empty()) {
+            throw std::invalid_argument(
+                "shared decision sibling residual suffix must not be empty");
+        }
+
+        if (probe.candidate_tokens.size() < 2) {
+            throw std::invalid_argument(
+                "shared decision sibling requires at least two candidates");
+        }
+
+        for (const TokenId token :
+             probe.suffix_tokens) {
+
+            validate_token(
+                token,
+                "shared decision residual token is outside the model token domain");
+        }
+
+        for (std::size_t i = 0;
+             i < probe.candidate_tokens.size();
+             ++i) {
+
+            const TokenId token =
+                probe.candidate_tokens[i];
+
+            validate_token(
+                token,
+                "shared decision candidate token is outside the model token domain");
+
+            if (std::find(
+                    probe.candidate_tokens.begin(),
+                    probe.candidate_tokens.begin() +
+                        static_cast<std::ptrdiff_t>(i),
+                    token) !=
+                probe.candidate_tokens.begin() +
+                    static_cast<std::ptrdiff_t>(i)) {
+
+                throw std::invalid_argument(
+                    "shared decision candidate tokens must be distinct");
+            }
+        }
+    }
+
+    SequenceState& sequence =
+        sequences[lane];
+
+    RequestControl& request =
+        requests[lane];
+
+    if (!sequence.retained ||
+        request.lifecycle != Lifecycle::Complete ||
+        !sequence.kv ||
+        sequence.kv->text.bound_row() >= 0 ||
+        sequence.execution_frontier == 0 ||
+        sequence.execution_frontier >= capacity ||
+        sequence.text_kv_valid !=
+            sequence.execution_frontier ||
+        sequence.ledger_frontier !=
+            sequence.execution_frontier + 1 ||
+        sequence.ledger.size() !=
+            sequence.ledger_frontier ||
+        sequence.prefix_identity.size() !=
+            sequence.ledger_frontier) {
+
+        throw std::logic_error(
+            "shared decision wave requires a complete retained ordinary frontier");
+    }
+
+    const std::uint32_t base =
+        sequence.execution_frontier;
+
+    if (shared_prefix_tokens.size() >
+        static_cast<std::size_t>(
+            capacity - base)) {
+
+        throw std::invalid_argument(
+            "shared decision prefix exceeds model capacity");
+    }
+
+    const std::uint32_t temporary_frontier =
+        base +
+        static_cast<std::uint32_t>(
+            shared_prefix_tokens.size());
+
+    std::uint32_t maximum_frontier =
+        temporary_frontier;
+
+    std::uint64_t residual_work = 0;
+    std::uint64_t replay_work = 0;
+
+    for (const auto& probe :
+         probes) {
+
+        if (probe.suffix_tokens.size() >
+            static_cast<std::size_t>(
+                capacity -
+                temporary_frontier)) {
+
+            throw std::invalid_argument(
+                "shared decision residual suffix exceeds model capacity");
+        }
+
+        maximum_frontier =
+            std::max(
+                maximum_frontier,
+                temporary_frontier +
+                    static_cast<std::uint32_t>(
+                        probe.suffix_tokens.size()));
+
+        residual_work +=
+            probe.suffix_tokens.size();
+
+        replay_work +=
+            shared_prefix_tokens.size() +
+            probe.suffix_tokens.size();
+    }
+
+    const std::uint64_t executed_work =
+        shared_prefix_tokens.size() +
+        residual_work;
+
+    if (executed_work >
+            std::numeric_limits<std::uint32_t>::max() ||
+        replay_work >
+            std::numeric_limits<std::uint32_t>::max()) {
+
+        throw std::overflow_error(
+            "shared decision wave work accounting overflow");
+    }
+
+    const std::uint32_t required_pages =
+        maximum_frontier == 0
+            ? 0U
+            : 1U +
+                  (maximum_frontier - 1U) /
+                      static_cast<std::uint32_t>(
+                          kPagedKVPageSize);
+
+    const std::uint32_t original_entitlement =
+        sequence.kv->text.page_entitlement();
+
+    if (required_pages >
+        decoder->text_kv.pool()
+            .logical_page_capacity()) {
+
+        throw std::invalid_argument(
+            "shared decision wave requires more KV pages than the pool permits");
+    }
+
+    if (!decision_frontier_state_host) {
+        decision_frontier_state_host.emplace(
+            decoder->linear_attention
+                .slot_bytes());
+    }
+
+    if (!decision_wave_frontier_state_host) {
+        decision_wave_frontier_state_host.emplace(
+            decoder->linear_attention
+                .slot_bytes());
+    }
+
+    const std::int32_t state_slot =
+        LinearStateSlots::current_state_slot(
+            sequence.lane,
+            max_concurrency);
+
+    qwen3_6::DecisionWaveProbeResult result;
+
+    result.frontier = base;
+
+    result.shared_prefix_tokens =
+        static_cast<std::uint32_t>(
+            shared_prefix_tokens.size());
+
+    result.executed_suffix_tokens =
+        static_cast<std::uint32_t>(
+            executed_work);
+
+    result.replay_equivalent_suffix_tokens =
+        static_cast<std::uint32_t>(
+            replay_work);
+
+    result.probes.reserve(
+        probes.size());
+
+    bool kv_bound = false;
+    bool outer_captured = false;
+
+    const auto restore_outer =
+        [&]() {
+
+        if (!outer_captured) {
+            return;
+        }
+
+        const auto started =
+            Clock::now();
+
+        try {
+            decoder->linear_attention
+                .copy_slot_from_host(
+                    decision_frontier_state_host
+                        ->data(),
+                    state_slot,
+                    device.stream);
+
+            trim_sequence_kv(
+                sequence,
+                base,
+                0);
+
+            if (sequence.kv->text
+                    .page_entitlement() !=
+                original_entitlement) {
+
+                resize_sequence_kv_entitlement(
+                    sequence,
+                    original_entitlement,
+                    0);
+            }
+
+            if (kv_bound) {
+                unbind_sequence_kv(
+                    sequence);
+
+                kv_bound = false;
+            }
+
+            device.synchronize();
+
+            outer_captured = false;
+
+        } catch (...) {
+            if (kv_bound) {
+                try {
+                    unbind_sequence_kv(
+                        sequence);
+                } catch (...) {}
+
+                kv_bound = false;
+            }
+
+            throw;
+        }
+
+        result.restore_seconds =
+            std::chrono::duration<double>(
+                Clock::now() - started)
+                .count();
+    };
+
+    const auto forward_tokens =
+        [&](std::span<const TokenId> tokens,
+            std::uint32_t start_position) {
+
+        for (std::size_t index = 0;
+             index < tokens.size();
+             ++index) {
+
+            const std::uint32_t position =
+                start_position +
+                static_cast<std::uint32_t>(
+                    index);
+
+            *ordinary_host_ingress = {};
+
+            ordinary_host_ingress
+                ->tokens[0] =
+                    tokens[index];
+
+            ordinary_host_ingress
+                ->cache_positions[0] =
+                    checked_i32(
+                        position,
+                        "shared decision cache position");
+
+            ordinary_host_ingress
+                ->rope_positions[0] =
+                    checked_i32(
+                        position,
+                        "shared decision RoPE position") +
+                    sequence.rope_delta;
+
+            ordinary_host_ingress
+                ->text_kv_table_rows[0] =
+                    sequence.kv->text
+                        .bound_row();
+
+            ordinary_host_ingress
+                ->lanes[0] =
+                    static_cast<std::int32_t>(
+                        sequence.lane);
+
+            materialize_sequence_kv(
+                sequence,
+                position + 1U,
+                0);
+
+            schedule::OrdinaryBatchContext
+                schedule_state{
+                    {device,
+                     model,
+                     work,
+                     decoder->linear_attention,
+                     replay_records
+                         ? &*replay_records
+                         : nullptr,
+                     replay_host_records
+                         ? &*replay_host_records
+                         : nullptr,
+                     device.load_stream,
+                     &replay_ready_events,
+                     &replay_free_events,
+                     io,
+                     prefill_hidden,
+                     prefill_chunk,
+                     proposal_head},
+                    decoder->text_kv,
+                    *io.ordinary,
+                    *ordinary_host_ingress,
+                    *ordinary_host_egress,
+                    tail_hidden_store};
+
+            mark_workspace_usage(
+                workspace_plan
+                    .ordinary_round);
+
+            schedule::ordinary_forward_batch(
+                schedule_state,
+                1,
+                ops::GqaExecutionEnvelope{
+                    position + 1U,
+                    position + 1U});
+
+            device.synchronize();
+        }
+    };
+
+    const auto score_current =
+        [&](std::span<const TokenId>
+                candidate_tokens)
+            -> qwen3_6::DecisionProbeResult {
+
+        return score_decision_candidates(
+            candidate_tokens);
+    };
+
+    try {
+        const auto capture_started =
+            Clock::now();
+
+        decoder->linear_attention
+            .copy_slot_to_host(
+                state_slot,
+                decision_frontier_state_host
+                    ->data(),
+                device.stream);
+
+        device.synchronize();
+
+        outer_captured = true;
+
+        result.capture_seconds =
+            std::chrono::duration<double>(
+                Clock::now() -
+                capture_started)
+                .count();
+
+        if (required_pages >
+            original_entitlement) {
+
+            resize_sequence_kv_entitlement(
+                sequence,
+                required_pages,
+                0);
+        }
+
+        bind_sequence_kv(
+            sequence);
+
+        kv_bound = true;
+
+        const auto shared_started =
+            Clock::now();
+
+        forward_tokens(
+            shared_prefix_tokens,
+            base);
+
+        result.shared_prefix_seconds =
+            std::chrono::duration<double>(
+                Clock::now() -
+                shared_started)
+                .count();
+
+        decoder->linear_attention
+            .copy_slot_to_host(
+                state_slot,
+                decision_wave_frontier_state_host
+                    ->data(),
+                device.stream);
+
+        device.synchronize();
+
+        for (const auto& probe :
+             probes) {
+
+            qwen3_6::DecisionProbeResult
+                child;
+
+            child.frontier =
+                base;
+
+            child.suffix_tokens =
+                static_cast<std::uint32_t>(
+                    shared_prefix_tokens.size() +
+                    probe.suffix_tokens.size());
+
+            const auto suffix_started =
+                Clock::now();
+
+            forward_tokens(
+                probe.suffix_tokens,
+                temporary_frontier);
+
+            child.suffix_seconds =
+                std::chrono::duration<double>(
+                    Clock::now() -
+                    suffix_started)
+                    .count();
+
+            const auto score_started =
+                Clock::now();
+
+            qwen3_6::DecisionProbeResult
+                scored =
+                    score_current(
+                        probe.candidate_tokens);
+
+            child.probabilities =
+                std::move(
+                    scored.probabilities);
+
+            child.winner_index =
+                scored.winner_index;
+
+            child.winner_token =
+                scored.winner_token;
+
+            child.score_seconds =
+                std::chrono::duration<double>(
+                    Clock::now() -
+                    score_started)
+                    .count();
+
+            const auto inner_restore_started =
+                Clock::now();
+
+            decoder->linear_attention
+                .copy_slot_from_host(
+                    decision_wave_frontier_state_host
+                        ->data(),
+                    state_slot,
+                    device.stream);
+
+            trim_sequence_kv(
+                sequence,
+                temporary_frontier,
+                0);
+
+            device.synchronize();
+
+            child.restore_seconds =
+                std::chrono::duration<double>(
+                    Clock::now() -
+                    inner_restore_started)
+                    .count();
+
+            result.probes.push_back(
+                std::move(child));
+        }
+
+        restore_outer();
+
+        return result;
+
+    } catch (...) {
+        try {
+            restore_outer();
+        } catch (...) {}
+
+        throw;
+    }
 }
 
 void ProgramImplCore::clear_lane(SequenceState& sequence, RequestControl& request) noexcept {

@@ -61,4 +61,65 @@ void ordinary_decode_batch(OrdinaryBatchContext& state, std::int32_t batch_size,
     run_prepared(state, executable, body);
 }
 
+
+void ordinary_forward_batch(OrdinaryBatchContext& state, std::int32_t batch_size,
+                            ops::GqaExecutionEnvelope envelope) {
+    if (batch_size <= 0 ||
+        batch_size > static_cast<std::int32_t>(kMaximumConcurrency)) {
+        throw std::logic_error(
+            "ordinary decision forward batch state is incomplete");
+    }
+
+    qwen3_6::OrdinaryDecodeState& ordinary = state.frame;
+
+    CUDA_CHECK(cudaMemcpyAsync(
+        ordinary.ingress.data,
+        &state.host_ingress,
+        sizeof(qwen3_6::OrdinaryDecodeIngress),
+        cudaMemcpyHostToDevice,
+        state.execution.device.stream));
+
+    TextContext card(
+        state.execution.device,
+        state.execution.model,
+        state.execution.work,
+        {},
+        state.execution.linear_attention,
+        state.execution.io,
+        state.execution.prefill_hidden,
+        state.execution.prefill_chunk,
+        0,
+        {},
+        &state.text_cache);
+
+    Tensor tokens =
+        ordinary.tokens.slice(0, 0, batch_size);
+    Tensor cache_positions =
+        ordinary.cache_positions.slice(0, 0, batch_size);
+    Tensor rope_positions =
+        ordinary.rope_positions.slice(0, 0, batch_size);
+    Tensor kv_rows =
+        ordinary.text_kv_table_rows.slice(0, 0, batch_size);
+    Tensor lanes =
+        ordinary.lanes.slice(0, 0, batch_size);
+    Tensor hidden =
+        ordinary.hidden.slice(1, 0, batch_size);
+    Tensor logits =
+        ordinary.logits.slice(1, 0, batch_size);
+
+    card.ordinary_decode_batch(
+        tokens,
+        cache_positions,
+        rope_positions,
+        kv_rows,
+        lanes,
+        envelope,
+        hidden,
+        logits);
+
+    // Intentionally no scatter() and no sample().
+    // The retained sequence's published tail hidden and token ledger remain
+    // untouched by decision probing.
+}
+
 } // namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS::schedule

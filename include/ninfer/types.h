@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace ninfer {
@@ -420,6 +421,245 @@ struct GenerationResult {
     PrefixReusePath prefix_reuse_path  = PrefixReusePath::FullReset;
     GenerationTimings timings;
     SpeculativeStats speculative;
+};
+
+// Finite constrained-decision contract.
+
+enum class DecisionFieldType : std::uint8_t {
+    Boolean,
+    Enum,
+};
+
+// Convenience product-facing finite-choice input.
+//
+// Boolean fields use the canonical semantic/model-facing values "false" and
+// "true" and therefore do not require caller-provided choices.
+//
+// Enum values are both caller-visible semantic values and model-facing
+// candidate text. The Engine tokenizes each complete suffix + candidate path
+// and may lower the field to either a depth-1 choice or a multi-token trie.
+// Use StructuredDecisionSchema + DecisionModelPresentation when semantic values
+// and model-facing candidate text must differ or dependencies are required.
+struct DecisionFieldInput {
+    std::string name;
+    DecisionFieldType type = DecisionFieldType::Enum;
+    std::string suffix;
+    std::vector<std::string> values;
+};
+
+// Model-agnostic semantic execution values.
+//
+// Semantic meaning is intentionally independent from model-facing text,
+// tokenization and output serialization.
+enum class SemanticValueKind : std::uint8_t {
+    Boolean,
+    Integer,
+    Number,
+    String,
+};
+
+class SemanticValue final {
+public:
+    [[nodiscard]] static SemanticValue boolean(bool value) noexcept;
+    [[nodiscard]] static SemanticValue integer(std::int64_t value) noexcept;
+    [[nodiscard]] static SemanticValue number(double value);
+    [[nodiscard]] static SemanticValue string(std::string value);
+
+    [[nodiscard]] SemanticValueKind kind() const noexcept;
+
+    [[nodiscard]] bool boolean_value() const;
+    [[nodiscard]] std::int64_t integer_value() const;
+    [[nodiscard]] double number_value() const;
+    [[nodiscard]] const std::string& string_value() const;
+
+    friend bool operator==(const SemanticValue& lhs,
+                           const SemanticValue& rhs) noexcept;
+
+private:
+    using Storage =
+        std::variant<bool, std::int64_t, double, std::string>;
+
+    explicit SemanticValue(Storage value);
+
+    Storage value_;
+};
+
+struct SemanticNodeId {
+    std::uint32_t value = 0;
+
+    [[nodiscard]] constexpr bool valid() const noexcept {
+        return value != 0;
+    }
+
+    friend constexpr bool operator==(SemanticNodeId,
+                                     SemanticNodeId) noexcept = default;
+};
+
+// Semantic finite domain. Backend limits such as K <= 16, executable-prefix
+// requirements, and target-runtime constraints deliberately do not belong to
+// this type.
+struct FiniteChoice {
+    std::string label;
+    std::vector<SemanticValue> choices;
+};
+
+// Model-facing representation of one finite semantic node. These strings are
+// presentation metadata rather than semantic values or output serialization.
+struct FiniteChoicePresentation {
+    std::string continuation_prefix;
+    std::vector<std::string> candidate_texts;
+};
+
+// Model-facing realization of one semantic dependency edge.
+//
+// This is presentation metadata rather than semantic meaning and contains
+// no tokenizer/backend state.
+struct DependencyConditioningPresentation {
+    std::vector<std::string> selected_choice_texts;
+};
+
+// Opaque semantic graph. The current compiled backend supports independent
+// FiniteChoice nodes plus one-root direct fan-out dependencies. The semantic
+// graph itself validates acyclic dependency edges independently of those
+// backend topology limits.
+class StructuredDecisionSchema {
+public:
+    StructuredDecisionSchema();
+    ~StructuredDecisionSchema();
+
+    StructuredDecisionSchema(const StructuredDecisionSchema&);
+    StructuredDecisionSchema&
+    operator=(const StructuredDecisionSchema&);
+
+    StructuredDecisionSchema(StructuredDecisionSchema&&) noexcept;
+    StructuredDecisionSchema&
+    operator=(StructuredDecisionSchema&&) noexcept;
+
+    [[nodiscard]] SemanticNodeId
+    add_finite_choice(FiniteChoice choice);
+
+    void add_dependency(
+        SemanticNodeId parent,
+        SemanticNodeId child);
+
+    [[nodiscard]] bool empty() const noexcept;
+    [[nodiscard]] std::size_t node_count() const noexcept;
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> impl_;
+
+    friend class Engine;
+};
+
+// Model presentation is kept separate from the semantic graph so one semantic
+// contract can later be compiled for different model/chat-template surfaces.
+class DecisionModelPresentation {
+public:
+    DecisionModelPresentation();
+    ~DecisionModelPresentation();
+
+    DecisionModelPresentation(const DecisionModelPresentation&);
+    DecisionModelPresentation&
+    operator=(const DecisionModelPresentation&);
+
+    DecisionModelPresentation(DecisionModelPresentation&&) noexcept;
+    DecisionModelPresentation&
+    operator=(DecisionModelPresentation&&) noexcept;
+
+    void set_finite_choice(
+        SemanticNodeId node,
+        FiniteChoicePresentation presentation);
+
+    void set_dependency_conditioning(
+        SemanticNodeId parent,
+        SemanticNodeId child,
+        DependencyConditioningPresentation presentation);
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> impl_;
+
+    friend class Engine;
+};
+
+// Low-level/already-tokenized depth-1 finite-choice form consumed by the
+// executor. This remains public for parity tests, diagnostics, and callers that
+// already own token IDs; multi-token trie lowering is private to compiled
+// semantic plans.
+//
+// candidate_values is optional for raw-token callers. When populated it maps
+// winner_index back to a caller-visible value.
+struct DecisionFieldSpec {
+    std::string name;
+    std::vector<TokenId> suffix_tokens;
+    std::vector<TokenId> candidate_tokens;
+
+    DecisionFieldType type = DecisionFieldType::Enum;
+    std::vector<std::string> candidate_values;
+};
+
+struct DecisionFieldResult {
+    std::string name;
+
+    DecisionFieldType type = DecisionFieldType::Enum;
+    std::vector<std::string> candidate_values;
+    std::string selected_value;
+
+    // Depth-1 candidate token IDs. Empty for a multi-token trie result.
+    std::vector<TokenId> candidate_tokens;
+    // Complete model-facing continuation path for each semantic candidate when
+    // the compiled backend uses a multi-token finite-choice trie. Empty for a
+    // depth-1 result.
+    std::vector<std::vector<TokenId>> candidate_token_paths;
+    // Constrained semantic routing distribution Q. These values are not
+    // original-LM full candidate-string likelihood and are not calibrated
+    // probabilities of correctness or external outcomes.
+    std::vector<float> routing_probabilities;
+    std::int32_t winner_index = -1;
+    // Authoritative only for depth-1 results. Multi-token trie results use -1
+    // because no singular token identifies the selected semantic candidate.
+    TokenId winner_token      = -1;
+
+    std::uint32_t frontier      = 0;
+    // Logical deterministic extension required by the field. For a D1 trie
+    // this is the maximum full ambiguity-probe suffix length.
+    std::uint32_t suffix_tokens = 0;
+    // Actual deterministic traversal attributed to this field. It may be
+    // smaller than suffix_tokens when a sibling wave shares a prefix, or
+    // larger for a D1 trie because it sums independently replayed ambiguity
+    // probe suffixes.
+    std::uint32_t executed_suffix_tokens = 0;
+
+    double capture_seconds = 0.0;
+    double suffix_seconds  = 0.0;
+    double score_seconds   = 0.0;
+    double restore_seconds = 0.0;
+};
+
+struct DecisionCapacitySummary {
+    // Whether the Engine is configured with a backend that can execute the
+    // constrained-decision API.
+    bool executable = false;
+
+    // Temporary device workspace available to one decision scorer.
+    std::size_t scorer_workspace_capacity_bytes = 0;
+
+    // Largest candidate-token domain which fits the scorer workspace and
+    // int32 tensor representation. Legal distinct model token IDs may impose
+    // a smaller semantic limit.
+    std::size_t scorer_workspace_max_candidates = 0;
+};
+
+struct DecisionResult {
+    PromptSummary prompt;
+    std::vector<DecisionFieldResult> fields;
+
+    std::uint32_t reused_prompt_tokens = 0;
+    PrefixReusePath prefix_reuse_path  = PrefixReusePath::FullReset;
+
+    double prepare_seconds = 0.0;
+    double total_seconds   = 0.0;
 };
 
 struct ArenaMemorySummary {

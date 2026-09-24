@@ -1,12 +1,17 @@
+#include "decision_execution.h"
 #pragma once
+
+#include "ninfer/targets/qwen3_6/runtime.h"
 
 // Small fixed-capacity request scheduling and batched decode execution for every backend.
 
 #include "core/device.h"
 #include "ninfer/types.h"
 #include "runtime/contract/types.h"
+#include "runtime/contract/decision_routing.h"
 #include "runtime/engine/admission_policy.h"
 #include "runtime/engine/request_memory.h"
+#include "runtime/engine/decision_execution.h"
 #include "runtime/generation/generation_budget.h"
 #include "targets/qwen3_6/export/ninfer/targets/qwen3_6/frontend.h"
 
@@ -14,6 +19,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -21,6 +27,7 @@
 #include <exception>
 #include <future>
 #include <memory>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -135,6 +142,56 @@ public:
         friend class ConcurrentExecutor;
     };
 
+    class DecisionSubmission {
+    public:
+        DecisionSubmission() noexcept = default;
+
+        ~DecisionSubmission() { reset(); }
+
+        DecisionSubmission(DecisionSubmission&& other) noexcept
+            : owner_(std::exchange(other.owner_, nullptr)),
+              request_(std::move(other.request_)) {}
+
+        DecisionSubmission& operator=(DecisionSubmission&& other) noexcept {
+            if (this != &other) {
+                reset();
+                owner_   = std::exchange(other.owner_, nullptr);
+                request_ = std::move(other.request_);
+            }
+            return *this;
+        }
+
+        DecisionSubmission(const DecisionSubmission&)            = delete;
+        DecisionSubmission& operator=(const DecisionSubmission&) = delete;
+
+        DecisionResult wait(const CancellationView& cancellation) {
+            if (owner_ == nullptr || request_ == nullptr) {
+                throw std::logic_error("concurrent decision submission is empty");
+            }
+            ConcurrentExecutor* owner = std::exchange(owner_, nullptr);
+            return owner->wait_for_decision(
+                std::exchange(request_, nullptr),
+                cancellation);
+        }
+
+    private:
+        DecisionSubmission(ConcurrentExecutor& owner,
+                           std::shared_ptr<Request> request) noexcept
+            : owner_(&owner), request_(std::move(request)) {}
+
+        void reset() noexcept {
+            if (owner_ != nullptr && request_ != nullptr) {
+                owner_->abandon_request(std::move(request_));
+            }
+            owner_ = nullptr;
+        }
+
+        ConcurrentExecutor* owner_ = nullptr;
+        std::shared_ptr<Request> request_;
+
+        friend class ConcurrentExecutor;
+    };
+
     Submission submit(targets::qwen3_6::PreparedPrompt prompt, PromptSummary prompt_summary,
                       double prepare_seconds, ResolvedRequestOptions options,
                       Clock::time_point pending_deadline = {}) {
@@ -184,6 +241,100 @@ public:
         }
         queue_cv_.notify_one();
         return Submission(*this, std::move(request));
+    }
+
+    DecisionSubmission
+    submit_decision(targets::qwen3_6::PreparedPrompt prompt,
+                    PromptSummary prompt_summary,
+                    double prepare_seconds,
+                    ResolvedRequestOptions options,
+                    DecisionExecutionProgram program,
+                    Clock::time_point pending_deadline = {}) {
+        const Clock::time_point submitted = Clock::now();
+
+        if (pending_deadline == Clock::time_point{}) {
+            pending_deadline =
+                submitted + pending_timeout_;
+        }
+
+        if (submitted >= pending_deadline) {
+            throw RequestError(
+                RequestErrorKind::QueueTimeout,
+                "decision request expired before submission");
+        }
+
+        std::uint64_t request_id = 0;
+
+        {
+            std::lock_guard lock(
+                queue_mutex_);
+
+            if (stopping_ || failed_) {
+                throw RequestError(
+                    RequestErrorKind::Unavailable,
+                    "inference engine is unavailable");
+            }
+
+            if (outstanding_ >=
+                max_outstanding_) {
+
+                throw RequestError(
+                    RequestErrorKind::Overloaded,
+                    "inference request queue is full");
+            }
+
+            ++outstanding_;
+            request_id = next_request_id_++;
+        }
+
+        std::shared_ptr<Request> request;
+
+        try {
+            auto output =
+                instance_.loaded->frontend
+                    .make_output_session(
+                        prompt,
+                        options.stop,
+                        options.output);
+
+            request =
+                std::make_shared<Request>(
+                    request_id,
+                    std::move(prompt),
+                    std::move(output),
+                    prompt_summary,
+                    prepare_seconds,
+                    std::move(options),
+                    pending_deadline,
+                    submitted,
+                    std::move(program));
+
+        } catch (...) {
+            release_reserved_capacity();
+            throw;
+        }
+
+        {
+            std::lock_guard lock(
+                queue_mutex_);
+
+            if (stopping_ || failed_) {
+                --outstanding_;
+
+                throw RequestError(
+                    RequestErrorKind::Unavailable,
+                    "inference engine is unavailable");
+            }
+
+            pending_.push_back(
+                request);
+        }
+
+        queue_cv_.notify_one();
+
+        return DecisionSubmission(
+            *this,
+            std::move(request));
     }
 
     [[nodiscard]] MemorySummary memory_summary() const {
@@ -287,14 +438,71 @@ private:
         }
     }
 
+    DecisionResult wait_for_decision(std::shared_ptr<Request> request,
+                                     const CancellationView& cancellation) {
+        struct ConsumerGuard {
+            ConcurrentExecutor* owner;
+            std::shared_ptr<Request> request;
+
+            ~ConsumerGuard() { owner->release_consumer(request); }
+        } guard{this, request};
+
+        std::exception_ptr caller_error;
+
+        for (;;) {
+            bool done = false;
+            {
+                std::unique_lock lock(request->mutex);
+                request->cv.wait_for(
+                    lock,
+                    std::chrono::milliseconds(10),
+                    [&] { return request->done; });
+                done = request->done;
+            }
+
+            if (caller_error == nullptr) {
+                try {
+                    if (cancellation.requested()) {
+                        request->cancelled.store(true, std::memory_order_release);
+                        queue_cv_.notify_one();
+                    }
+                } catch (...) {
+                    caller_error = std::current_exception();
+                    request->cancelled.store(true, std::memory_order_release);
+                    queue_cv_.notify_one();
+                }
+            }
+
+            if (!done) { continue; }
+
+            if (caller_error != nullptr) {
+                std::rethrow_exception(caller_error);
+            }
+
+            std::lock_guard lock(request->mutex);
+
+            if (request->error != nullptr) {
+                std::rethrow_exception(request->error);
+            }
+
+            return std::move(request->decision_result);
+        }
+    }
+
     struct Request {
         Request(std::uint64_t request_identity, targets::qwen3_6::PreparedPrompt input,
                 targets::qwen3_6::OutputSession output_session, PromptSummary summary,
                 double frontend_seconds, ResolvedRequestOptions request_options,
-                Clock::time_point limit, Clock::time_point submit_time)
+                Clock::time_point limit, Clock::time_point submit_time,
+                DecisionExecutionProgram finite_program = {})
             : id(request_identity), prompt(std::move(input)), output(std::move(output_session)),
               prompt_summary(summary), prepare_seconds(frontend_seconds),
-              options(std::move(request_options)), deadline(limit), submitted(submit_time) {}
+              options(std::move(request_options)), deadline(limit), submitted(submit_time),
+              decision_program(std::move(finite_program)) {}
+
+        [[nodiscard]] bool is_decision() const noexcept {
+            return !decision_program.empty();
+        }
 
         const std::uint64_t id;
         targets::qwen3_6::PreparedPrompt prompt;
@@ -310,6 +518,9 @@ private:
         std::vector<TokenId> generated;
         std::string content;
         std::string reasoning;
+
+        DecisionExecutionProgram decision_program;
+        DecisionResult decision_result;
         std::size_t reasoning_close_index = 0;
         std::optional<std::uint32_t> lane;
         std::atomic<bool> cancelled{false};
@@ -477,9 +688,746 @@ private:
     }
 
     void complete_cancelled(const std::shared_ptr<Request>& request) {
+        if (request->is_decision()) {
+            complete_error(
+                request,
+                std::make_exception_ptr(
+                    RequestError(RequestErrorKind::Cancelled,
+                                 "decision request cancelled")));
+            return;
+        }
+
         (void)request->output.preview_terminal(FinishReason::Cancelled);
         append_output(request, request->output.commit_preview());
         complete_success(request, FinishReason::Cancelled);
+    }
+
+    void complete_decision_success(const std::shared_ptr<Request>& request,
+                                   DecisionResult result) {
+        release_planning_state(request);
+        request->prompt = {};
+
+        {
+            std::lock_guard lock(request->mutex);
+            if (request->done) { return; }
+            request->decision_result = std::move(result);
+            request->done            = true;
+        }
+
+        if (mark_completed(request)) { release_reserved_capacity(); }
+        request->cv.notify_one();
+    }
+
+    bool run_decision_request(const std::shared_ptr<Request>& request) {
+        if (!request->lane) {
+            throw std::logic_error(
+                "decision request has no lane");
+        }
+
+        const std::uint32_t lane =
+            *request->lane;
+
+        DecisionResult result;
+
+        result.prompt =
+            request->prompt_summary;
+
+        result.prepare_seconds =
+            request->prepare_seconds;
+
+        if (request->begin) {
+            result.reused_prompt_tokens =
+                request->begin->
+                    reused_prompt_tokens;
+
+            result.prefix_reuse_path =
+                request->begin->
+                    prefix_reuse_path;
+        }
+
+        result.fields.reserve(
+            request->decision_program
+                .nodes.size());
+
+        const auto selected_field =
+            [&](std::size_t node_index)
+                -> const DecisionExecutionVariant& {
+
+            const DecisionExecutionNode& node =
+                request->decision_program
+                    .nodes[node_index];
+
+            std::size_t variant_index = 0;
+
+            if (node.parent_result_index) {
+                const std::size_t parent_index =
+                    *node.parent_result_index;
+
+                if (parent_index >=
+                    result.fields.size()) {
+
+                    throw std::logic_error(
+                        "decision dependency parent result is unavailable");
+                }
+
+                const std::int32_t parent_winner =
+                    result.fields[parent_index]
+                        .winner_index;
+
+                if (parent_winner < 0) {
+                    throw std::logic_error(
+                        "decision dependency parent has no valid winner");
+                }
+
+                variant_index =
+                    static_cast<std::size_t>(
+                        parent_winner);
+
+                if (variant_index >=
+                    node.variants.size()) {
+
+                    throw std::logic_error(
+                        "decision dependency winner is outside the compiled child variants");
+                }
+            }
+
+            return node.variants[
+                variant_index];
+        };
+
+        const auto append_result =
+            [&](const DecisionFieldSpec& field,
+                auto probe,
+                std::uint32_t executed_suffix_tokens) {
+
+            DecisionFieldResult field_result;
+
+            field_result.name =
+                field.name;
+
+            field_result.type =
+                field.type;
+
+            field_result.candidate_values =
+                field.candidate_values;
+
+            field_result.candidate_tokens =
+                field.candidate_tokens;
+
+            field_result.routing_probabilities =
+                std::move(
+                    probe.probabilities);
+
+            field_result.winner_index =
+                probe.winner_index;
+
+            field_result.winner_token =
+                probe.winner_token;
+
+            if (!field_result
+                     .candidate_values.empty()) {
+
+                if (field_result
+                        .candidate_values.size() !=
+                    field_result
+                        .candidate_tokens.size()) {
+
+                    throw std::logic_error(
+                        "decision candidate value/token metadata size mismatch");
+                }
+
+                if (field_result
+                        .winner_index < 0 ||
+                    static_cast<std::size_t>(
+                        field_result
+                            .winner_index) >=
+                        field_result
+                            .candidate_values.size()) {
+
+                    throw std::logic_error(
+                        "decision winner index is outside candidate metadata");
+                }
+
+                field_result.selected_value =
+                    field_result
+                        .candidate_values[
+                            static_cast<
+                                std::size_t>(
+                                    field_result
+                                        .winner_index)];
+            }
+
+            field_result.frontier =
+                probe.frontier;
+
+            field_result.suffix_tokens =
+                probe.suffix_tokens;
+
+            field_result.executed_suffix_tokens =
+                executed_suffix_tokens;
+
+            field_result.capture_seconds =
+                probe.capture_seconds;
+
+            field_result.suffix_seconds =
+                probe.suffix_seconds;
+
+            field_result.score_seconds =
+                probe.score_seconds;
+
+            field_result.restore_seconds =
+                probe.restore_seconds;
+
+            result.fields.push_back(
+                std::move(
+                    field_result));
+        };
+
+        const auto append_trie_result =
+            [&](const DecisionExecutionVariant& field)
+                -> bool {
+
+            if (!field.trie_plan.has_value()) {
+                throw std::logic_error(
+                    "trie decision execution requested without a trie plan");
+            }
+
+            const DecisionTriePlan& trie =
+                *field.trie_plan;
+
+            const std::size_t candidate_count =
+                trie.candidate_token_paths.size();
+
+            if (candidate_count < 2 ||
+                candidate_count >
+                    static_cast<std::size_t>(
+                        std::numeric_limits<
+                            std::int32_t>::max()) ||
+                field.candidate_values.size() !=
+                    candidate_count) {
+
+                throw std::logic_error(
+                    "trie decision metadata is inconsistent");
+            }
+
+            DecisionFieldResult field_result;
+
+            field_result.name =
+                field.name;
+
+            field_result.type =
+                field.type;
+
+            field_result.candidate_values =
+                field.candidate_values;
+
+            field_result.candidate_token_paths =
+                trie.candidate_token_paths;
+
+            // There is no truthful singular token for a general
+            // multi-token semantic candidate.
+            field_result.winner_token = -1;
+
+            std::vector<double> probability_products(
+                candidate_count,
+                1.0);
+
+            bool frontier_initialized = false;
+
+            std::uint64_t executed_suffix_tokens = 0;
+
+            for (const DecisionTrieProbe& trie_probe :
+                 trie.probes) {
+
+                // Each D1 probe restores the retained frontier before
+                // returning, so cancellation is safe between probes.
+                if (request->cancelled.load(
+                        std::memory_order_acquire)) {
+
+                    return false;
+                }
+
+                auto scored =
+                    instance_.program->
+                        decision_probe_lane(
+                            lane,
+                            trie_probe.suffix_tokens,
+                            trie_probe.candidate_tokens);
+
+                if (scored.probabilities.size() !=
+                    trie_probe.candidate_tokens.size()) {
+
+                    throw std::logic_error(
+                        "trie probe returned the wrong probability count");
+                }
+
+                if (trie_probe
+                        .descendant_candidate_indices
+                        .size() !=
+                    trie_probe
+                        .candidate_tokens
+                        .size()) {
+
+                    throw std::logic_error(
+                        "trie probe descendant mapping is inconsistent");
+                }
+
+                if (scored.suffix_tokens !=
+                    trie_probe.suffix_tokens.size()) {
+
+                    throw std::logic_error(
+                        "trie probe reported an unexpected suffix length");
+                }
+
+                if (!frontier_initialized) {
+                    field_result.frontier =
+                        scored.frontier;
+
+                    frontier_initialized = true;
+
+                } else if (
+                    field_result.frontier !=
+                    scored.frontier) {
+
+                    throw std::logic_error(
+                        "trie probes disagreed on retained frontier");
+                }
+
+                field_result.suffix_tokens =
+                    std::max(
+                        field_result.suffix_tokens,
+                        scored.suffix_tokens);
+
+                executed_suffix_tokens +=
+                    static_cast<std::uint64_t>(
+                        scored.suffix_tokens);
+
+                field_result.capture_seconds +=
+                    scored.capture_seconds;
+
+                field_result.suffix_seconds +=
+                    scored.suffix_seconds;
+
+                field_result.score_seconds +=
+                    scored.score_seconds;
+
+                field_result.restore_seconds +=
+                    scored.restore_seconds;
+
+                apply_decision_routing_branch(
+                    probability_products,
+                    scored.probabilities,
+                    trie_probe
+                        .descendant_candidate_indices);
+
+                consume_service_work(
+                    request,
+                    static_cast<std::uint64_t>(
+                        scored.suffix_tokens));
+
+                if (request->cancelled.load(
+                        std::memory_order_acquire)) {
+
+                    return false;
+                }
+            }
+
+            if (!frontier_initialized) {
+                throw std::logic_error(
+                    "trie decision executed no ambiguity probes");
+            }
+
+            if (executed_suffix_tokens >
+                static_cast<std::uint64_t>(
+                    std::numeric_limits<
+                        std::uint32_t>::max())) {
+
+                throw std::overflow_error(
+                    "trie executed suffix accounting overflow");
+            }
+
+            field_result.executed_suffix_tokens =
+                static_cast<std::uint32_t>(
+                    executed_suffix_tokens);
+
+            DecisionRoutingFinal routing =
+                finalize_decision_routing(
+                    probability_products);
+
+            field_result.routing_probabilities =
+                std::move(
+                    routing.routing_probabilities);
+
+            field_result.winner_index =
+                routing.winner_index;
+
+            field_result.selected_value =
+                field_result
+                    .candidate_values[
+                        static_cast<std::size_t>(
+                            routing.winner_index)];
+
+            result.fields.push_back(
+                std::move(
+                    field_result));
+
+            return true;
+        };
+
+        try {
+            std::size_t node_index = 0;
+
+            while (node_index <
+                   request->decision_program
+                       .nodes.size()) {
+
+                if (request->cancelled.load(
+                        std::memory_order_acquire)) {
+
+                    complete_cancelled(
+                        request);
+
+                    return true;
+                }
+
+                const DecisionExecutionNode& node =
+                    request->decision_program
+                        .nodes[node_index];
+
+                bool used_shared_wave = false;
+
+                if (node.parent_result_index) {
+                    const std::size_t parent_index =
+                        *node.parent_result_index;
+
+                    std::size_t group_end =
+                        node_index + 1;
+
+                    while (
+                        group_end <
+                            request->decision_program
+                                .nodes.size()) {
+
+                        const DecisionExecutionNode&
+                            candidate_node =
+                                request->decision_program
+                                    .nodes[group_end];
+
+                        if (!candidate_node
+                                 .parent_result_index ||
+                            *candidate_node
+                                 .parent_result_index !=
+                                parent_index) {
+
+                            break;
+                        }
+
+                        ++group_end;
+                    }
+
+                    const std::size_t sibling_count =
+                        group_end - node_index;
+
+                    bool sibling_group_has_trie =
+                        false;
+
+                    for (std::size_t index =
+                             node_index;
+                         index < group_end;
+                         ++index) {
+
+                        if (selected_field(index)
+                                .trie_plan
+                                .has_value()) {
+
+                            sibling_group_has_trie =
+                                true;
+                            break;
+                        }
+                    }
+
+                    if (sibling_count >= 2 &&
+                        !sibling_group_has_trie) {
+                        std::vector<
+                            const DecisionFieldSpec*>
+                            selected;
+
+                        selected.reserve(
+                            sibling_count);
+
+                        for (std::size_t index =
+                                 node_index;
+                             index < group_end;
+                             ++index) {
+
+                            selected.push_back(
+                                &selected_field(
+                                    index));
+                        }
+
+                        std::size_t common =
+                            selected.front()
+                                ->suffix_tokens.size();
+
+                        for (std::size_t field_index = 1;
+                             field_index <
+                                 selected.size();
+                             ++field_index) {
+
+                            common =
+                                std::min(
+                                    common,
+                                    selected[field_index]
+                                        ->suffix_tokens
+                                        .size());
+
+                            std::size_t matched = 0;
+
+                            while (
+                                matched < common &&
+                                selected.front()
+                                        ->suffix_tokens[
+                                            matched] ==
+                                    selected[field_index]
+                                        ->suffix_tokens[
+                                            matched]) {
+
+                                ++matched;
+                            }
+
+                            common = matched;
+                        }
+
+                        bool residuals_nonempty =
+                            common != 0;
+
+                        if (residuals_nonempty) {
+                            for (const auto* field :
+                                 selected) {
+
+                                if (field
+                                        ->suffix_tokens
+                                        .size() <= common) {
+
+                                    residuals_nonempty =
+                                        false;
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Materialization is profitable exactly when at least
+                        // two siblings share one or more deterministic tokens.
+                        // Scheduler service accounting remains conservatively
+                        // replay-equivalent in V2-C2.
+                        if (residuals_nonempty) {
+                            std::vector<
+                                targets::qwen3_6::
+                                    DecisionWaveProbeSpec>
+                                probes;
+
+                            probes.reserve(
+                                selected.size());
+
+                            for (const auto* field :
+                                 selected) {
+
+                                probes.push_back(
+                                    targets::qwen3_6::
+                                        DecisionWaveProbeSpec{
+                                            std::span<
+                                                const TokenId>(
+                                                field
+                                                    ->suffix_tokens
+                                                    .data() +
+                                                    common,
+                                                field
+                                                    ->suffix_tokens
+                                                    .size() -
+                                                    common),
+                                            std::span<
+                                                const TokenId>(
+                                                field
+                                                    ->candidate_tokens
+                                                    .data(),
+                                                field
+                                                    ->candidate_tokens
+                                                    .size()),
+                                        });
+                            }
+
+                            const auto shared_prefix =
+                                std::span<
+                                    const TokenId>(
+                                    selected.front()
+                                        ->suffix_tokens
+                                        .data(),
+                                    common);
+
+                            auto wave =
+                                instance_.program->
+                                    decision_probe_wave_lane(
+                                        lane,
+                                        shared_prefix,
+                                        probes);
+
+                            if (wave.probes.size() !=
+                                selected.size()) {
+
+                                throw std::logic_error(
+                                    "shared decision wave returned the wrong probe count");
+                            }
+
+                            // Shared transaction timing is charged exactly
+                            // once across the public per-field timings.
+                            wave.probes.front()
+                                .capture_seconds +=
+                                    wave.capture_seconds;
+
+                            wave.probes.front()
+                                .suffix_seconds +=
+                                    wave.shared_prefix_seconds;
+
+                            wave.probes.back()
+                                .restore_seconds +=
+                                    wave.restore_seconds;
+
+                            // The target has fully restored the retained
+                            // frontier before returning. A cancellation which
+                            // arrived during the atomic wave is therefore safe
+                            // to honor here.
+                            if (request->cancelled.load(
+                                    std::memory_order_acquire)) {
+
+                                complete_cancelled(
+                                    request);
+
+                                return true;
+                            }
+
+                            for (std::size_t field_index = 0;
+                                 field_index <
+                                     selected.size();
+                                 ++field_index) {
+
+                                const std::size_t
+                                    logical_suffix_tokens =
+                                        selected[
+                                            field_index]
+                                            ->suffix_tokens
+                                            .size();
+
+                                const std::size_t
+                                    executed_suffix_tokens =
+                                        field_index == 0
+                                            ? logical_suffix_tokens
+                                            : logical_suffix_tokens -
+                                                  common;
+
+                                append_result(
+                                    *selected[
+                                        field_index],
+                                    std::move(
+                                        wave.probes[
+                                            field_index]),
+                                    static_cast<
+                                        std::uint32_t>(
+                                            executed_suffix_tokens));
+
+                                // Keep scheduler/service accounting
+                                // replay-equivalent for V2-C2. Actual target
+                                // work is lower; planner reduction is a later
+                                // optimization.
+                                consume_service_work(
+                                    request,
+                                    static_cast<
+                                        std::uint64_t>(
+                                            selected[
+                                                field_index]
+                                                ->suffix_tokens
+                                                .size()));
+                            }
+
+                            node_index =
+                                group_end;
+
+                            used_shared_wave =
+                                true;
+                        }
+                    }
+                }
+
+                if (used_shared_wave) {
+                    continue;
+                }
+
+                const DecisionExecutionVariant& field =
+                    selected_field(
+                        node_index);
+
+                if (field.trie_plan.has_value()) {
+                    if (!append_trie_result(
+                            field)) {
+
+                        complete_cancelled(
+                            request);
+
+                        return true;
+                    }
+
+                    ++node_index;
+                    continue;
+                }
+
+                auto probe =
+                    instance_.program->
+                        decision_probe_lane(
+                            lane,
+                            field.suffix_tokens,
+                            field.candidate_tokens);
+
+                append_result(
+                    field,
+                    std::move(probe),
+                    static_cast<std::uint32_t>(
+                        field.suffix_tokens.size()));
+
+                consume_service_work(
+                    request,
+                    static_cast<std::uint64_t>(
+                        field.suffix_tokens.size()));
+
+                ++node_index;
+            }
+
+            result.total_seconds =
+                request->prepare_seconds +
+                std::chrono::duration<double>(
+                    Clock::now() -
+                    request->submitted)
+                    .count();
+
+            complete_decision_success(
+                request,
+                std::move(result));
+
+            return true;
+
+        } catch (...) {
+            // Decision probes normally restore the retained frontier before
+            // returning. If any decision execution path nevertheless throws,
+            // discard the lane rather than allowing a potentially partial
+            // temporary frontier/state snapshot to participate in later
+            // prefix reuse.
+            instance_.program->abort_lane(
+                lane);
+
+            complete_error(
+                request,
+                std::current_exception());
+
+            return true;
+        }
     }
 
     bool resolve_round(const std::shared_ptr<Request>& request, TokenId token,
@@ -683,6 +1631,19 @@ private:
         if (step.round.tokens.size() != 1) {
             throw std::logic_error("prefill did not license exactly one token");
         }
+
+        if (request->is_decision()) {
+            const std::uint32_t lane = *request->lane;
+
+            // Terminal resolution retains exactly the executed prompt frontier.
+            // The sampled prefill token is intentionally not committed.
+            instance_.program->resolve_prefill_lane(lane, true);
+
+            (void)run_decision_request(request);
+            remove_completed_slot(lane);
+            return;
+        }
+
         if (resolve_round(request, step.round.tokens.front(), false)) {
             remove_completed_slot(*request->lane);
         } else {

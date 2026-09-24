@@ -97,6 +97,7 @@ struct OrdinaryDecodeStateLayout {
     LayoutRegion egress;
     TensorRegion logits;
     TensorRegion hidden;
+
 };
 
 struct MtpPrefillStateLayout {
@@ -177,6 +178,7 @@ struct OrdinaryDecodeState {
     Tensor sampled_tokens;
     Tensor logits;
     Tensor hidden;
+
 
     OrdinaryDecodeState() = default;
     OrdinaryDecodeState(DeviceSpan backing, const OrdinaryDecodeStateLayout& layout,
