@@ -1,10 +1,19 @@
 #include "product/media_acquire/acquire.h"
 
+#ifdef _WIN32
+// winsock2.h must be included before any header that pulls in windows.h, so it comes
+// ahead of curl.h rather than after it.
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
+
 #include <curl/curl.h>
 
+#ifndef _WIN32
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/socket.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -26,6 +35,22 @@ namespace ninfer::product::media_acquire {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+
+#ifdef _WIN32
+// getaddrinfo / inet_ntop require an initialised Winsock on Windows. A file-scope guard
+// keeps the call sites unchanged and guarantees the initialisation runs before main.
+struct WinsockGuard {
+    WinsockGuard() {
+        WSADATA data{};
+        (void)::WSAStartup(MAKEWORD(2, 2), &data);
+    }
+    ~WinsockGuard() { ::WSACleanup(); }
+    WinsockGuard(const WinsockGuard&)            = delete;
+    WinsockGuard& operator=(const WinsockGuard&) = delete;
+};
+
+const WinsockGuard kWinsockGuard{};
+#endif
 
 void check_control(const Policy& policy) {
     if (policy.is_cancelled && policy.is_cancelled()) {
