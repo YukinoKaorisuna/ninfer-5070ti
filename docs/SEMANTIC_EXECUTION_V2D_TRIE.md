@@ -144,34 +144,51 @@ the structural ambiguity bound remains K - 1. Individual ambiguity-node degree
 is limited by representable tensor indices, distinct legal model tokens and
 available runtime workspace rather than an arbitrary finite-choice constant.
 
-## Probability semantics
+## Probability semantics: constrained routing Q
 
 Each ambiguous trie node is scored with the existing restricted constrained
 softmax over that node's outgoing legal tokens.
 
 For semantic candidate c:
 
-    P(c) =
-        product of branch probabilities
-        along ambiguous nodes on c's route
+    Q(c) =
+        product of locally normalized legal-edge probabilities
+        at ambiguous nodes on c's route
 
 Deterministic one-edge traversal contributes factor 1.
 
 Therefore deterministic token count does not directly penalize a semantic
 candidate.
 
-After accumulation, candidate probabilities may be normalized once to remove
+After accumulation, routing probabilities may be normalized once to remove
 floating-point accumulation drift.
 
-The selected semantic candidate is the candidate with maximum final
-probability.
+The selected semantic candidate is the candidate with maximum final routing
+probability. Ties select the lowest semantic candidate index.
 
-Ties select the lowest semantic candidate index, preserving existing finite
-decision tie behavior.
+The public semantic result exposes these values as
+DecisionFieldResult::routing_probabilities.
 
-These probabilities describe the constrained finite-choice distribution.
+Q is not original-LM full rendered candidate-string likelihood, calibrated
+confidence, probability of correctness, or probability of an external outcome
+such as sale, conversion, success or risk.
 
-They are not calibrated confidence or probability of correctness.
+The following reversal is intentional:
+
+    P(a | prefix)   = 0.60
+    P(b | prefix)   = 0.40
+    P(x | prefix,a) = 0.01
+    P(y | prefix,b) = 0.99
+
+    Q(A) = 0.60
+    Q(B) = 0.40
+    routing winner = A
+
+    L(A) = 0.006
+    L(B) = 0.396
+    full-string-likelihood winner = B
+
+V2-D intentionally selects A under its semantic-routing contract.
 
 ## Why not full sequence likelihood
 

@@ -314,7 +314,7 @@ bool validate_result(
             field.candidate_values.size() !=
                 field.candidate_tokens.size() ||
             field.candidate_values.size() !=
-                field.probabilities.size()) {
+                field.routing_probabilities.size()) {
 
             std::cerr
                 << "FAIL: candidate metadata mismatch\n";
@@ -343,7 +343,7 @@ bool validate_result(
 
         double sum = 0.0;
 
-        for (float p : field.probabilities) {
+        for (float p : field.routing_probabilities) {
             if (!std::isfinite(p) ||
                 p < 0.0F ||
                 p > 1.0F) {

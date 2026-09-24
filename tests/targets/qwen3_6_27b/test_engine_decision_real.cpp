@@ -106,7 +106,7 @@ void print_field(
         << "_PROBABILITIES=";
 
     for (std::size_t i = 0;
-         i < field.probabilities.size();
+         i < field.routing_probabilities.size();
          ++i) {
 
         if (i != 0) {
@@ -115,7 +115,7 @@ void print_field(
 
         std::cout
             << std::setprecision(9)
-            << field.probabilities[i];
+            << field.routing_probabilities[i];
     }
 
     std::cout << "\n";
@@ -278,7 +278,7 @@ int run_real_test(const char* artifact) {
             "FIELD_" + std::to_string(i);
 
         if (!valid_probability_vector(
-                result.fields[i].probabilities,
+                result.fields[i].routing_probabilities,
                 label.c_str())) {
 
             return 1;
@@ -337,8 +337,8 @@ int run_real_test(const char* artifact) {
 
     const float repeat_error =
         max_abs_error(
-            a1.probabilities,
-            a2.probabilities);
+            a1.routing_probabilities,
+            a2.routing_probabilities);
 
     std::cout
         << "A_REPEAT_MAX_ABS_ERROR="

@@ -612,7 +612,10 @@ struct DecisionFieldResult {
     // the compiled backend uses a multi-token finite-choice trie. Empty for a
     // depth-1 result.
     std::vector<std::vector<TokenId>> candidate_token_paths;
-    std::vector<float> probabilities;
+    // Constrained semantic routing distribution Q. These values are not
+    // original-LM full candidate-string likelihood and are not calibrated
+    // probabilities of correctness or external outcomes.
+    std::vector<float> routing_probabilities;
     std::int32_t winner_index = -1;
     // Authoritative only for depth-1 results. Multi-token trie results use -1
     // because no singular token identifies the selected semantic candidate.
@@ -632,6 +635,20 @@ struct DecisionFieldResult {
     double suffix_seconds  = 0.0;
     double score_seconds   = 0.0;
     double restore_seconds = 0.0;
+};
+
+struct DecisionCapacitySummary {
+    // Whether the Engine is configured with a backend that can execute the
+    // constrained-decision API.
+    bool executable = false;
+
+    // Temporary device workspace available to one decision scorer.
+    std::size_t scorer_workspace_capacity_bytes = 0;
+
+    // Largest candidate-token domain which fits the scorer workspace and
+    // int32 tensor representation. Legal distinct model token IDs may impose
+    // a smaller semantic limit.
+    std::size_t scorer_workspace_max_candidates = 0;
 };
 
 struct DecisionResult {

@@ -4,6 +4,7 @@
 #include "core/device.h"
 #include "runtime/contract/sampling.h"
 #include "runtime/contract/types.h"
+#include "runtime/contract/decision_resources.h"
 #include "runtime/engine/concurrent_executor.h"
 #include "targets/registry.h"
 
@@ -874,6 +875,10 @@ is_canonical_boolean_choice(
 struct DecisionProgramProjection {
     std::uint64_t service_work = 0;
     std::uint64_t max_frontier_extension = 0;
+
+    // Maximum outgoing token degree of any scorer invocation in any
+    // executable variant.
+    std::size_t max_probe_candidates = 0;
 };
 
 void
@@ -1394,6 +1399,29 @@ decision_variant_candidate_count(
 }
 
 
+std::size_t
+decision_variant_max_probe_candidates(
+    const runtime::DecisionExecutionVariant& variant) {
+
+    if (!variant.trie_plan.has_value()) {
+        return variant.candidate_tokens.size();
+    }
+
+    std::size_t maximum = 0;
+
+    for (const auto& probe :
+         variant.trie_plan->probes) {
+
+        maximum =
+            std::max(
+                maximum,
+                probe.candidate_tokens.size());
+    }
+
+    return maximum;
+}
+
+
 std::uint64_t
 decision_variant_service_work(
     const runtime::DecisionExecutionVariant& variant) {
@@ -1540,6 +1568,12 @@ validate_and_project_decision_program(
                 std::max(
                     max_service_work,
                     decision_variant_service_work(variant));
+
+            projection.max_probe_candidates =
+                std::max(
+                    projection.max_probe_candidates,
+                    decision_variant_max_probe_candidates(
+                        variant));
         }
 
         projection.service_work +=
@@ -1552,7 +1586,38 @@ validate_and_project_decision_program(
                     max_suffix));
     }
 
+    if (projection.max_probe_candidates < 2) {
+        throw std::logic_error(
+            "decision execution program has no valid scorer domain");
+    }
+
     return projection;
+}
+
+void validate_decision_resources(
+    const DecisionProgramProjection& projection,
+    const DecisionCapacitySummary& capacity) {
+
+    const runtime::DecisionScorerWorkspaceProjection workspace =
+        runtime::project_decision_scorer_workspace(
+            projection.max_probe_candidates,
+            capacity.scorer_workspace_capacity_bytes);
+
+    if (!capacity.executable || !workspace.fits) {
+        throw std::length_error(
+            "decision scorer resource limit exceeded: requested_K=" +
+            std::to_string(
+                projection.max_probe_candidates) +
+            " required_bytes=" +
+            std::to_string(
+                workspace.required_bytes) +
+            " available_bytes=" +
+            std::to_string(
+                workspace.available_bytes) +
+            " workspace_maximum_K=" +
+            std::to_string(
+                workspace.maximum_candidates));
+    }
 }
 
 runtime::DecisionExecutionProgram
@@ -2271,8 +2336,13 @@ Engine::compile_decision_plan(
         }
     }
 
-    (void)validate_and_project_decision_program(
-        program);
+    const DecisionProgramProjection projection =
+        validate_and_project_decision_program(
+            program);
+
+    validate_decision_resources(
+        projection,
+        decision_capacity());
 
     return CompiledDecisionPlan(
         std::make_shared<
@@ -2328,6 +2398,10 @@ Engine::submit_decision(
     const DecisionProgramProjection projection =
         validate_and_project_decision_program(
             plan.impl_->program);
+
+    validate_decision_resources(
+        projection,
+        decision_capacity());
 
     constexpr std::uint64_t
         kDecisionPrefillOutputWork = 1;
@@ -2505,6 +2579,10 @@ Engine::submit_decision(PreparedPrompt prompt, std::vector<DecisionFieldSpec> fi
         validate_and_project_decision_program(
             program);
 
+    validate_decision_resources(
+        projection,
+        decision_capacity());
+
     constexpr std::uint64_t
         kDecisionPrefillOutputWork = 1;
 
@@ -2616,6 +2694,31 @@ const EngineOptions& Engine::options() const {
 LoadSummary Engine::load_summary() const {
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
     return impl_->load;
+}
+
+DecisionCapacitySummary Engine::decision_capacity() const {
+    if (impl_ == nullptr) {
+        throw std::logic_error(
+            "Engine is moved from");
+    }
+
+    DecisionCapacitySummary out;
+
+    out.executable =
+        impl_->options.speculative.backend ==
+            SpeculativeBackend::None;
+
+    const MemorySummary memory =
+        memory_summary();
+
+    out.scorer_workspace_capacity_bytes =
+        memory.workspace.capacity_bytes;
+
+    out.scorer_workspace_max_candidates =
+        runtime::decision_scorer_max_candidates(
+            memory.workspace.capacity_bytes);
+
+    return out;
 }
 
 MemorySummary Engine::memory_summary() const {

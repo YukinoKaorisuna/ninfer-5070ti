@@ -331,7 +331,7 @@ bool valid_probability_vector(
     const DecisionFieldResult& field,
     double* sum_out) {
 
-    if (field.probabilities.size() !=
+    if (field.routing_probabilities.size() !=
         field.candidate_values.size()) {
 
         return false;
@@ -340,7 +340,7 @@ bool valid_probability_vector(
     double sum = 0.0;
 
     for (const float probability :
-         field.probabilities) {
+         field.routing_probabilities) {
 
         if (!std::isfinite(probability) ||
             probability < 0.0F ||
@@ -530,7 +530,7 @@ bool validate_trie_field(
         field.candidate_values.size() != candidate_count ||
         field.candidate_token_paths.size() != candidate_count ||
         !field.candidate_tokens.empty() ||
-        field.probabilities.size() != candidate_count ||
+        field.routing_probabilities.size() != candidate_count ||
         field.winner_token != -1 ||
         field.winner_index < 0 ||
         static_cast<std::size_t>(field.winner_index) >= candidate_count ||
@@ -705,8 +705,8 @@ bool validate_dependent_trie_async(
         child_result.winner_index !=
             expected_field.winner_index ||
         !probabilities_equal(
-            child_result.probabilities,
-            expected_field.probabilities)) {
+            child_result.routing_probabilities,
+            expected_field.routing_probabilities)) {
 
         return false;
     }
@@ -824,7 +824,7 @@ bool validate_wide_candidate_domain(
     if (field.candidate_values !=
             definition.semantic_values ||
         field.candidate_values.size() != 26 ||
-        field.probabilities.size() != 26 ||
+        field.routing_probabilities.size() != 26 ||
         field.frontier != 63 ||
         field.winner_index < 0 ||
         static_cast<std::size_t>(
@@ -1172,8 +1172,8 @@ int run(const char* artifact) {
             repeated.selected_value !=
                 field.selected_value ||
             !probabilities_equal(
-                repeated.probabilities,
-                field.probabilities)) {
+                repeated.routing_probabilities,
+                field.routing_probabilities)) {
 
             std::cerr
                 << "FAIL: repeated D1 execution changed semantic result\n";

@@ -8,6 +8,7 @@
 #include "core/device.h"
 #include "ninfer/types.h"
 #include "runtime/contract/types.h"
+#include "runtime/contract/decision_routing.h"
 #include "runtime/engine/admission_policy.h"
 #include "runtime/engine/request_memory.h"
 #include "runtime/engine/decision_execution.h"
@@ -813,7 +814,7 @@ private:
             field_result.candidate_tokens =
                 field.candidate_tokens;
 
-            field_result.probabilities =
+            field_result.routing_probabilities =
                 std::move(
                     probe.probabilities);
 
@@ -1013,41 +1014,11 @@ private:
                 field_result.restore_seconds +=
                     scored.restore_seconds;
 
-                for (std::size_t edge_index = 0;
-                     edge_index <
-                         scored.probabilities.size();
-                     ++edge_index) {
-
-                    const double branch_probability =
-                        static_cast<double>(
-                            scored.probabilities[
-                                edge_index]);
-
-                    if (!std::isfinite(
-                            branch_probability) ||
-                        branch_probability < 0.0) {
-
-                        throw std::logic_error(
-                            "trie probe returned an invalid probability");
-                    }
-
-                    for (const std::uint32_t candidate_index :
-                         trie_probe
-                             .descendant_candidate_indices[
-                                 edge_index]) {
-
-                        if (candidate_index >=
-                            candidate_count) {
-
-                            throw std::logic_error(
-                                "trie descendant candidate index is out of range");
-                        }
-
-                        probability_products[
-                            candidate_index] *=
-                                branch_probability;
-                    }
-                }
+                apply_decision_routing_branch(
+                    probability_products,
+                    scored.probabilities,
+                    trie_probe
+                        .descendant_candidate_indices);
 
                 consume_service_work(
                     request,
@@ -1079,66 +1050,22 @@ private:
                 static_cast<std::uint32_t>(
                     executed_suffix_tokens);
 
-            double probability_sum = 0.0;
+            DecisionRoutingFinal routing =
+                finalize_decision_routing(
+                    probability_products);
 
-            for (const double probability :
-                 probability_products) {
-
-                if (!std::isfinite(probability) ||
-                    probability < 0.0) {
-
-                    throw std::logic_error(
-                        "trie semantic probability is invalid");
-                }
-
-                probability_sum += probability;
-            }
-
-            if (!std::isfinite(probability_sum) ||
-                probability_sum <= 0.0) {
-
-                throw std::logic_error(
-                    "trie semantic probability sum is invalid");
-            }
-
-            field_result.probabilities.reserve(
-                candidate_count);
-
-            for (const double probability :
-                 probability_products) {
-
-                field_result.probabilities.push_back(
-                    static_cast<float>(
-                        probability /
-                        probability_sum));
-            }
-
-            // Strict greater-than preserves the lowest semantic
-            // candidate index on an exact tie.
-            std::size_t winner_index = 0;
-
-            for (std::size_t candidate_index = 1;
-                 candidate_index < candidate_count;
-                 ++candidate_index) {
-
-                if (probability_products[
-                        candidate_index] >
-                    probability_products[
-                        winner_index]) {
-
-                    winner_index =
-                        candidate_index;
-                }
-            }
+            field_result.routing_probabilities =
+                std::move(
+                    routing.routing_probabilities);
 
             field_result.winner_index =
-                static_cast<std::int32_t>(
-                    winner_index);
+                routing.winner_index;
 
             field_result.selected_value =
                 field_result
                     .candidate_values[
-                        winner_index];
+                        static_cast<std::size_t>(
+                            routing.winner_index)];
 
             result.fields.push_back(
                 std::move(

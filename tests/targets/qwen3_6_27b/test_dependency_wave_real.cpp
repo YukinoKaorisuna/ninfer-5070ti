@@ -247,8 +247,8 @@ field_equal(
         lhs.suffix_tokens ==
             rhs.suffix_tokens &&
         probabilities_equal(
-            lhs.probabilities,
-            rhs.probabilities);
+            lhs.routing_probabilities,
+            rhs.routing_probabilities);
 }
 
 bool
@@ -266,7 +266,7 @@ validate_field(
         field.candidate_values.size() !=
             field.candidate_tokens.size() ||
         field.candidate_values.size() !=
-            field.probabilities.size()) {
+            field.routing_probabilities.size()) {
 
         return false;
     }
@@ -290,7 +290,7 @@ validate_field(
     double probability_sum = 0.0;
 
     for (const float probability :
-         field.probabilities) {
+         field.routing_probabilities) {
 
         if (!std::isfinite(probability) ||
             probability < 0.0F ||

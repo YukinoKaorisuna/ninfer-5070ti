@@ -197,7 +197,7 @@ validate_field(
         field.candidate_values.size() !=
             field.candidate_tokens.size() ||
         field.candidate_values.size() !=
-            field.probabilities.size()) {
+            field.routing_probabilities.size()) {
 
         return false;
     }
@@ -221,7 +221,7 @@ validate_field(
     double sum = 0.0;
 
     for (const float p :
-         field.probabilities) {
+         field.routing_probabilities) {
 
         if (!std::isfinite(p) ||
             p < 0.0F ||
@@ -429,8 +429,8 @@ run(const char* artifact) {
         expected_child.winner_index !=
             alternate_child.winner_index ||
         !probabilities_equal(
-            expected_child.probabilities,
-            alternate_child.probabilities);
+            expected_child.routing_probabilities,
+            alternate_child.routing_probabilities);
 
     if (!variants_distinguishable) {
         return 1;
@@ -447,8 +447,8 @@ run(const char* artifact) {
         child.selected_value !=
             expected_child.selected_value ||
         !probabilities_equal(
-            child.probabilities,
-            expected_child.probabilities)) {
+            child.routing_probabilities,
+            expected_child.routing_probabilities)) {
 
         return 1;
     }

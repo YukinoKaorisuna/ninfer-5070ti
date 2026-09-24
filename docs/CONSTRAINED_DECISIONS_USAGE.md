@@ -20,8 +20,9 @@ Implemented paths:
 - synchronous `Engine::decide()` and asynchronous
   `Engine::submit_decision(...).wait()`.
 
-The result distribution is a constrained softmax over legal choices. It is not
-a calibrated probability that a choice is factually correct.
+The public result is a constrained semantic routing distribution Q. It is
+intentionally not original-LM full candidate-string likelihood L, calibrated
+factual confidence, or probability of an external outcome.
 
 ## Runtime requirement: ordinary backend
 
@@ -182,10 +183,56 @@ After factoring:
 
 Exact-prefix semantic candidates are rejected. For example, if one complete
 token path is `[x,y]` and another is `[x,y,z]`, D1 does not invent a
-synthetic END choice.
+synthetic END/EOS/termination edge. A semantic candidate therefore cannot
+terminate at an internal trie node that also prefixes another candidate in
+V2-D1. Explicit terminal-edge semantics are future work.
 
 Distinct candidate strings that normalize/tokenize to the same complete token
 path are also rejected.
+
+## Routing-probability contract
+
+For semantic candidate c, NInfer multiplies the locally normalized legal-edge
+probabilities encountered at semantic ambiguity nodes on c's route.
+
+Conceptually:
+
+    Q(c) = product over ambiguity nodes j on c's route of
+
+           exp(logit(selected edge at j))
+           --------------------------------
+           sum over legal edges e at j exp(logit(e))
+
+Deterministic unary traversal contributes factor 1.
+
+The public semantic result exposes these values as
+DecisionFieldResult::routing_probabilities.
+
+Q is not the original language model's full rendered candidate-string
+likelihood. It is also not calibrated probability that the semantic choice is
+correct, and it is not probability of an external event such as a sale,
+conversion, purchase, approval, fraud, success, failure or risk.
+
+A deliberate reversal fixture defines this distinction:
+
+    P(a | prefix)   = 0.60
+    P(b | prefix)   = 0.40
+    P(x | prefix,a) = 0.01
+    P(y | prefix,b) = 0.99
+
+    Routing:
+        Q(A) = 0.60
+        Q(B) = 0.40
+        winner = A
+
+    Full original-LM string likelihood:
+        L(A) = 0.60 * 0.01 = 0.006
+        L(B) = 0.40 * 0.99 = 0.396
+        winner = B
+
+NInfer intentionally selects A under the semantic-routing contract. The x/y
+tail probabilities are not routing factors because those tails contain no
+additional semantic ambiguity.
 
 ## Reading DecisionFieldResult
 
@@ -198,7 +245,7 @@ assuming a stable positional index.
 For every field:
 
 - `candidate_values` are caller-visible semantic values;
-- `probabilities` align by index with `candidate_values`;
+- `routing_probabilities` align by index with `candidate_values`;
 - `winner_index` is the authoritative selected index;
 - `selected_value` is the corresponding caller-visible value.
 
@@ -239,6 +286,62 @@ ninfer::DecisionResult result = handle.wait();
 
 Destroying an unconsumed handle cancels/abandons the request consistently with
 the Engine submission model.
+
+## Decision scorer resource envelope
+
+The former fixed K <= 16 product limit has been removed, but each Engine has a
+concrete scorer-workspace envelope.
+
+Call Engine::decision_capacity() to inspect:
+
+- whether constrained decision execution is enabled for this Engine;
+- scorer workspace capacity in bytes;
+- the maximum candidate-token count which fits that workspace and int32
+  tensor representation.
+
+This maximum is a workspace bound. The requirement that candidate tokens are
+distinct valid model token IDs is a separate constraint and may impose a
+smaller practical legal domain.
+
+For a submitted decision plan, NInfer determines the largest outgoing-token
+degree of any depth-1 field or trie ambiguity probe. Before queue admission,
+lane assignment, retained-frontier capture, or suffix traversal, it computes
+the exact temporary scorer requirement and compares it with the Engine
+workspace capacity.
+
+Oversized requests fail deterministically with:
+
+- requested K;
+- required bytes;
+- available bytes;
+- workspace maximum K.
+
+The target repeats the same check immediately before temporary device
+allocation as a defence-in-depth invariant.
+
+## Scheduling and failure isolation
+
+Decision requests use the same Engine queue, admission protection and lane
+accounting as ordinary generation.
+
+Current V2-D1 scheduling semantics are:
+
+- an individual target decision probe is an atomic GPU execution unit;
+- cancellation is checked at safe restored boundaries between trie probes;
+- D1 does not preempt inside an active target probe;
+- abandoning or cancelling another request releases its lane through the normal
+  scheduler lifecycle;
+- when shared admission resources permit, a decision waiting behind occupied
+  lanes may enter a released lane without requiring unrelated active lanes to
+  drain;
+- if decision execution throws after admission, the executor aborts that lane
+  rather than exposing potentially partial state for prefix reuse.
+
+Probe-level shared-trie interleaving remains D2 optimization work.
+
+Raw-token decision paths reject negative IDs in Engine validation. The Qwen
+target separately validates suffix/candidate IDs against the actual model token
+domain before CUDA indexing.
 
 ## Current backend limits
 

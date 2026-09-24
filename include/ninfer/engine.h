@@ -183,6 +183,11 @@ public:
 
     [[nodiscard]] const EngineOptions& options() const;
     [[nodiscard]] LoadSummary load_summary() const;
+
+    // Concrete finite-decision scorer resource envelope for this Engine.
+    // This is a workspace bound, not an arbitrary product-level K constant.
+    [[nodiscard]] DecisionCapacitySummary decision_capacity() const;
+
     [[nodiscard]] MemorySummary memory_summary() const;
     [[nodiscard]] RuntimeStats runtime_stats() const;
     [[nodiscard]] MediaCacheSummary media_cache_summary() const;

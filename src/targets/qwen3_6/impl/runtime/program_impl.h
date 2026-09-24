@@ -2,6 +2,7 @@
 #include "targets/qwen3_6/impl/runtime/program.h"
 
 #include "targets/qwen3_6/impl/runtime/schedule.h"
+#include "runtime/contract/decision_resources.h"
 #include "ninfer/ops/gdn_replay.h"
 #include "ninfer/ops/constrained_choice.h"
 #include "ninfer/ops/prepare_ragged_prefix.h"
@@ -1191,6 +1192,27 @@ ProgramImplCore::score_decision_candidates(
 
         throw std::length_error(
             "decision scorer candidate count exceeds int32 tensor representation");
+    }
+
+    const runtime::DecisionScorerWorkspaceProjection workspace =
+        runtime::project_decision_scorer_workspace(
+            candidate_tokens.size(),
+            work.capacity());
+
+    if (!workspace.fits) {
+        throw std::length_error(
+            "decision scorer resource limit exceeded: requested_K=" +
+            std::to_string(
+                workspace.requested_candidates) +
+            " required_bytes=" +
+            std::to_string(
+                workspace.required_bytes) +
+            " available_bytes=" +
+            std::to_string(
+                workspace.available_bytes) +
+            " workspace_maximum_K=" +
+            std::to_string(
+                workspace.maximum_candidates));
     }
 
     const std::int32_t k =

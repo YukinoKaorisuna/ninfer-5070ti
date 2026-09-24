@@ -16,14 +16,14 @@ using ninfer::DecisionResult;
 using ninfer::TokenId;
 
 bool valid_probs(const DecisionFieldResult& field) {
-    if (field.probabilities.size() != field.candidate_values.size()) {
+    if (field.routing_probabilities.size() != field.candidate_values.size()) {
         std::cerr << "FAIL: probability/value size mismatch\n";
         return false;
     }
 
     double sum = 0.0;
 
-    for (float p : field.probabilities) {
+    for (float p : field.routing_probabilities) {
         if (!std::isfinite(p) || p < 0.0F || p > 1.0F) {
             std::cerr << "FAIL: invalid probability\n";
             return false;
@@ -64,9 +64,9 @@ void print_field(const DecisionFieldResult& field) {
     std::cout << "\n";
 
     std::cout << "PROBABILITIES=";
-    for (std::size_t i = 0; i < field.probabilities.size(); ++i) {
+    for (std::size_t i = 0; i < field.routing_probabilities.size(); ++i) {
         if (i != 0) std::cout << ",";
-        std::cout << std::setprecision(9) << field.probabilities[i];
+        std::cout << std::setprecision(9) << field.routing_probabilities[i];
     }
     std::cout << "\n";
 }
