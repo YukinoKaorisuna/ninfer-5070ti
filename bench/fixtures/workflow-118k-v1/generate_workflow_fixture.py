@@ -371,19 +371,22 @@ generators = [
 
 blocks = []
 
-for i in range(2200):
+for i in range(443):
     fn = generators[i % len(generators)]
     blocks.append(fn(i))
 
-# RECONSTRUCTION PROCEDURE (how the committed fixture was built):
-#   1) Generate 2200 deterministic candidate workflow blocks (seed 5080118001).
-#   2) SELECTION: retain the first 443 complete blocks (indices 0-442); drop 443..2199.
-#   3) Decode the 443 retained blocks to text (each leads with a newline -> plain
-#      concat = 412579 B).
-#   4) FINAL TRIM/EXTEND: append a terminal diagnostic-vocabulary note (65 words = 5 full
-#      12-word cycles + 5-word tail, word-boundary truncation) after the terminal complete
-#      block (index 442) to reach the 118001 prepared-token target -> 413078 B. Fixed literal.
-retained = blocks[:443]
-content = "".join(retained)
+# PROVENANCE (forensically established; read-only history, commit cf57a6e3):
+#   The committed generator (cf57a6e3) loops range(2200) and wrote json.dumps(blocks);
+#   it has NO block selection, NO trimming, NO binary/search step, and it does not reproduce
+#   this fixture (2200 JSON blocks vs 443 decoded blocks + a 499-B terminal note).
+#   The original 2200-candidate -> 443-retention finalization, if it existed, was produced
+#   OUTSIDE this git history (the fixture set is branch-only; cf57a6e3 is its only commit;
+#   git log -S/-G finds no selection/trim/search procedure). Its semantics are therefore
+#   NOT recoverable and are NOT asserted here.
+#   This script is the faithful, verifiable form of the committed generator: it loops 443
+#   blocks and appends the terminal diagnostic-vocabulary note (65 words = 5 full 12-word
+#   cycles + a 5-word partial 6th cycle, word-boundary truncation) after block 442 to reach
+#   the 118001 prepared-token target -> 413078 B. Running it reproduces the fixture.
+content = "".join(blocks)
 content += '\nDiagnostic note: model context runtime tool request cache prefill decode benchmark status branch artifact model context runtime tool request cache prefill decode benchmark status branch artifact model context runtime tool request cache prefill decode benchmark status branch artifact model context runtime tool request cache prefill decode benchmark status branch artifact model context runtime tool request cache prefill decode benchmark status branch artifact model context runtime tool request.\n'
 out.write_text(content)

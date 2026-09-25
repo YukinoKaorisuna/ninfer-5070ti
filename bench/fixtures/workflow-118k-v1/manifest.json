@@ -188,7 +188,6 @@
     ]
   },
   "reconstruction": {
-    "candidate_blocks_generated": 2200,
     "complete_blocks_retained": 443,
     "retained_indices": "0-442",
     "partial_terminal_block": true,
@@ -204,9 +203,10 @@
     "final_bytes": 413078,
     "final_sha256": "cb7c131bd20d78bd69396c019f988c81fad1941a853a8de7da7586e1aeb99718",
     "expected_prepared_tokens": 118001,
-    "selection_method": "positional: retain first 443 of 2200 deterministic candidates (indices 0-442); 1757 candidates dropped",
-    "trimmed_candidate_blocks": 1757,
-    "trimmed_candidate_indices": "443-2199",
-    "terminal_note_position": "appended after terminal complete block (index 442)"
+    "selection_method": "single committed 443-block generator (cf57a6e3, loop 443); 443 = number of complete workflow blocks in the fixture, NOT a 2200->443 selection",
+    "terminal_note_position": "appended after terminal complete block (index 442)",
+    "provenance_note": "Original cf57a6e3 generator loops range(2200)+json.dumps and cannot reproduce this fixture; no selection/trim/binary-search procedure exists in git history (git log -S/-G; fixture set is branch-only, cf57a6e3 is its sole commit). The 2200->443 finalization, if any, was produced outside this history and its semantics are unrecoverable, so they are not asserted. This generator (443 + terminal note) is the faithful form that byte-reproduces the fixture.",
+    "terminal_note_truncated_cycle": 6,
+    "terminal_note_note": "note = 5 full 12-word cycles (60 words) + 5-word partial 6th cycle (65 words), then truncated at a word boundary"
   }
 }
