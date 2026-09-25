@@ -371,8 +371,13 @@ generators = [
 
 blocks = []
 
-for i in range(2200):
+for i in range(443):
     fn = generators[i % len(generators)]
     blocks.append(fn(i))
 
-out.write_text(json.dumps(blocks))
+# Decode: blocks each begin with a leading newline (header()), so plain
+# concatenation reproduces the committed fixture; a fixed diagnostic-note
+# trailer is appended (literal, preserving the committed byte-for-byte form).
+content = "".join(blocks)
+content += '\nDiagnostic note: model context runtime tool request cache prefill decode benchmark status branch artifact model context runtime tool request cache prefill decode benchmark status branch artifact model context runtime tool request cache prefill decode benchmark status branch artifact model context runtime tool request cache prefill decode benchmark status branch artifact model context runtime tool request cache prefill decode benchmark status branch artifact model context runtime tool request.\n'
+out.write_text(content)
