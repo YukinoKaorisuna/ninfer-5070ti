@@ -14,6 +14,42 @@
 - **Windows 构建与运行**：见 [docs/WINDOWS_5070TI.md](docs/WINDOWS_5070TI.md)。
 - **本机实测（5070 Ti）**：prefill ~1301 tok/s、decode ~65 tok/s（8K 上下文 + MTP-3）。
 
+## 快速上手（Windows · RTX 5070 Ti）
+
+### 一、安装
+
+1. **环境**：Visual Studio 2022（勾选「使用 C++ 的桌面开发」工作负载）+ CUDA Toolkit 13.4。
+2. **依赖**：FFmpeg + libcurl（推荐 vcpkg：`vcpkg install ffmpeg:x64-windows curl:x64-windows`）。
+3. **模型**：下载 `qwen3_8_27b.ninfer`（16,461,267,456 字节，SHA-256 `c4a7e9ab593a7f42d58208fa0065d67a82d61921107686cc6f6ed1ec6b050e21`）到本地。
+4. **构建**：完整的环境准备、vcpkg 依赖、构建命令都在 [docs/WINDOWS_5070TI.md](docs/WINDOWS_5070TI.md)。
+
+### 二、启动与关闭（开关）
+
+服务跑在 `127.0.0.1:8100`。
+
+**启动**（在仓库根目录执行，`<模型路径>` 换成实际的 `.ninfer` 文件）：
+
+```
+build-windows\apps\ninfer-serve.exe <模型路径> --host 127.0.0.1 --port 8100 --max-context 65536 --kv-dtype q4 --spec mtp --draft-tokens 3 --embedding-host --max-concurrency 1 --model-id m
+```
+
+**打开页面**：用浏览器打开仓库里的 `chat.html`。
+
+**关闭**：结束 `ninfer-serve` 进程（任务管理器里找 ninfer-serve，或 PowerShell 执行 `Stop-Process -Name ninfer-serve`）。
+
+> 本机另附 `start_chat.ps1` / `stop_chat.ps1` 两个一键脚本（内含本机绝对路径，换机器需改路径后使用）。
+
+> 想跑满 `--max-context 131072` 需要把桌面挪到核显、腾出约 800 MiB 显存；65536 是当前免核显情况下能跑的最大值。
+
+### 三、聊天页面设置
+
+页面上有四个可以调的地方：
+
+- **系统提示**（第二行输入框）：默认是一段「开放创作 + 理性讨论」的引导，可改成你想要的任何设定。
+- **思考**（勾选框）：勾上模型先想一遍再说（更稳）；取消更直接、更快。
+- **温度**：越高越有张力、越少套话，越低越收敛。
+- **max tokens**：单次回复上限。
+
 ---
 
 This fork documents and maintains a validated **Qwen3.8-27B** configuration for a single **NVIDIA RTX 5070 Ti 16 GB** with a genuine **131,072-token context and KV capacity**, Q4 KV, MTP-3 speculative decoding, and Vision support.
