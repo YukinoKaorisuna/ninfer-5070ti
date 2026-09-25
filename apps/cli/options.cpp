@@ -86,13 +86,16 @@ std::string usage_text(const char* argv0) {
            "       [--presence-penalty F] [--frequency-penalty F] [--seed N] [--greedy]\n"
            "       [--stop-token-id N]... [--stop <text>]... [--reasoning-stop <text>]...\n"
            "       [--raw-output] [--print-token-ids] [--no-thinking]\n"
-           "       [--reasoning-effort low|medium|xhigh] [--vision] [--embedding-host]\n"
+           "       [--reasoning-effort low|medium|xhigh] [--vision] [--vision-max-tokens N] "
+           "[--embedding-host]\n"
            "       [--no-cuda-graph]\n"
            "\n"
            "Streams answer content to stdout and reasoning plus diagnostics to stderr.\n"
            "Structured message content accepts text, image/image_url, and video/video_url parts;\n"
            "media sources may be local paths, HTTP(S) URLs, or base64 data URIs.\n"
            "--vision enables image/video input and loads the fixed Vision GPU allocations.\n"
+           "--vision-max-tokens caps merged Vision tokens independently of text context; "
+           "0 uses the historical automatic limit\n"
            "--embedding-host keeps the token-embedding table in pinned host memory. The CUDA\n"
            "embedding kernel remains GPU-executed and reads the required rows over UVA/PCIe.\n"
            "--kv-capacity auto leaves " +
@@ -164,6 +167,13 @@ Options parse_options(int argc, char** argv) {
             options.reasoning_effort = parse_reasoning_effort(value(arg));
         } else if (arg == "--vision") {
             options.enable_vision = true;
+        } else if (arg == "--vision-max-tokens") {
+            const std::uint32_t tokens = parse_u32(value(arg), "vision-max-tokens", true);
+            if (tokens > 32768) {
+                throw std::invalid_argument(
+                    "--vision-max-tokens must be in [0,32768]");
+            }
+            options.vision_max_tokens = tokens;
         } else if (arg == "--embedding-host") {
             options.embedding_host = true;
         } else if (arg == "--no-cuda-graph") {

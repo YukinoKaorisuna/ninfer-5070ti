@@ -26,6 +26,7 @@ struct Options {
     KvCacheStorage kv_cache = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     bool enable_vision  = false;
+    std::uint32_t vision_max_tokens = 0; // 0 => automatic Vision budget
     bool embedding_host = false;
     bool use_cuda_graph = true;
 
