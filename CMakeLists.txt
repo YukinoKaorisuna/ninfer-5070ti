@@ -46,11 +46,25 @@ endif()
 #
 # /bigobj is not optional: nvcc emits host translation units that exceed the default
 # section limit on the larger operator files.
+#
+# /Zc:preprocessor is not optional either: CUDA 13.4's bundled CCCL hard-errors out of
+# cuda/std/__cccl/preprocessor.h when cl.exe uses its traditional preprocessor.
 if(MSVC)
-  foreach(_flag /utf-8 /Zc:__cplusplus /bigobj)
+  foreach(_flag /utf-8 /Zc:__cplusplus /Zc:preprocessor /bigobj)
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:${_flag}>)
     add_compile_options($<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=${_flag}>)
   endforeach()
+
+  # <windows.h> defines min/max as macros, which breaks every std::min / ::max in the
+  # tree on the Windows path (symptoms: C2589 "'(' : illegal token on right side of
+  # '::'", then a cascade of C2059/C2143 parse errors). WIN32_LEAN_AND_MEAN additionally
+  # keeps the legacy winsock.h out of windows.h, which otherwise collides with the
+  # winsock2.h that src/product/media_acquire/acquire.cpp includes.
+  #
+  # UTF8PROC_STATIC: third_party/utf8proc/utf8proc.h defaults to __declspec(dllimport)
+  # on _WIN32, which makes it illegal to define those functions in the .c we compile
+  # into ninfer_text (MSVC C2491).
+  add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN UTF8PROC_STATIC)
 endif()
 
 set(NINFER_BUILD_MEDIA_ACQUIRE OFF)
@@ -79,8 +93,15 @@ find_package(Threads REQUIRED)
 #
 # Any distribution that ships include/ and lib/ works: vcpkg, gyan.dev or a BtbN
 # FFmpeg build, and the official curl-for-Windows build.
+# The Linux path names its imported targets after the pkg_check_modules prefix, and the
+# downstream sources link PkgConfig::LIBCURL (not ...::CURL). Windows must therefore be
+# able to synthesise a target whose name differs from the ROOT variable it reads.
 function(ninfer_import_prebuilt_target name)
-  cmake_parse_arguments(ARG "" "ROOT" "HEADERS;LIBS" ${ARGN})
+  cmake_parse_arguments(ARG "" "ROOT;TARGET" "HEADERS;LIBS" ${ARGN})
+
+  if(NOT ARG_TARGET)
+    set(ARG_TARGET "${name}")
+  endif()
 
   if(NOT ARG_ROOT)
     message(FATAL_ERROR
@@ -112,11 +133,11 @@ function(ninfer_import_prebuilt_target name)
     list(APPEND _libraries "${_resolved}")
   endforeach()
 
-  add_library(PkgConfig::${name} INTERFACE IMPORTED)
-  set_target_properties(PkgConfig::${name} PROPERTIES
+  add_library(PkgConfig::${ARG_TARGET} INTERFACE IMPORTED)
+  set_target_properties(PkgConfig::${ARG_TARGET} PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${ARG_ROOT}/include"
     INTERFACE_LINK_LIBRARIES "${_libraries}")
-  message(STATUS "Using prebuilt ${name} at ${ARG_ROOT}")
+  message(STATUS "Using prebuilt ${name} at ${ARG_ROOT} as PkgConfig::${ARG_TARGET}")
 endfunction()
 
 if(WIN32)
@@ -126,7 +147,10 @@ if(WIN32)
     LIBS "avformat;avcodec;avutil;swscale")
 
   if(NINFER_BUILD_MEDIA_ACQUIRE)
+    # TARGET LIBCURL, not CURL: src/CMakeLists.txt links PkgConfig::LIBCURL, matching the
+    # pkg-config module name used on Linux.
     ninfer_import_prebuilt_target(CURL
+      TARGET LIBCURL
       ROOT "${NINFER_CURL_ROOT}"
       HEADERS "curl/curl.h"
       LIBS "libcurl")

@@ -312,7 +312,11 @@ std::vector<std::uint8_t> read_path(const Source& source, const Policy& policy) 
     if (!policy.media_root.empty()) {
         const std::filesystem::path root = std::filesystem::weakly_canonical(policy.media_root, ec);
         const auto relative              = std::filesystem::relative(path, root, ec);
-        if (ec || relative.empty() || relative.native().starts_with("..")) {
+        // path::native() is std::wstring on Windows and std::string elsewhere, so the
+        // ".." probe has to be spelled in the native character type; a narrow literal
+        // has no matching std::wstring::starts_with overload (MSVC C2665).
+        const std::filesystem::path parent_marker = "..";
+        if (ec || relative.empty() || relative.native().starts_with(parent_marker.native())) {
             throw std::invalid_argument("media path is outside configured media root");
         }
     }
