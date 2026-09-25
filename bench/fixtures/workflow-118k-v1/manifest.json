@@ -1,0 +1,190 @@
+{
+  "fixture": "qwen38_workflow_118k_v1",
+  "construction": "deterministic synthetic engineering-agent workflow",
+  "seed": 5080118001,
+  "complete_workflow_blocks": 443,
+  "responses_input_tokens": 118041,
+  "expected_cli_prepared_tokens": 118001,
+  "historical": {
+    "bytes": 491625,
+    "lexical_items": 94392,
+    "unique_items": 24,
+    "unique_ratio": 0.0002542588354945334,
+    "top10_share": 0.4166666666666667,
+    "top100_share": 1.0,
+    "entropy_bits": 4.584962500721156,
+    "top20": [
+      [
+        "alpha",
+        3933
+      ],
+      [
+        "beta",
+        3933
+      ],
+      [
+        "gamma",
+        3933
+      ],
+      [
+        "delta",
+        3933
+      ],
+      [
+        "epsilon",
+        3933
+      ],
+      [
+        "zeta",
+        3933
+      ],
+      [
+        "eta",
+        3933
+      ],
+      [
+        "theta",
+        3933
+      ],
+      [
+        "iota",
+        3933
+      ],
+      [
+        "kappa",
+        3933
+      ],
+      [
+        "lambda",
+        3933
+      ],
+      [
+        "mu",
+        3933
+      ],
+      [
+        "nu",
+        3933
+      ],
+      [
+        "xi",
+        3933
+      ],
+      [
+        "omicron",
+        3933
+      ],
+      [
+        "pi",
+        3933
+      ],
+      [
+        "rho",
+        3933
+      ],
+      [
+        "sigma",
+        3933
+      ],
+      [
+        "tau",
+        3933
+      ],
+      [
+        "upsilon",
+        3933
+      ]
+    ]
+  },
+  "workflow": {
+    "bytes": 413078,
+    "lexical_items": 121071,
+    "unique_items": 1922,
+    "unique_ratio": 0.01587498244831545,
+    "top10_share": 0.6100882952978005,
+    "top100_share": 0.7868523428401516,
+    "entropy_bits": 5.378880296659668,
+    "top20": [
+      [
+        "=",
+        55498
+      ],
+      [
+        "\"",
+        5750
+      ],
+      [
+        ",",
+        2827
+      ],
+      [
+        ":",
+        2097
+      ],
+      [
+        "-",
+        1984
+      ],
+      [
+        "+",
+        1624
+      ],
+      [
+        "the",
+        1191
+      ],
+      [
+        "[",
+        1025
+      ],
+      [
+        "]",
+        1025
+      ],
+      [
+        ".",
+        843
+      ],
+      [
+        ">",
+        773
+      ],
+      [
+        "and",
+        746
+      ],
+      [
+        "{",
+        710
+      ],
+      [
+        "}",
+        710
+      ],
+      [
+        "$",
+        628
+      ],
+      [
+        "(",
+        609
+      ],
+      [
+        ")",
+        609
+      ],
+      [
+        "/",
+        569
+      ],
+      [
+        "WORKFLOW",
+        443
+      ],
+      [
+        "SEGMENT",
+        443
+      ]
+    ]
+  }
+}
