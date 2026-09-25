@@ -1,6 +1,22 @@
-# NInfer RTX 5080 — Qwen3.8-27B at true 128K + Vision on 16 GB
+# NInfer RTX 5070 Ti — Qwen3.8-27B at true 128K + Vision on 16 GB
 
-This fork documents and maintains a validated **Qwen3.8-27B** configuration for a single **NVIDIA RTX 5080 16 GB** with a genuine **131,072-token context and KV capacity**, Q4 KV, MTP-3 speculative decoding, and Vision support.
+> 本仓库是 [toddballinger/ninfer-5080](https://github.com/toddballinger/ninfer-5080) 的分支，
+> 在其验证成果之上增加了 **RTX 5070 Ti 的原生 Windows (MSVC) 移植与实测**。
+>
+> **特别感谢 [@toddballinger](https://github.com/toddballinger)**（ninfer-5080 作者，验证了
+> 128K / Q4-KV / MTP-3 / Vision 运行时）**和 [Neroued](https://github.com/Neroued)**（NInfer
+> 原作者）—— 本移植建立在两位的成果之上。
+
+**中文导读**
+
+- **这是什么**：Qwen3.8-27B 在单张 16 GB 显卡上跑真 128K 上下文 + Vision 的推理运行时；本分支补上了 5070 Ti 的 Windows 原生构建。
+- **为什么 5070 Ti 能直接用**：5070 Ti 与 5080 同为 GB203 / compute capability 12.0（`sm_120a`）、同为 16 GB 显存，因此模型 artifact（配方 `groupwise-int-5080`）与 131072-token KV 分配完全通用，无需重新量化。
+- **Windows 构建与运行**：见 [docs/WINDOWS_5070TI.md](docs/WINDOWS_5070TI.md)。
+- **本机实测（5070 Ti）**：prefill ~1301 tok/s、decode ~65 tok/s（8K 上下文 + MTP-3）。
+
+---
+
+This fork documents and maintains a validated **Qwen3.8-27B** configuration for a single **NVIDIA RTX 5070 Ti 16 GB** with a genuine **131,072-token context and KV capacity**, Q4 KV, MTP-3 speculative decoding, and Vision support.
 
 The project separates three things deliberately:
 
@@ -21,7 +37,7 @@ The canonical public artifact is now hosted by the project on Hugging Face:
 | File | `qwen3_8_27b.ninfer` |
 | Size | `16,461,267,456` bytes |
 | SHA-256 | `c4a7e9ab593a7f42d58208fa0065d67a82d61921107686cc9f6ed1ec6b050e21` |
-| Target | Qwen3.8-27B / RTX 5080 16 GB |
+| Target | Qwen3.8-27B / RTX 5070 Ti 16 GB |
 | Effective main-model quantization | ~3.953 BPW |
 | Context | 131,072 |
 | KV capacity | 131,072 |
@@ -201,7 +217,7 @@ The full documentation index is in [docs/README.md](docs/README.md).
 
 This fork selectively incorporates upstream NInfer changes rather than tracking `Neroued/ninfer:master` commit-for-commit.
 
-Upstream changes are evaluated for **production-path relevance first**. A microbenchmark improvement on a kernel or shape that the validated Qwen3.8-27B RTX 5080 workload does not exercise is normally deferred rather than merged only to reduce a GitHub “behind” count.
+Upstream changes are evaluated for **production-path relevance first**. A microbenchmark improvement on a kernel or shape that the validated Qwen3.8-27B RTX 5070 Ti workload does not exercise is normally deferred rather than merged only to reduce a GitHub “behind” count.
 
 See [UPSTREAM_SYNC_STATUS.md](docs/UPSTREAM_SYNC_STATUS.md) for the current commit-scoped ledger and acceptance policy.
 
