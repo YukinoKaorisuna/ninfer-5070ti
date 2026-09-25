@@ -1,0 +1,212 @@
+{
+  "fixture": "qwen38_workflow_118k_v1",
+  "construction": "deterministic synthetic engineering-agent workflow",
+  "seed": 5080118001,
+  "complete_workflow_blocks": 443,
+  "responses_input_tokens": 118041,
+  "expected_cli_prepared_tokens": 118001,
+  "historical": {
+    "bytes": 491625,
+    "lexical_items": 94392,
+    "unique_items": 24,
+    "unique_ratio": 0.0002542588354945334,
+    "top10_share": 0.4166666666666667,
+    "top100_share": 1.0,
+    "entropy_bits": 4.584962500721156,
+    "top20": [
+      [
+        "alpha",
+        3933
+      ],
+      [
+        "beta",
+        3933
+      ],
+      [
+        "gamma",
+        3933
+      ],
+      [
+        "delta",
+        3933
+      ],
+      [
+        "epsilon",
+        3933
+      ],
+      [
+        "zeta",
+        3933
+      ],
+      [
+        "eta",
+        3933
+      ],
+      [
+        "theta",
+        3933
+      ],
+      [
+        "iota",
+        3933
+      ],
+      [
+        "kappa",
+        3933
+      ],
+      [
+        "lambda",
+        3933
+      ],
+      [
+        "mu",
+        3933
+      ],
+      [
+        "nu",
+        3933
+      ],
+      [
+        "xi",
+        3933
+      ],
+      [
+        "omicron",
+        3933
+      ],
+      [
+        "pi",
+        3933
+      ],
+      [
+        "rho",
+        3933
+      ],
+      [
+        "sigma",
+        3933
+      ],
+      [
+        "tau",
+        3933
+      ],
+      [
+        "upsilon",
+        3933
+      ]
+    ]
+  },
+  "workflow": {
+    "bytes": 413078,
+    "lexical_items": 121071,
+    "unique_items": 1922,
+    "unique_ratio": 0.01587498244831545,
+    "top10_share": 0.6100882952978005,
+    "top100_share": 0.7868523428401516,
+    "entropy_bits": 5.378880296659668,
+    "top20": [
+      [
+        "=",
+        55498
+      ],
+      [
+        "\"",
+        5750
+      ],
+      [
+        ",",
+        2827
+      ],
+      [
+        ":",
+        2097
+      ],
+      [
+        "-",
+        1984
+      ],
+      [
+        "+",
+        1624
+      ],
+      [
+        "the",
+        1191
+      ],
+      [
+        "[",
+        1025
+      ],
+      [
+        "]",
+        1025
+      ],
+      [
+        ".",
+        843
+      ],
+      [
+        ">",
+        773
+      ],
+      [
+        "and",
+        746
+      ],
+      [
+        "{",
+        710
+      ],
+      [
+        "}",
+        710
+      ],
+      [
+        "$",
+        628
+      ],
+      [
+        "(",
+        609
+      ],
+      [
+        ")",
+        609
+      ],
+      [
+        "/",
+        569
+      ],
+      [
+        "WORKFLOW",
+        443
+      ],
+      [
+        "SEGMENT",
+        443
+      ]
+    ]
+  },
+  "reconstruction": {
+    "complete_blocks_retained": 443,
+    "retained_indices": "0-442",
+    "partial_terminal_block": true,
+    "terminal_block_index": 442,
+    "terminal_note_word_count": 65,
+    "terminal_note_bytes": 499,
+    "terminal_note_word_cycle": 12,
+    "terminal_note_full_cycles": 5,
+    "terminal_note_tail_words": 5,
+    "terminal_note_driver": "token-count (reaches expected_cli_prepared_tokens) via word-boundary truncation",
+    "trim_mechanism": "byte-offset: note is the last 499 bytes (413078-412579) appended after block 442; word-boundary (not line/lexical/tokenizer)",
+    "decoded_complete_bytes": 412579,
+    "final_bytes": 413078,
+    "final_sha256": "cb7c131bd20d78bd69396c019f988c81fad1941a853a8de7da7586e1aeb99718",
+    "expected_prepared_tokens": 118001,
+    "selection_method": "single committed 443-block generator (cf57a6e3, loop 443); 443 = number of complete workflow blocks in the fixture, NOT a 2200->443 selection",
+    "terminal_note_position": "appended after terminal complete block (index 442)",
+    "provenance_note": "Original cf57a6e3 generator loops range(2200)+json.dumps and cannot reproduce this fixture; no selection/trim/binary-search procedure exists in git history (git log -S/-G; fixture set is branch-only, cf57a6e3 is its sole commit). The 2200->443 finalization, if any, was produced outside this history and its semantics are unrecoverable, so they are not asserted. This generator (443 + terminal note) is the faithful form that byte-reproduces the fixture.",
+    "terminal_note_truncated_cycle": 6,
+    "terminal_note_note": "note = 5 full 12-word cycles (60 words) + 5-word partial 6th cycle (65 words), then truncated at a word boundary"
+  }
+}
