@@ -203,6 +203,10 @@
     "decoded_complete_bytes": 412579,
     "final_bytes": 413078,
     "final_sha256": "cb7c131bd20d78bd69396c019f988c81fad1941a853a8de7da7586e1aeb99718",
-    "expected_prepared_tokens": 118001
+    "expected_prepared_tokens": 118001,
+    "selection_method": "positional: retain first 443 of 2200 deterministic candidates (indices 0-442); 1757 candidates dropped",
+    "trimmed_candidate_blocks": 1757,
+    "trimmed_candidate_indices": "443-2199",
+    "terminal_note_position": "appended after terminal complete block (index 442)"
   }
 }

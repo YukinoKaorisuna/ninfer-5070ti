@@ -375,18 +375,14 @@ for i in range(2200):
     fn = generators[i % len(generators)]
     blocks.append(fn(i))
 
-# Decode: blocks each begin with a leading newline (header()), so plain
-# concatenation reproduces the committed fixture; a fixed diagnostic-note
-# trailer is appended (literal, preserving the committed byte-for-byte form).
-content = "".join(blocks)
-content += '\nDiagnostic note: model context runtime tool request cache prefill decode benchmark status branch artifact model context runtime tool request cache prefill decode benchmark status branch artifact model context runtime tool request cache prefill decode benchmark status branch artifact model context runtime tool request cache prefill decode benchmark status branch artifact model context runtime tool request cache prefill decode benchmark status branch artifact model context runtime tool request.\n'
-# RECONSTRUCTION PROCEDURE (how the committed fixture was actually built):
+# RECONSTRUCTION PROCEDURE (how the committed fixture was built):
 #   1) Generate 2200 deterministic candidate workflow blocks (seed 5080118001).
-#   2) Retain only the first 443 complete blocks (indices 0-442).
-#   3) Decode to text (each block begins with a leading newline -> plain concat).
-#   4) Append a terminal diagnostic-vocabulary note (65 words = 5 full 12-word cycles
-#      + 5 words of the 6th cycle; word-boundary truncation) to terminal block 442
-#      to reach the 118001 prepared-token target. The note is a fixed literal.
+#   2) SELECTION: retain the first 443 complete blocks (indices 0-442); drop 443..2199.
+#   3) Decode the 443 retained blocks to text (each leads with a newline -> plain
+#      concat = 412579 B).
+#   4) FINAL TRIM/EXTEND: append a terminal diagnostic-vocabulary note (65 words = 5 full
+#      12-word cycles + 5-word tail, word-boundary truncation) after the terminal complete
+#      block (index 442) to reach the 118001 prepared-token target -> 413078 B. Fixed literal.
 retained = blocks[:443]
 content = "".join(retained)
 content += '\nDiagnostic note: model context runtime tool request cache prefill decode benchmark status branch artifact model context runtime tool request cache prefill decode benchmark status branch artifact model context runtime tool request cache prefill decode benchmark status branch artifact model context runtime tool request cache prefill decode benchmark status branch artifact model context runtime tool request cache prefill decode benchmark status branch artifact model context runtime tool request.\n'
