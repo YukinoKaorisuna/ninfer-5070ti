@@ -13,6 +13,7 @@
 - **为什么 5070 Ti 能直接用**：5070 Ti 与 5080 同为 GB203 / compute capability 12.0（`sm_120a`）、同为 16 GB 显存，因此模型 artifact（配方 `groupwise-int-5080`）与 131072-token KV 分配完全通用，无需重新量化。
 - **Windows 构建与运行**：见 [docs/WINDOWS_5070TI.md](docs/WINDOWS_5070TI.md)。
 - **本机实测（5070 Ti）**：prefill ~1301 tok/s、decode ~65 tok/s（8K 上下文 + MTP-3）。
+- **破限（无审查）模型**：另有一个社区 abliterated 版（去对齐 / 破限，同样是 `.ninfer` 格式，同一 NInfer 运行时直接加载），见 [YukinoKaorisuna/Qwen3.8-27B-Uncensored-ninfer](https://huggingface.co/YukinoKaorisuna/Qwen3.8-27B-Uncensored-ninfer)。
 
 ## 快速上手（Windows · RTX 5070 Ti）
 
@@ -29,17 +30,21 @@
 
 **启动**（在仓库根目录执行，`<模型路径>` 换成实际的 `.ninfer` 文件）：
 
+- **带图片识别（推荐）**——加 `--vision`；视觉编码器要额外约 2GB 显存，上下文需降到 16384：
+
 ```
-build-windows\apps\ninfer-serve.exe <模型路径> --host 127.0.0.1 --port 8100 --max-context 65536 --kv-dtype q4 --spec mtp --draft-tokens 3 --embedding-host --max-concurrency 1 --model-id m
+build-windows\apps\ninfer-serve.exe <模型路径> --host 127.0.0.1 --port 8100 --max-context 16384 --kv-dtype q4 --spec mtp --draft-tokens 3 --embedding-host --max-concurrency 1 --model-id m --vision
 ```
 
-**打开页面**：用浏览器打开仓库里的 `chat.html`。
+- **纯文本（更长上下文）**——不带 `--vision`，上下文可用到 65536。
+
+**打开页面**：用浏览器打开仓库里的 `chat.html`。发图会自动转成 JPEG 再上传（服务端 FFmpeg 未编译 PNG 解码器，只支持 JPEG/BMP 等内置格式）。
 
 **关闭**：结束 `ninfer-serve` 进程（任务管理器里找 ninfer-serve，或 PowerShell 执行 `Stop-Process -Name ninfer-serve`）。
 
-> 本机另附 `start_chat.ps1` / `stop_chat.ps1` 两个一键脚本（内含本机绝对路径，换机器需改路径后使用）。
+> 本机另附 `start_chat.ps1`（一键启动，默认带 vision + 起完自动打开页面）/ `stop_chat.ps1`（一键关闭），Windows 下请双击 `start_chat.bat` / `stop_chat.bat`（双击 `.ps1` 会用记事本打开而不是运行）。脚本内含本机绝对路径，换机器需改路径。
 
-> 想跑满 `--max-context 131072` 需要把桌面挪到核显、腾出约 800 MiB 显存；65536 是当前免核显情况下能跑的最大值。
+> 关于显存：开视觉要额外预留约 2GB（视觉编码器固定分配），16GB 卡下 65536 上下文装不下 vision，需降到 16384；想同时跑满 `--max-context 131072` 得把桌面挪到核显。
 
 ### 三、聊天页面设置
 
@@ -94,6 +99,23 @@ c4a7e9ab593a7f42d58208fa0065d67a82d61921107686cc9f6ed1ec6b050e21
 ```
 
 The same artifact SHA has been retained across the original text-only release, Vision enablement, the v1.2/v1.3 production runtime work, and subsequent qualified runtime optimizations.
+
+## Uncensored (abliterated) model
+
+In addition to the official aligned artifact, a community **abliterated (uncensored)** build of Qwen3.8-27B is available in the same `.ninfer` format:
+
+**[YukinoKaorisuna/Qwen3.8-27B-Uncensored-ninfer](https://huggingface.co/YukinoKaorisuna/Qwen3.8-27B-Uncensored-ninfer)**
+
+| Field | Value |
+|---|---|
+| File | `qwen3_8_27b_uncensored.ninfer` |
+| Size | ~15.33 GB |
+| Recipe | `groupwise-int-5080` (Q3/Q4/Q5 mixed) |
+| Base | Qwen3.8-27B, refusal-direction removed (ZeroFuse abliteration) |
+| Source weights | `vkshdev/Qwen-3.8-28B-uncensored` |
+| Vision | supported (`--vision`; lower `--max-context` to 8192 on 16 GB) |
+
+It loads with the same NInfer runtime — no additional engine work is required. Quality impact vs the official build is small (~4% on competition-level problems, zero difference on everyday tasks); see the model card for the full measured comparison.
 
 ## Validated runtime releases
 
