@@ -13,7 +13,7 @@
 - **为什么 5070 Ti 能直接用**：5070 Ti 与 5080 同为 GB203 / compute capability 12.0（`sm_120a`）、同为 16 GB 显存，因此模型 artifact（配方 `groupwise-int-5080`）与 131072-token KV 分配完全通用，无需重新量化。
 - **Windows 构建与运行**：见 [docs/WINDOWS_5070TI.md](docs/WINDOWS_5070TI.md)。
 - **本机实测（5070 Ti）**：prefill ~1301 tok/s、decode ~65 tok/s（8K 上下文 + MTP-3）。
-- **破限（无审查）模型**：另有一个社区 abliterated 版（去对齐 / 破限，同样是 `.ninfer` 格式，同一 NInfer 运行时直接加载），见 [YukinoKaorisuna/Qwen3.8-27B-Uncensored-ninfer](https://huggingface.co/YukinoKaorisuna/Qwen3.8-27B-Uncensored-ninfer)。
+- **破限（无审查）模型**：本人用 NInfer 转换工具，把社区 abliterated 权重 `vkshdev/Qwen-3.8-28B-uncensored` 自己转成了 `.ninfer` 格式（非社区现成 `.ninfer`，同一 NInfer 运行时直接加载），见 [YukinoKaorisuna/Qwen3.8-27B-Uncensored-ninfer](https://huggingface.co/YukinoKaorisuna/Qwen3.8-27B-Uncensored-ninfer)。
 
 ## 快速上手（Windows · RTX 5070 Ti）
 
@@ -102,7 +102,7 @@ The same artifact SHA has been retained across the original text-only release, V
 
 ## Uncensored (abliterated) model
 
-In addition to the official aligned artifact, a community **abliterated (uncensored)** build of Qwen3.8-27B is available in the same `.ninfer` format:
+In addition to the official aligned artifact, a **self-converted abliterated (uncensored)** build of Qwen3.8-27B is available in the same `.ninfer` format — produced by running the NInfer converter over the community abliterated weights (not a pre-existing community `.ninfer` release):
 
 **[YukinoKaorisuna/Qwen3.8-27B-Uncensored-ninfer](https://huggingface.co/YukinoKaorisuna/Qwen3.8-27B-Uncensored-ninfer)**
 
@@ -112,7 +112,7 @@ In addition to the official aligned artifact, a community **abliterated (uncenso
 | Size | ~15.33 GB |
 | Recipe | `groupwise-int-5080` (Q3/Q4/Q5 mixed) |
 | Base | Qwen3.8-27B, refusal-direction removed (ZeroFuse abliteration) |
-| Source weights | `vkshdev/Qwen-3.8-28B-uncensored` |
+| Source weights | `vkshdev/Qwen-3.8-28B-uncensored` (converted locally with the NInfer toolchain) |
 | Vision | supported (`--vision`; lower `--max-context` to 8192 on 16 GB) |
 
 It loads with the same NInfer runtime — no additional engine work is required. Quality impact vs the official build is small (~4% on competition-level problems, zero difference on everyday tasks); see the model card for the full measured comparison.
