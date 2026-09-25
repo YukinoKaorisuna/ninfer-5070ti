@@ -186,5 +186,23 @@
         443
       ]
     ]
+  },
+  "reconstruction": {
+    "candidate_blocks_generated": 2200,
+    "complete_blocks_retained": 443,
+    "retained_indices": "0-442",
+    "partial_terminal_block": true,
+    "terminal_block_index": 442,
+    "terminal_note_word_count": 65,
+    "terminal_note_bytes": 499,
+    "terminal_note_word_cycle": 12,
+    "terminal_note_full_cycles": 5,
+    "terminal_note_tail_words": 5,
+    "terminal_note_driver": "token-count (reaches expected_cli_prepared_tokens) via word-boundary truncation",
+    "trim_mechanism": "byte-offset: note is the last 499 bytes (413078-412579) appended after block 442; word-boundary (not line/lexical/tokenizer)",
+    "decoded_complete_bytes": 412579,
+    "final_bytes": 413078,
+    "final_sha256": "cb7c131bd20d78bd69396c019f988c81fad1941a853a8de7da7586e1aeb99718",
+    "expected_prepared_tokens": 118001
   }
 }
