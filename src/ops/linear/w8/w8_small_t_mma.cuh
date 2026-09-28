@@ -68,6 +68,24 @@ union alignas(16) W8SmallTMmaSharedStorage {
     float partial[Schedule::kKWarps * (Schedule::kTileTokens / 8) * 32 * 4];
 };
 
+// Shared-memory budget gate. sm_89 (and older) cap *static* shared memory at 48 KiB
+// while the W8 schedules are tuned for Blackwell's 228 KiB static budget. Kernels whose
+// staging exceeds 48 KiB therefore opt into dynamic shared memory: the launcher passes
+// the byte size and raises cudaFuncAttributeMaxDynamicSharedMemorySize (see the sibling
+// bf16/fp8/q3 launchers for the established pattern). The rule is arch-independent —
+// on sm_120 it is a no-op (static also fits, and the total per-block footprint is
+// unchanged), on sm_89 it is required.
+template <class Schedule, bool TiledColumns, int ActiveCols>
+inline constexpr bool kW8SmallTMmaDynamicShared =
+    (TiledColumns && ActiveCols > 64) ||
+    (sizeof(W8SmallTMmaSharedStorage<Schedule>) > (48 * 1024));
+
+template <class Schedule, bool TiledColumns, int ActiveCols>
+inline constexpr std::size_t kW8SmallTMmaSharedBytes =
+    kW8SmallTMmaDynamicShared<Schedule, TiledColumns, ActiveCols>
+        ? sizeof(W8SmallTMmaSharedStorage<Schedule>)
+        : 0;
+
 struct W8SmallTMmaIdentityColumns {
     __device__ __forceinline__ int operator()(int column) const { return column; }
 };
@@ -99,7 +117,7 @@ w8_small_t_mma(const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restri
 
     using SharedStorage = W8SmallTMmaSharedStorage<Schedule>;
 
-    constexpr bool kDynamicShared = TiledColumns && ActiveCols > 64;
+    constexpr bool kDynamicShared = kW8SmallTMmaDynamicShared<Schedule, TiledColumns, ActiveCols>;
     __shared__ __align__(
         16) unsigned char static_shared[kDynamicShared ? 1 : sizeof(SharedStorage)];
     extern __shared__ __align__(16) unsigned char dynamic_shared[];

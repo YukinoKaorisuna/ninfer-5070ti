@@ -52,9 +52,17 @@ void launch_exact(const Tensor& x, const Weight& weight, Tensor& out, cudaStream
     const W8SwiGluDirectEpilogue epilogue{static_cast<__nv_bfloat16*>(out.data), kIntermediate};
     const RowPolicy row_policy{};
     constexpr int kBlocks = kIntermediate / RowPolicy::kOutputRowsPerCta;
+    constexpr std::size_t kSharedBytes = kW8SmallTMmaSharedBytes<Schedule, false, ActiveTokens>;
+    if constexpr (kW8SmallTMmaDynamicShared<Schedule, false, ActiveTokens>) {
+        static const cudaError_t attr = cudaFuncSetAttribute(
+            w8_small_t_mma_kernel<Geometry, ActiveTokens, Schedule, W8ContiguousOutput,
+                                  W8SwiGluDirectEpilogue, RowPolicy, true, false>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(kSharedBytes));
+        (void)attr;
+    }
     w8_small_t_mma_kernel<Geometry, ActiveTokens, Schedule, W8ContiguousOutput,
                           W8SwiGluDirectEpilogue, RowPolicy, true>
-        <<<kBlocks, Schedule::kThreads, 0, stream>>>(
+        <<<kBlocks, Schedule::kThreads, kSharedBytes, stream>>>(
             static_cast<const __nv_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
             static_cast<const std::uint8_t*>(weight.scales), ignored_output, epilogue, row_policy);

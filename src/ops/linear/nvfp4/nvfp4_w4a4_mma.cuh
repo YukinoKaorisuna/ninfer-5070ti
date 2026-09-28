@@ -213,7 +213,8 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_w4a4
     static_assert(!PairRows || (Schedule::kBlockN % 2) == 0);
     static_assert(!PairRows || ((Geometry::kOutputRows / 2) % (Schedule::kBlockN / 2)) == 0);
 
-    __shared__ Nvfp4W4a4SharedStorage<Schedule> shared;
+    extern __shared__ __align__(16) unsigned char shared_bytes[];
+    auto& shared = *reinterpret_cast<Nvfp4W4a4SharedStorage<Schedule>*>(shared_bytes);
     const int token_begin       = static_cast<int>(blockIdx.y) * Schedule::kBlockM;
     constexpr int kRowsPerBlock = PairRows ? Schedule::kBlockN / 2 : Schedule::kBlockN;
     const int row_begin         = static_cast<int>(blockIdx.x) * kRowsPerBlock;

@@ -38,11 +38,19 @@ void launch_ksplit_t7(const Tensor& hidden, const Weight& head, std::int32_t val
     const W8ContiguousOutput unused{nullptr, Geometry::kOutputRows};
     const W8KSplitTopKOutput output{static_cast<std::uint64_t*>(workspace.partial_keys.data),
                                     workspace.producer_groups, valid_rows};
+    constexpr std::size_t kSharedBytes = kW8SmallTMmaSharedBytes<Schedule, false, 7>;
+    if constexpr (kW8SmallTMmaDynamicShared<Schedule, false, 7>) {
+        static const cudaError_t attr = cudaFuncSetAttribute(
+            w8_small_t_mma_kernel<Geometry, 7, Schedule, W8ContiguousOutput, W8KSplitTopKOutput,
+                                  W8SmallTMmaIdentityRows, false, false>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(kSharedBytes));
+        (void)attr;
+    }
     w8_small_t_mma_kernel<Geometry, 7, Schedule, W8ContiguousOutput, W8KSplitTopKOutput>
-        <<<kBlocks, Schedule::kThreads, 0, stream>>>(static_cast<const __nv_bfloat16*>(hidden.data),
-                                                     static_cast<const std::uint8_t*>(head.qdata),
-                                                     static_cast<const std::uint8_t*>(head.scales),
-                                                     unused, output);
+        <<<kBlocks, Schedule::kThreads, kSharedBytes, stream>>>(
+            static_cast<const __nv_bfloat16*>(hidden.data),
+            static_cast<const std::uint8_t*>(head.qdata),
+            static_cast<const std::uint8_t*>(head.scales), unused, output);
     CUDA_CHECK(cudaGetLastError());
 }
 

@@ -74,8 +74,17 @@ void launch_active_cols(const Tensor& x, const Weight& first_weight, const Weigh
     const W8ContiguousOutput ignored{static_cast<__nv_bfloat16*>(first_out.data), kRows};
     const W8PairExactTEpilogue epilogue{static_cast<__nv_bfloat16*>(first_out.data),
                                         static_cast<__nv_bfloat16*>(second_out.data)};
+    constexpr std::size_t kSharedBytes = kW8SmallTMmaSharedBytes<Schedule, false, ActiveCols>;
+    if constexpr (kW8SmallTMmaDynamicShared<Schedule, false, ActiveCols>) {
+        static const cudaError_t attr = cudaFuncSetAttribute(
+            w8_small_t_mma_kernel<Geometry, ActiveCols, Schedule, W8ContiguousOutput,
+                                  W8PairExactTEpilogue, W8PairExactTRows, false, false>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(kSharedBytes));
+        (void)attr;
+    }
     w8_small_t_mma_kernel<Geometry, ActiveCols, Schedule, W8ContiguousOutput, W8PairExactTEpilogue,
-                          W8PairExactTRows><<<kRows / kRowsPerCta, Schedule::kThreads, 0, stream>>>(
+                          W8PairExactTRows><<<kRows / kRowsPerCta, Schedule::kThreads, kSharedBytes,
+                                             stream>>>(
         static_cast<const __nv_bfloat16*>(x.data), first_codes, first_scales, ignored, epilogue,
         W8PairExactTRows{});
 }
@@ -101,8 +110,15 @@ void launch_medium(const Tensor& x, const Weight& first_weight, const Weight& se
     }
     const PairOutput output{static_cast<__nv_bfloat16*>(first_out.data),
                             static_cast<__nv_bfloat16*>(second_out.data)};
+    constexpr std::size_t kSharedBytes =
+        sizeof(W8MediumTSplitKSharedStorage<KSplits, TileCols, NGroups>);
+    static const cudaError_t attr = cudaFuncSetAttribute(
+        w8_rowsplit_medium_t_splitk_kernel<kHidden, TileCols, KSplits, NGroups, MinBlocks,
+                                           PairOutput>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(kSharedBytes));
+    (void)attr;
     w8_rowsplit_medium_t_splitk_kernel<kHidden, TileCols, KSplits, NGroups, MinBlocks>
-        <<<(2 * kRows) / 16, KSplits * NGroups * 32, 0, stream>>>(
+        <<<(2 * kRows) / 16, KSplits * NGroups * 32, kSharedBytes, stream>>>(
             static_cast<const __nv_bfloat16*>(x.data), first_codes, first_scales, output, x.ne[1]);
 }
 

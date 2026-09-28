@@ -38,8 +38,16 @@ void launch_projection(const Tensor& x, const Weight& weight, Tensor& out, cudaS
     using Schedule = W8SmallTMmaSchedule<Warps, (Tokens + 7) / 8 * 8, Warps == 8 ? 2 : 3,
                                          W8SmallTMmaScaleAccess::Shared, Activation>;
     W8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), kRows};
+    constexpr std::size_t kSharedBytes = kW8SmallTMmaSharedBytes<Schedule, false, Tokens>;
+    if constexpr (kW8SmallTMmaDynamicShared<Schedule, false, Tokens>) {
+        static const cudaError_t attr = cudaFuncSetAttribute(
+            w8_small_t_mma_kernel<Geometry, Tokens, Schedule, W8ContiguousOutput,
+                                  W8SmallTMmaStoreEpilogue, W8SmallTMmaIdentityRows, false, false>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(kSharedBytes));
+        (void)attr;
+    }
     w8_small_t_mma_kernel<Geometry, Tokens, Schedule>
-        <<<kRows / 16, Schedule::kThreads, 0, stream>>>(
+        <<<kRows / 16, Schedule::kThreads, kSharedBytes, stream>>>(
             static_cast<const __nv_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
             static_cast<const std::uint8_t*>(weight.scales), output);

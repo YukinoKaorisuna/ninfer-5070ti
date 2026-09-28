@@ -1,0 +1,142 @@
+diff --git a/src/core/pdl.cuh b/src/core/pdl.cuh
+index 0c60b6a7..fdb89e0b 100644
+--- a/src/core/pdl.cuh
++++ b/src/core/pdl.cuh
+@@ -14,32 +14,61 @@ struct LaunchConfig {
+     cudaStream_t stream            = nullptr;
+ };
+ 
++// Programmatic dependent launch requires compute capability 9.0+. On older
++// devices the launch attribute is dropped, stream order fully serializes the
++// producer/consumer pair, and the device helpers below become no-ops:
++// correctness is preserved, only the launch-overlap optimization is lost.
++inline bool device_supports_pdl() {
++    static const bool supported = [] {
++        int device = 0;
++        if (cudaGetDevice(&device) != cudaSuccess) { return false; }
++        int major = 0;
++        if (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device) !=
++            cudaSuccess) {
++            return false;
++        }
++        return major >= 9;
++    }();
++    return supported;
++}
++
+ // Launches a consumer kernel as a programmatic dependent of the immediately preceding producer
+ // kernel in the same stream. Every consumer control path that reads producer output must first call
+ // wait_for_dependencies().
+ template <class... KernelArgs, class... CallArgs>
+ [[nodiscard]] inline cudaError_t
+ launch_dependent(const LaunchConfig& launch, void (*kernel)(KernelArgs...), CallArgs&&... args) {
+-    cudaLaunchAttribute attribute{};
+-    attribute.id = cudaLaunchAttributeProgrammaticStreamSerialization;
+-    attribute.val.programmaticStreamSerializationAllowed = 1;
+-
+     cudaLaunchConfig_t config{};
+     config.gridDim          = launch.grid;
+     config.blockDim         = launch.block;
+     config.dynamicSmemBytes = launch.dynamic_smem_bytes;
+     config.stream           = launch.stream;
+-    config.attrs            = &attribute;
+-    config.numAttrs         = 1;
++    config.attrs            = nullptr;
++    config.numAttrs         = 0;
++
++    cudaLaunchAttribute attribute{};
++    if (device_supports_pdl()) {
++        attribute.id = cudaLaunchAttributeProgrammaticStreamSerialization;
++        attribute.val.programmaticStreamSerializationAllowed = 1;
++        config.attrs    = &attribute;
++        config.numAttrs = 1;
++    }
+ 
+     return cudaLaunchKernelEx(&config, kernel, std::forward<CallArgs>(args)...);
+ }
+ 
+ // Every producer CTA must call this at least once or exit. This enables dependent scheduling but
+ // does not make producer writes visible to the consumer.
++#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+ __device__ __forceinline__ void trigger_dependents() { cudaTriggerProgrammaticLaunchCompletion(); }
+ 
+ // Call on every consumer control path before its first access to producer-dependent data.
+ __device__ __forceinline__ void wait_for_dependencies() { cudaGridDependencySynchronize(); }
++#else
++__device__ __forceinline__ void trigger_dependents() {}
++
++// Call on every consumer control path before its first access to producer-dependent data.
++__device__ __forceinline__ void wait_for_dependencies() {}
++#endif
+ 
+ } // namespace ninfer::pdl
+diff --git a/src/ops/common/mma.cuh b/src/ops/common/mma.cuh
+index cb7f0054..e36ce9ef 100644
+--- a/src/ops/common/mma.cuh
++++ b/src/ops/common/mma.cuh
+@@ -70,10 +70,19 @@ __device__ __forceinline__ void mma_s8_zero(int& d0, int& d1, int& d2, int& d3,
+ __device__ __forceinline__ void mma_fp8_e4m3(float& c0, float& c1, float& c2, float& c3,
+                                              unsigned a0, unsigned a1, unsigned a2, unsigned a3,
+                                              unsigned b0, unsigned b1) {
++#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+     asm volatile("mma.sync.aligned.kind::f8f6f4.m16n8k32.row.col.f32.e4m3.e4m3.f32 "
+                  "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+                  : "+f"(c0), "+f"(c1), "+f"(c2), "+f"(c3)
+                  : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
++#else
++    // Pre-Blackwell: the unqualified FP8 MMA has the same m16n8k32 shape and
++    // operand fragments and assembles since PTX ISA 8.4 (sm_89 native FP8).
++    asm volatile("mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 "
++                 "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
++                 : "+f"(c0), "+f"(c1), "+f"(c2), "+f"(c3)
++                 : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
++#endif
+ }
+ 
+ __device__ __forceinline__ void mma_tf32_bits(float& c0, float& c1, float& c2, float& c3,
+@@ -95,6 +104,7 @@ __device__ __forceinline__ void mma_nvfp4_e4m3(float& c0, float& c1, float& c2,
+                                                unsigned a0, unsigned a1, unsigned a2, unsigned a3,
+                                                unsigned b0, unsigned b1, unsigned sfa,
+                                                unsigned sfb) {
++#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+     constexpr unsigned short kScaleBlockId  = 0;
+     constexpr unsigned short kScaleThreadId = 0;
+     asm volatile("mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X."
+@@ -111,6 +121,12 @@ __device__ __forceinline__ void mma_nvfp4_e4m3(float& c0, float& c1, float& c2,
+                  : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(sfa),
+                    "h"(kScaleBlockId), "h"(kScaleThreadId), "r"(sfb), "h"(kScaleBlockId),
+                    "h"(kScaleThreadId));
++#else
++    // NVFP4 block-scale MMA does not exist before the Blackwell family.
++    // Terminate loudly instead of failing ptxas; on targets without the
++    // format the artifact loader refuses the model long before this runs.
++    asm volatile("trap;\n");
++#endif
+ }
+ 
+ } // namespace ninfer::ops
+diff --git a/src/ops/linear/nvfp4/nvfp4_codec.cuh b/src/ops/linear/nvfp4/nvfp4_codec.cuh
+index b56419b0..472884f7 100644
+--- a/src/ops/linear/nvfp4/nvfp4_codec.cuh
++++ b/src/ops/linear/nvfp4/nvfp4_codec.cuh
+@@ -33,6 +33,7 @@ static_assert(alignof(Nvfp4QuantizedK16) == 8);
+ 
+ __device__ __forceinline__ void
+ pack_nvfp4_e2m1x16(const float2 (&values)[8], std::uint32_t& codes_lo, std::uint32_t& codes_hi) {
++#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+     asm volatile("{\n"
+                  ".reg .b8 b0;\n"
+                  ".reg .b8 b1;\n"
+@@ -58,6 +59,12 @@ pack_nvfp4_e2m1x16(const float2 (&values)[8], std::uint32_t& codes_lo, std::uint
+                    "f"(values[2].x), "f"(values[2].y), "f"(values[3].x), "f"(values[3].y),
+                    "f"(values[4].x), "f"(values[4].y), "f"(values[5].x), "f"(values[5].y),
+                    "f"(values[6].x), "f"(values[6].y), "f"(values[7].x), "f"(values[7].y));
++#else
++    // e2m1 conversion instructions require sm_100+. Terminate loudly
++    // instead of failing ptxas; decode paths stay functional via the CUDA
++    // headers' software emulation, but packing needs Blackwell hardware.
++    asm volatile("trap;\n");
++#endif
+ }
+ 
+ __device__ __forceinline__ Nvfp4QuantizedK16 quantize_nvfp4_k16(const __nv_bfloat16* source,

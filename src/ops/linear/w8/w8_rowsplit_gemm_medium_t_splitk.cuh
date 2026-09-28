@@ -13,6 +13,20 @@
 
 namespace ninfer::ops::detail {
 
+// Dynamic shared storage for the medium-T split-K kernel. sm_89 caps static shared at
+// 48 KiB, so this kernel (tuned for Blackwell's 228 KiB) always uses dynamic shared
+// memory; the launcher passes sizeof(...) and raises the opt-in attribute. On sm_120
+// the same size is well within the default dynamic budget, so this is a no-op there.
+template <int KSplits, int TileCols, int NGroups>
+union alignas(16) W8MediumTSplitKSharedStorage {
+    struct {
+        std::uint8_t code_shared[16][KSplits * 64];
+        __nv_bfloat16 b_shared[KSplits * NGroups][(TileCols / NGroups) * 64];
+    } s;
+    // The FP32 K-split reduction aliases b_shared via reinterpret_cast (b_shared is
+    // twice the float footprint), so the struct already covers the largest live layout.
+};
+
 template <int Hidden, int TileCols, int KSplits, int NGroups, int MinBlocks, class Output,
           bool AddResidual = false>
 __global__
@@ -32,8 +46,11 @@ __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void w8_rowsplit_medium_t_sp
     static_assert(TileCols % NGroups == 0 && kWarpCols % 8 == 0);
     static_assert(Hidden % kGroupK == 0 && kKernelWarps <= 32);
 
-    __shared__ __align__(16) std::uint8_t code_shared[kMmaRows][kGroupK];
-    __shared__ __align__(16) __nv_bfloat16 b_shared[kKernelWarps][kWarpCols * kTileK];
+    extern __shared__ __align__(16) unsigned char dynamic_shared[];
+    auto& storage = *reinterpret_cast<W8MediumTSplitKSharedStorage<KSplits, TileCols, NGroups>*>(
+        dynamic_shared);
+    auto& code_shared = storage.s.code_shared;
+    auto& b_shared    = storage.s.b_shared;
 
     const int tid        = static_cast<int>(threadIdx.x);
     const int warp       = tid >> 5;

@@ -39,8 +39,16 @@ void launch_active_cols(const Tensor& x, const Weight& weight, Tensor& out, cuda
     using Schedule = W8SmallTMmaSchedule<KWarps, TileCols, MinBlocks, ScaleAccess, ActivationCache>;
     static_assert((kRows % kRowsPerCta) == 0);
     const W8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), kRows};
+    constexpr std::size_t kSharedBytes = kW8SmallTMmaSharedBytes<Schedule, false, ActiveCols>;
+    if constexpr (kW8SmallTMmaDynamicShared<Schedule, false, ActiveCols>) {
+        static const cudaError_t attr = cudaFuncSetAttribute(
+            w8_small_t_mma_kernel<Geometry, ActiveCols, Schedule, W8ContiguousOutput,
+                                  W8SmallTMmaStoreEpilogue, W8SmallTMmaIdentityRows, false, false>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(kSharedBytes));
+        (void)attr;
+    }
     w8_small_t_mma_kernel<Geometry, ActiveCols, Schedule>
-        <<<kRows / kRowsPerCta, Schedule::kThreads, 0, stream>>>(
+        <<<kRows / kRowsPerCta, Schedule::kThreads, kSharedBytes, stream>>>(
             static_cast<const __nv_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
             static_cast<const std::uint8_t*>(weight.scales), output);
@@ -65,8 +73,15 @@ void require_problem(const Tensor& x, const Weight& w, const Tensor& out) {
 template <int TileCols, int KSplits, int NGroups, int MinBlocks>
 void launch_medium(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
     const W8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), kRows};
+    constexpr std::size_t kSharedBytes =
+        sizeof(W8MediumTSplitKSharedStorage<KSplits, TileCols, NGroups>);
+    static const cudaError_t attr = cudaFuncSetAttribute(
+        w8_rowsplit_medium_t_splitk_kernel<kHidden, TileCols, KSplits, NGroups, MinBlocks,
+                                           W8ContiguousOutput>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(kSharedBytes));
+    (void)attr;
     w8_rowsplit_medium_t_splitk_kernel<kHidden, TileCols, KSplits, NGroups, MinBlocks>
-        <<<kRows / kRowsPerCta, KSplits * NGroups * 32, 0, stream>>>(
+        <<<kRows / kRowsPerCta, KSplits * NGroups * 32, kSharedBytes, stream>>>(
             static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
             static_cast<const std::uint8_t*>(w.scales), output, x.ne[1]);
 }

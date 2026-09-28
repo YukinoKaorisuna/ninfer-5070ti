@@ -856,8 +856,13 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
         }
         break;
     }
-    if (device.sm() != 120) {
-        throw std::invalid_argument("Qwen3.6 family runtime requires compute capability 12.0");
+    // Kernel layer is Ada-compatible (tools/patch/0002-arch-guard-preblackwell-ptx.patch):
+    // PDL degrades to a no-op below sm_90 and FP8 MMA uses the sm_89-native instruction.
+    // The bundled groupwise-int weights never touch NVFP4 (which traps pre-Blackwell), and
+    // the fatbin carries compute_89 PTX so newer devices JIT it. Accept sm_89 and up.
+    if (device.sm() < 89) {
+        throw std::invalid_argument(
+            "Qwen3.6 family runtime requires compute capability 8.9 (Ada) or newer");
     }
 }
 
