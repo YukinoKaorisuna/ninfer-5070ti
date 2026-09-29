@@ -74,6 +74,8 @@ target_link_libraries(ninfer_nvfp4_tma PRIVATE ninfer_core CUDA::cudart CUDA::cu
 # Shared mathematical Ops. The list is intentionally explicit: adding a
 # source is a build-boundary decision, not an accidental recursive-glob side effect.
 add_library(ninfer_ops STATIC
+  # sm_86 has no FP8 tensor cores: replace the A8 kernel TUs with stubs
+  $<$<STREQUAL:${CMAKE_CUDA_ARCHITECTURES},86>:ops/linear/fp8/fp8_a8_sm86_stub.cpp>
   ops/common/act_quant_g64.cu
   ops/common/int8_proj_launch.cu
   ops/launcher/add_bias.cu
@@ -132,7 +134,7 @@ add_library(ninfer_ops STATIC
   ops/attn_input_proj/bf16/bf16_attn_input_plan.cpp
   ops/attn_input_proj/fp8/fp8_attn_input_decode.cu
   ops/attn_input_proj/fp8/fp8_attn_input_small_t.cu
-  ops/attn_input_proj/fp8/fp8_attn_input_a8.cu
+  $<$<NOT:$<STREQUAL:${CMAKE_CUDA_ARCHITECTURES},86>>:ops/attn_input_proj/fp8/fp8_attn_input_a8.cu>
   ops/attn_input_proj/fp8/fp8_attn_input_plan.cpp
   ops/attn_input_proj/nvfp4/nvfp4_attn_input_decode.cu
   ops/attn_input_proj/nvfp4/nvfp4_attn_input_small_t.cu
@@ -150,7 +152,7 @@ add_library(ninfer_ops STATIC
   ops/attn_input_proj/w8/w8_attn_input_plan.cpp
   ops/gdn_input_proj/fp8/fp8_gdn_input_decode.cu
   ops/gdn_input_proj/fp8/fp8_gdn_input_small_t.cu
-  ops/gdn_input_proj/fp8/fp8_gdn_input_a8.cu
+  $<$<NOT:$<STREQUAL:${CMAKE_CUDA_ARCHITECTURES},86>>:ops/gdn_input_proj/fp8/fp8_gdn_input_a8.cu>
   ops/gdn_input_proj/fp8/fp8_gdn_input_plan.cpp
   ops/gdn_input_proj/fp8/fp8_gdn_conv_fused.cu
   ops/gdn_input_proj/fp8/fp8_gdn_conv_plan.cpp
@@ -189,7 +191,7 @@ add_library(ninfer_ops STATIC
   ops/linear/fp8/fp8_small_t.cu
   ops/linear/fp8/fp8_a16_small_t_mma.cu
   ops/linear/fp8/fp8_a16_gemm_mma.cu
-  ops/linear/fp8/fp8_a8.cu
+  $<$<NOT:$<STREQUAL:${CMAKE_CUDA_ARCHITECTURES},86>>:ops/linear/fp8/fp8_a8.cu>
   ops/linear/fp8/fp8_dispatch.cpp
   ops/linear/nvfp4/nvfp4_format.cpp
   ops/linear/nvfp4/nvfp4_gemv.cu
@@ -215,7 +217,7 @@ add_library(ninfer_ops STATIC
   ops/linear_add/nvfp4/nvfp4_linear_add_plan.cpp
   ops/linear_add/fp8/fp8_linear_add_decode.cu
   ops/linear_add/fp8/fp8_linear_add_small_t.cu
-  ops/linear_add/fp8/fp8_linear_add_a8.cu
+  $<$<NOT:$<STREQUAL:${CMAKE_CUDA_ARCHITECTURES},86>>:ops/linear_add/fp8/fp8_linear_add_a8.cu>
   ops/linear_add/fp8/fp8_linear_add_plan.cpp
   ops/linear_add/q5/q5_linear_add_gemm_mma.cu
   ops/linear_add/q5/q5_linear_add_gemm_simt.cu
@@ -235,7 +237,7 @@ add_library(ninfer_ops STATIC
   ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_plan.cpp
   ops/linear_swiglu/fp8/fp8_linear_swiglu_decode.cu
   ops/linear_swiglu/fp8/fp8_linear_swiglu_small_t.cu
-  ops/linear_swiglu/fp8/fp8_linear_swiglu_a8.cu
+  $<$<NOT:$<STREQUAL:${CMAKE_CUDA_ARCHITECTURES},86>>:ops/linear_swiglu/fp8/fp8_linear_swiglu_a8.cu>
   ops/linear_swiglu/fp8/fp8_linear_swiglu_plan.cpp
   ops/linear_swiglu/w8/w8_linear_swiglu_decode.cu
   ops/linear_swiglu/w8/w8_dflash2_linear_swiglu.cu
